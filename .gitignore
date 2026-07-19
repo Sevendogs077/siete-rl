@@ -1,0 +1,196 @@
+# =========================
+# Python
+# =========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+.Python
+.python-version
+!.python-version
+
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# =========================
+# Virtual environments
+# =========================
+
+.venv/
+venv/
+env/
+ENV/
+conda_env/
+.envrc
+
+# =========================
+# IDE / Editor / OS
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# =========================
+# Secrets / local config
+# =========================
+
+.env
+.env.*
+!.env.example
+
+/secrets/
+*.pem
+*.key
+*.crt
+*.token
+
+# =========================
+# Logs
+# =========================
+
+/logs/
+*.log
+*.out
+*.err
+
+# =========================
+# RepoRecover runtime outputs
+# =========================
+
+/artifacts/
+/reports/generated/
+
+/outputs/*
+!/outputs/.gitkeep
+
+/runs/*
+!/runs/.gitkeep
+
+# =========================
+# Local datasets, repo caches, and external references
+# =========================
+
+/data/
+/.external/
+
+# =========================
+# Model checkpoints and large binary artifacts
+# =========================
+
+/checkpoints/
+/models/
+/weights/
+/ckpts/
+
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.gguf
+*.onnx
+adapter_model.bin
+pytorch_model.bin
+model.safetensors
+adapter_model.safetensors
+
+# Dataset / numeric cache formats. JSON/JSONL stay trackable by default so
+# small fixtures, configs, and golden files can be committed deliberately.
+*.parquet
+*.arrow
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# =========================
+# HuggingFace / vLLM / Ray / experiment caches
+# =========================
+
+/.cache/
+/.cache_huggingface/
+/hf_cache/
+/huggingface/
+/transformers_cache/
+
+/ray_results/
+/.ray/
+/plasma_store/
+/wandb/
+/mlruns/
+/tensorboard/
+/tb_logs/
+
+# =========================
+# Temporary workspaces
+# =========================
+
+/tmp/
+/temp/
+/.cache_repo_recover/
+
+/workspaces/
+/sandbox/
+/.sandbox/
+/docker_workspaces/
+/eval_workspaces/
+/agent_workspaces/
+
+# Generated task repositories and local task workspaces. Hand-written task
+# fixtures belong under fixtures/ and remain trackable.
+/tasks/generated/
+/tasks/tmp/
+/tasks/workspaces/
+/tasks/cache/
+
+# =========================
+# Docker / local runtime
+# =========================
+
+/.docker/
+/docker_tmp/
+*.pid
+
+# =========================
+# Jupyter
+# =========================
+
+.ipynb_checkpoints/
+
+# =========================
+# Temporary patch/editor files
+# =========================
+
+*.diff.tmp
+*.patch.tmp
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
