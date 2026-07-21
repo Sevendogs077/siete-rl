@@ -1,4 +1,4 @@
-# TRL-based SWE Agent 实施前架构与迁移计划
+# TRL-based SWE Agent 架构、迁移与实施纠偏计划
 
 > 调研日期：2026-07-18
 >
@@ -6,11 +6,13 @@
 >
 > 新项目 filesystem path：`/home/2025user/zyp/work/2607_trl_swe_agent`（只是当前物理目录名，不是 Python package identity；当前报告文件为`docs/plan.md`）
 >
-> 目标调研基线：TRL 1.8.0（尚未在本机安装或执行；依赖组合尚未锁定）
+> 初始调研基线：TRL 1.8.0（2026-07-18时尚未在本机安装或执行；当前实施事实与已冻结版本见第21节）
 >
 > 实施前复核补充：2026-07-19（重新核验本地模型资产、Docker container 生命周期、工具合同、运行输出布局、模型训练方式、Python 包命名与领域 schema）
+>
+> 实施中整体纠偏：2026-07-20（依据第21节事实记录，删除正式设计中的多run抽样层级、跨run汇总与非零参数更新硬目标；统一为一次CLI调用创建一个run、一套Trainer/vLLM和一条run内policy状态；2026-07-20第二次审查进一步把进程内CUDA计数降为诊断观察，将正式run的native policy path与Trainer group consumption改为并列验收事实）
 
-> **实施冻结边界：本报告仍处于用户审查与修订阶段。只有用户明确确认“计划修改完毕，可以开始实施”后，第13节阶段0及其后续第一阶段工作才获得一次性连续执行授权。在此之前不得创建 `pyproject.toml`、`uv.lock`、`.venv`，不得编写源码、正式配置、脚本或测试，不得复制数据/资产、安装依赖、执行 import/CUDA/vLLM 资格、运行 Docker、加载模型或启动训练。下文所有“实施”“资格”“测试”均是获批后的条件式计划，不是当前操作授权。**[用户决策]
+> **当前冻结边界：项目已经产生第21节记录的实现与运行产物，但当前只授权修订`docs/plan.md`。在用户审查并明确授权继续前，不得修改任何源码、配置、测试、依赖或运行产物，不得执行import/CUDA/vLLM/Docker资格、加载模型或启动训练。下文修订后的“实施”“资格”“测试”均是后续获批后的控制合同，不是当前操作授权。**[用户决策]
 
 ## 0. 结论先行
 
@@ -25,7 +27,7 @@
 5. **真实运行使用单层 `outputs/<run-id>/`，该目录直接作为 Trainer `output_dir`。** 不再配置 run name，也不建立模型/算法系列目录。Trainer checkpoint 原样保留为 `checkpoint-<global_step>/`；一次 rollout 与一个 checkpoint 没有一一对应关系。根级 `run.json` 改为本 run 唯一、动态、综合的结构化记录；`batch.json`/`group.json`表达 generation batch、group 和 optimizer step 的最小关联，不保存 TRL 私有 advantage/logprob tensor。[官方接口事实+用户决策]
 6. **仓库路径与 Python 包身份没有冲突。** 当前 filesystem path 可以继续叫 `2607_trl_swe_agent`；唯一 Python 包和内部 import 永远是 `src/swe_agent/` 与 `from swe_agent...`。核心领域对象统一在 `src/swe_agent/models.py`，保留 `Task/Environment/Evaluation/Sample/Action/Observation/Step/Trajectory/Verification`，不创建 `core/`、`EnvironmentSpec/QualifiedTask/RunContext` 等层级或中间对象。[用户决策+建议]
 
-主方案没有已证实的架构致命缺口，但当前**尚未获得实施授权**。用户给出一次开始指令后，Agent按第13节连续完成环境、骨架、接口资格、领域迁移、Docker和真实7B闭环，不在每个GPU/Docker步骤重新请求批准。7B生成后端固定为TRL原生vLLM colocate+sleep、TP1；若wheel、ABI、显存、sleep/wake或PEFT权重同步任一gate失败，立即停止对应阶段并忠实记录证据，不切Transformers generate、独立server、其他vLLM拓扑或自研生成循环，也不修改已经计划并落盘的依赖与配置。30B QLoRA只实现配置和共享边界，不在第一阶段运行。**最终审计判断：本报告的第一阶段已无需要实施Agent临场拍板的设计分支，用户未来明确授权后可以按阶段0→7直接顺序执行；“可执行”只表示步骤、失败合同和验收均已确定，不表示vLLM组合已经在本机通过。**[用户决策+审计结论]
+主方案没有已证实的架构致命缺口，但第21节已经证明当前实现和真实run尚未通过核心闭环，后续实施现已暂停等待本修订版审查。获批继续后，Agent按第13节从实际未通过的门禁继续，不重做已有且仍有效的环境/领域基础。7B生成后端固定为TRL原生vLLM colocate+sleep、TP1；若wheel、ABI、显存、sleep/wake或PEFT权重同步任一gate失败，立即停止对应阶段并忠实记录证据，不切Transformers generate、独立server、其他vLLM拓扑或自研生成循环。30B QLoRA只实现配置和共享边界，不在第一阶段运行。**最终运行边界是一条单run控制流：一次CLI调用只创建一个run，只构造一次Trainer/vLLM并维持该run唯一policy状态；execution failure或interruption直接终止并记录本run，不在同一次CLI内创建另一run；正常policy验收未达标则正常结束该run并记录failed验收事实。**[用户决策+审计结论]
 
 ### 0.1 强制非目标：永久排除网络安全、认证和通用并发治理
 
@@ -54,17 +56,17 @@ Docker inspect Size: 2,849,787,451 bytes（约 2.85 GB / 2.65 GiB）
 
 - Dataset/loader 即使持有包含其他行的既有 Parquet，也只能选择上述 exact instance；存在其他元数据不构成运行其他任务的授权。配置、资格 fixture 和正式闭环都必须 fail-closed 拒绝其他 `instance_id` 或 image；不要为此设计通用 allowlist 服务，一个固定常量/配置断言即可；
 - 禁止代码、脚本、测试或依赖安装过程隐式执行 `docker pull/build/load`，也禁止在固定镜像缺失或 identity 不匹配时自动修复。必须直接失败并报告；
-- “增加第二个任务”“扩大样本集”或“换一个更容易产生非退化 reward 的任务”均不属于本计划，**没有用户主动修改范围并逐次明确批准，不得下载、拉取、启动或测试**；即使机器上偶然已有其他任务镜像，也不能据此直接运行；
+- “增加第二个任务”“扩大样本集”或“换一个更容易获得特定 reward 分布的任务”均不属于本计划，**没有用户主动修改范围并逐次明确批准，不得下载、拉取、启动或测试**；即使机器上偶然已有其他任务镜像，也不能据此直接运行；
 - 请求用户批准新增任务前，必须先提供空间说明：任务 ID/数量、数据来源与预计下载量、每个 image tag/digest/platform、registry 传输量估计、镜像本地 `Size` 估计、共享 layer 导致的增量不确定性、临时下载/解包峰值、`data/`、`assets/`与`outputs/`预计增长、目标磁盘当前可用空间、最终预计新增占用，以及保留/人工删除方案。估计无法从 registry metadata 确认时必须标注区间和不确定性，不能先下载再补报；
-- 未得到批准时，有效学习验收只能增加同一固定任务的真实 rollout/group 采样预算，或诚实报告 reward 退化；不能静默换任务。
+- 未得到批准时只能运行固定任务，并如实记录该run实际产生的reward分布；不能扩大采样预算、自动启动新run或静默换任务。
 
 这里不建设通用 Docker image manager。固定镜像的目标生命周期是：**只读 inspect → exact image ID/platform 检查 → `--pull=never` 复用 → 长期保留**。项目不自动 `rmi/prune`，镜像删除只能由用户在查看占用和影响后手动决定。容器则是另一条生命周期：每条 rollout/verifier 创建 fresh container，结束后按明确 container ID 在 `finally` 删除。
 
 ### 0.3 一次实施授权与连续执行边界
 
-当前仍是计划制定阶段，未获得任何实施授权；首页冻结边界保持有效。用户一旦明确确认“计划修改完毕，可以开始实施”，实施Agent即获得**完成第一阶段7B真实闭环所需的一次性连续授权**，无需在阶段之间反复询问。[用户决策]
+当前是实施后纠偏计划审查阶段，继续实现未获授权；首页冻结边界保持有效。用户一旦明确确认修订计划可以继续实施，实施Agent即获得**从当前事实状态推进到第一阶段7B真实闭环所需的一次性连续授权**，无需在已批准范围的门禁之间反复询问。[用户决策]
 
-该授权包含：创建`pyproject.toml/uv.lock/.venv`，执行`uv lock/uv sync --locked`，编写源码、两份配置、`swe-agent` CLI、`grpo.sh`和测试；运行静态/CPU/fixture测试；执行CUDA与7B模型资格；启动7B vLLM colocate/sleep资格；使用固定`getmoto__moto-7023`镜像执行真实Docker工具/verifier集成；运行固定4条rollout的真实GRPO group、一次optimizer step、checkpoint/save/reload，以及在32条rollout总预算内继续验证有效学习。
+该授权包含：创建`pyproject.toml/uv.lock/.venv`，执行`uv lock/uv sync --locked`，编写源码、两份配置、`swe-agent` CLI、`grpo.sh`和测试；运行静态/CPU/fixture测试；执行CUDA与7B模型资格；启动7B vLLM colocate/sleep资格；使用固定`getmoto__moto-7023`镜像执行真实Docker工具/verifier集成；最后由一次正式CLI调用创建一个run，在同一Trainer/vLLM/policy状态下运行固定4条rollout的真实GRPO group、完成一次基于该在线group的GRPO optimizer step并保存checkpoint/final adapter。该step是否产生非零parameter update只在运行后观察。
 
 连续授权仍有明确范围：
 
@@ -72,9 +74,9 @@ Docker inspect Size: 2,849,787,451 bytes（约 2.85 GB / 2.65 GiB）
 - 不下载或运行第二个SWE-Gym任务，不pull/build/load/rmi/prune Docker image；第0.2节边界保持不变；
 - 不自动修改系统driver、安装系统级CUDA、fork/patch第三方库、扩展到多用户/多作业平台或改变binary reward；
 - 每个耗GPU/Docker的动作执行前仍须由Agent自己打印即将运行的命令、GPU/显存、固定image/container数量、预计时长、磁盘增长与cleanup范围，作为可审计preflight，**但这不是再次请求用户授权，也不得因此暂停等待回复**；
-- 普通`pytest`仍不应意外触发大型运行；真实GPU、vLLM、Docker和系统闭环使用显式marker或正式CLI调用，由第13节顺序主动执行。
+- 普通`pytest`仍不应意外触发大型运行；真实GPU、vLLM、Docker和系统闭环使用显式marker或正式CLI调用，由第13节顺序主动执行；正式CLI无论execution failure、interruption还是正常policy验收未达标，结束后都不得自动重新执行。
 
-因此，真实7B vLLM不是“实现后私自追加”的无关大型实验，而是固定生成后端资格；一次真实GRPO也不是可省略测试，而是项目系统验收。两者都在用户给出一次开始指令后由Agent按门禁连续推进。只有30B运行、第二任务、系统级环境变更或超出32条rollout预算才需要新的用户决定。[用户决策]
+因此，真实7B vLLM不是“实现后私自追加”的无关大型实验，而是固定生成后端资格；一次真实GRPO也不是可省略测试，而是项目系统验收。两者都在用户给出一次开始指令后由Agent按门禁连续推进。重新执行正式CLI、运行30B、增加第二任务或进行系统级环境变更都必须由用户另行明确启动或授权。[用户决策]
 
 ## 1. 调研范围、方法与证据标记
 
@@ -156,16 +158,16 @@ TRL 1.8.0 仍是本报告分析的**目标源码基线**，不是已经解析的
 
 | 资格层 | 获批后的操作与产物 | 通过标准 | 未通过时含义 |
 |---|---|---|---|
-| A. 能解析并冻结 | 在上述边界内最多尝试3组不重复Torch/vLLM精确候选；每组一次`uv lock` | 首个成功解包含全部直接依赖（包括vLLM、bitsandbytes），来源可解释且Torch/vLLM wheel/CUDA variant共同选择；记录失败候选与原因，成功后冻结manifest/lock hash | 仅是metadata/索引结论；三组均失败即保留最后provisional manifest和attempt摘要并停止，不删除依赖或改后端 |
+| A. 能解析并冻结 | 在上述边界内最多评估3组不重复Torch/vLLM精确候选；每组执行一次`uv lock` | 首个成功解包含全部直接依赖（包括vLLM、bitsandbytes），来源可解释且Torch/vLLM wheel/CUDA variant共同选择；记录失败候选与原因，成功后冻结manifest/lock hash | 仅是metadata/索引结论；三组均失败即保留最后provisional manifest和候选评估摘要并停止，不删除依赖或改后端 |
 | B. 能安装 | `uv sync --locked`到新`.venv` | lock中的wheel全部取得并安装，无意外sdist/CUDA source build；bitsandbytes wheel也必须安装成功 | 解析成功不等于wheel可取得；BNB wheel失败会阻断唯一环境及7B启动，但wheel已安装只证明安装门禁，不证明BNB可import、CUDA扩展可用或4-bit能力成立 |
 | C. 基础 import | Agent直接调用新`.venv/bin/python`导入并记录版本/路径 | Python、Torch、Transformers、TRL、PEFT、Accelerate、datasets、jmespath、PyArrow、Pydantic、PyYAML和vLLM均来自新`.venv` | 证明计划内Python模块装载；**不要求bitsandbytes import**，但vLLM import失败即停止7B路径 |
 | D. 7B CUDA/生成后端 | 先验证Torch CUDA，再做vLLM extension/ABI探针 | A100、Torch与vLLM CUDA extension可用，才能进入colocate资格 | 不测试BNB CUDA；vLLM失败即停止，不改driver、依赖、配置、后端或拓扑 |
 | E. 接口能用 | 固定 7B tokenizer；TRL response schema、native tool render/parse、最小 environment 多轮 fixture | 可使用最小第三方接口 fixture，但不得把 fixture 的 completion/reward 当项目闭环 | 证明 tool/environment contract，不证明真实模型或 vLLM |
 | F. 7B BF16 LoRA | 真实7B BF16 base + PEFT LoRA `GRPOTrainer`构造、精确target/trainable set、最小forward/backward、原生save/reload | base frozen、仅预期LoRA参数可训练、无device-map错误；`quantization_config is None`且`load_in_4bit=false` | 证明第一阶段训练模型路径，不证明rollout backend；不要求Params4bit或任何BNB 4-bit能力 |
 | G. 7B vLLM | 验证单卡colocate TP1 + sleep/wake + PEFT merged/full-weight sync | 必须由同一个`GRPOTrainer/environment_factory`驱动真实policy，且配置始终`use_vllm=true` | 任一项失败即停止并记录；不切Transformers、独立server、自研loop或其他拓扑 |
-| 完整系统组合（对应第16.2节K门禁） | 真实 SWE-Gym/Docker/verifier/group/one step | 第15节系统闭环标准 | 这是唯一“环境和项目闭环可用”的结论；其前还必须通过第16.2节I/J记录与Docker门禁 |
+| 完整系统组合（对应第16.3节两项并列事实） | 真实 SWE-Gym/Docker/verifier/group/one step | 第15节系统闭环标准 | 这是唯一“环境和项目闭环可用”的结论；其前还必须通过第16.2节I/J记录与Docker门禁 |
 
-E层允许小型第三方接口fixture，但不得使用人工completion、mock reward或mock Docker宣称项目闭环。A–G任一单层或若干层通过都只能使用对应层名称，不能合并写成“环境可用”或“项目闭环可用”；只有第16.2节K门禁能给出系统闭环结论。状态还必须逐级区分：bitsandbytes写入依赖声明、wheel安装、BNB import、BNB CUDA extension、4-bit模型加载、30B MoE QLoRA训练、30B与vLLM同步、30B完整配置通过，八者互不等价。前两项属于单一环境A/B硬门；后六项只属于未来30B运行资格，不得反向要求7B执行BNB能力探针。[用户决策+建议]
+E层允许小型第三方接口fixture，但不得使用人工completion、mock reward或mock Docker宣称项目闭环。A–G任一单层或若干层通过都只能使用对应层名称，不能合并写成“环境可用”或“项目闭环可用”；只有第16.3节`native_policy_path_reached`与`trainer_group_consumed`在同一正式run中都为true，才能给出系统闭环结论。状态还必须逐级区分：bitsandbytes写入依赖声明、wheel安装、BNB import、BNB CUDA extension、4-bit模型加载、30B MoE QLoRA训练、30B与vLLM同步、30B完整配置通过，八者互不等价。前两项属于单一环境A/B硬门；后六项只属于未来30B运行资格，不得反向要求7B执行BNB能力探针。[用户决策+建议]
 
 30B QLoRA未来仍使用同一个环境，但其运行资格链不在第一阶段执行：`bitsandbytes import → BNB CUDA/4-bit能力 → BitsAndBytesConfig与真实Params4bit load → Qwen3 MoE模块枚举与PEFT target精确命中 → 量化base冻结与最小forward/backward → vLLM BNB realization → PEFT同步 → sleep/wake → 基于4×A100选择资源拓扑`。第一阶段只保证30B YAML能够完整表达模型/QLoRA/PEFT/vLLM/SWE共享边界，并以`runtime_qualified=false`阻止误启动；不从7B结果外推30B资源结论。[用户决策+待实施验证]
 
@@ -237,11 +239,11 @@ scripts/grpo_once.sh
       → current/ref logprob、clip、KL、backward、optimizer.step
       → adapter-only checkpoint + optimizer_step.json
   → 重启 vLLM → AdapterPublisher.activate/verify policy_t+1
-  → post-update real rollout + verifier
+  → 历史设计中的step后real rollout + verifier
   → run_report.json
 ```
 
-这条链的核心 orchestrator 是 `SingleInstanceWorkflow`，不是 `AgentLoop`。`AgentLoop` 只控制一条 rollout；`Workflow` 还控制 group、verifier、batch、GPU 交接、Trainer、policy publication、post-update probe 和总报告。[代码事实]
+这条历史链的核心 orchestrator 是 `SingleInstanceWorkflow`，不是 `AgentLoop`。`AgentLoop` 只控制一条 rollout；`Workflow` 还控制 group、verifier、batch、GPU 交接、Trainer、policy publication、当时的step后probe和总报告。[代码事实]
 
 ### 2.3 Task、数据和已验证样例
 
@@ -333,7 +335,7 @@ verifier **不复用 rollout 容器**。`SWEGymVerifier.verify()`（`verifier.py
 
 `PolicyTrace`（`training/policy_trace.py:59,104,135`）则是自研 Trainer 的概率 sidecar：每个 assistant segment 保存完整 rendered messages、prompt/completion token IDs、old logprobs、action mask、sampling config、policy/model/template/tokenizer/tool-contract digest，并重放/检查 Qwen tokenization。它解决了旧“外部 vLLM 采样 + 自研 Trainer 重算”的身份与概率合同。TRL 自己已经持有 `completion_ids`、old/current/ref/sampling logprob、completion/tool mask、advantages；完整迁移 `PolicyTrace` 会制造第二个 Trainer 内部状态源，**不迁移**。
 
-`GRPOBatch`（`training/batch.py:105`）又复制 reward、advantage、trace digest 和 artifact path，是自研 worker 的输入；新项目由 TRL sampler/buffer 负责，不迁移。训练侧只把 TRL 公开指标、本项目的有效学习判据和 checkpoint 引用写入动态 `run.json`；generation batch/group 的自然统计分别写入 `batch.json`/`group.json`，不建立第二套训练张量证据，见第 18 节。
+`GRPOBatch`（`training/batch.py:105`）又复制 reward、advantage、trace digest 和 artifact path，是自研 worker 的输入；新项目由 TRL sampler/buffer 负责，不迁移。训练侧只把TRL公开指标、本项目的核心闭环判定、非门禁数值观察和checkpoint引用写入动态`run.json`；generation batch/group的自然统计分别写入`batch.json`/`group.json`，不建立第二套训练张量证据，见第18节。
 
 ### 2.7 旧自研 GRPO 的契约
 
@@ -360,10 +362,10 @@ verifier **不复用 rollout 容器**。`SWEGymVerifier.verify()`（`verifier.py
 | run | 已真实到达 | 阻塞/含义 |
 |---|---|---|
 | `grpo-20260717T105121Z-c51237f1` | vLLM 启动；两条 fresh Docker rollout；模型实际生成 `list_files(moto/lakeformation)`；group/artifacts | 历史 client 把末尾 `<\|im_end\|>` 当语义文本，故两条被判 invalid，reward `[0,0]`、advantage 0；当前 `runtime/model.py` 已新增只移除一个已校验 EOS boundary 的修复。随后 vLLM 已停止，但 GPU 3 仅 46,436 MiB free，低于 70,000 MiB Trainer 门槛，未进入当前 Trainer。 |
-| `grpo-20260716T143239Z-531b87be` | 历史配置下真的 `optimizer_steps=1`、adapter-only save；报告称 LoRA hash 变化 | group 退化，`train_loss=0`、`gradient_norm=0`；hash 变化不能证明由非零学习信号造成。之后重启 vLLM 的 adapter activation 返回非 JSON，未完成 post-update rollout/report。它不是当前 HEAD/当前 GPU 配置闭环。 |
+| `grpo-20260716T143239Z-531b87be` | 历史配置下真的 `optimizer_steps=1`、adapter-only save；报告称 LoRA hash 变化 | group 退化，`train_loss=0`、`gradient_norm=0`；hash 变化不能证明由非零学习信号造成。之后重启 vLLM 的 adapter activation 返回非 JSON，未完成当时设计的post-step rollout/report。它不是当前 HEAD/当前 GPU 配置闭环。 |
 | `grpo-20260718T024136Z-e714f845` / `...T122433Z-26370ae7` | 尝试当前 30B vLLM TP2 | 前者 model load 后 KV cache 余量约 0.02 GiB、无法满足 32K；后者 worker 各约 30,008 MiB，但 1800 秒启动资格超时，清理成功。最新进展甚至未到 rollout。 |
 
-所有检查到的正式 run 中没有最终 `run_report.json`。[运行事实] 当前真实状态应表述为：**任务/Docker/verifier/rollout 的关键资产已分别或部分真实验证；历史一次零梯度 optimizer step 已发生；当前 HEAD 的 system closed loop 和 effective learning 均未完成。**
+所有检查到的正式 run 中没有最终 `run_report.json`。[运行事实] 当前真实状态应表述为：**任务/Docker/verifier/rollout 的关键资产已分别或部分真实验证；历史一次零梯度 optimizer step 已发生；当前 HEAD 的 system closed loop 未完成，也没有非零parameter update证据。**
 
 ### 3.3 可直接承接的已验证资产
 
@@ -431,7 +433,7 @@ Qwen2.5-Coder-7B 官方 [`tokenizer_config.json`](https://huggingface.co/Qwen/Qw
 
 | 参数 | 1.8 默认 | 第一阶段建议 | 来源 | 运行/数学语义 |
 |---|---:|---:|---|---|
-| `num_generations` | 8 | 4；仅最小接口fixture可用2 | 显式 | 正式同一prompt group固定4条rollout，与输出目录`0000..0003`一致；不在有效学习阶段临时改group size |
+| `num_generations` | 8 | 4；仅最小接口fixture可用2 | 显式 | 正式同一prompt group固定4条rollout，与输出目录`0000..0003`一致；group size不因reward结果改变 |
 | `num_iterations` | 1 | 1 | 显式 | 同一 rollout batch 更新一次，不复用多轮 PPO epoch |
 | `loss_type` | `dapo` | `dapo` | 显式固定默认 | active model tokens 的 loss 总和除以全局 accumulated batch 的 active-token 数；非旧自研 token-mass/segment 聚合 |
 | `scale_rewards` | `group` | `group` | 显式固定默认 | 每个 group 先减均值，再除 group nan-aware std（源码加小 epsilon）；退化 group advantage 0 |
@@ -461,7 +463,7 @@ Qwen2.5-Coder-7B 官方 [`tokenizer_config.json`](https://huggingface.co/Qwen/Qw
 
 `mask_truncated_completions` 第一阶段固定为 TRL 1.8 默认 `False`，避免在尚无真实长度分布时主动改变标准基线。截断仍由finalizer记录为策略失败0；实施Agent不得根据首轮结果自行改为True。任何超出第一阶段的截断策略实验都需要先修改计划。[用户决策+建议]
 
-第一阶段训练调度值同时固定为`per_device_train_batch_size=1`、`gradient_accumulation_steps=1`、`num_iterations=1`、`max_steps=1`、`logging_steps=1`、`save_strategy="steps"`、`save_steps=1`、`save_total_limit=2`和`log_completions=False`。任何由TRL派生的`generation_batch_size/steps_per_generation`必须通过锁定版本配置校验；校验失败即修正配置关系，不通过增加第二套训练循环解决。[用户决策+建议]
+第一阶段验收run的训练调度值固定为`per_device_train_batch_size=1`、`gradient_accumulation_steps=1`、`num_iterations=1`、`max_steps=1`、`logging_steps=1`、`save_strategy="steps"`、`save_steps=1`、`save_total_limit=2`和`log_completions=False`。`max_steps=1`只限定本阶段验收run执行一次基于真实在线group的GRPO optimizer step，不引入run外抽样层级；一次CLI仍只创建该一个run和一套Trainer/vLLM。optimizer step不等于非零parameter update：若advantage/gradient为零，step后policy可在数值上不变。任何由TRL派生的`generation_batch_size/steps_per_generation`必须通过锁定版本配置校验；校验失败即修正配置关系，不通过增加第二套训练循环解决。[用户决策+建议]
 
 ### 4.5 reward、advantage、mask、loss 和 optimizer
 
@@ -699,7 +701,7 @@ infrastructure failure
 
 ### 6.6 metadata和落盘边界
 
-第一阶段九个核心领域对象均不提供任意 `metadata: dict`。旧 metadata 中的正式事实按消费者决定：`Observation.exit_code/timed_out/truncated/error_type`显式建模；dataset revision、模型路径、依赖版本、seed、image inspect、container ID 与每次 cleanup attempt 进入动态 `run.json`。没有控制流消费者的 provider response ID、timestamp、duration 和 changed-path convenience 字段不进入核心模型，必要时只写主日志。[代码事实+用户决策]
+第一阶段九个核心领域对象均不提供任意 `metadata: dict`。旧 metadata 中的正式事实按消费者决定：`Observation.exit_code/timed_out/truncated/error_type`显式建模；dataset revision、模型路径、依赖版本、seed、image inspect、container ID 与cleanup操作历史进入动态 `run.json`。没有控制流消费者的 provider response ID、timestamp、duration 和 changed-path convenience 字段不进入核心模型，必要时只写主日志。[代码事实+用户决策]
 
 `Trajectory`只保存 task/environment 关联、连续 Steps 和 termination；不保存完整 messages、patch 正文/hash/path、`Verification`/ref、cleanup/ref、container ID、reward、run metadata、checkpoint 或 Trainer 状态。同一 rollout 目录天然表达 `messages.json/trajectory.json/final_patch.diff/verifier.json` 的归属；资源清理历史统一在根级 `run.json`，无需把文件关系编码回领域对象。[建议+用户决策]
 
@@ -710,11 +712,11 @@ infrastructure failure
 | 领域执行 | `Task/Environment/Sample`与`Trajectory(Step(Action,Observation), termination)` | TRL messages不反向覆盖；Trajectory不装文件引用 |
 | wire messages | TRL structured prompt/completion → `messages.json` | Action/Observation无wire ID/message index |
 | patch/verification | 同一rollout目录的`final_patch.diff`、成功时`verifier.json` | 不嵌Trajectory；不在`run.json`复制正文 |
-| cleanup | 根级动态`run.json.cleanup`，分别保留container、子进程与GPU allocation的释放证据及全部attempt | 不创建rollout级清理文件；不嵌Trajectory |
+| cleanup | 根级动态`run.json.cleanup`，分别保留container、子进程、runtime handle的硬释放证据及全部操作历史；主进程内CUDA计数只作diagnostic | 不创建rollout级清理文件；不嵌Trajectory；不以allocator计数偏离单独判定泄漏 |
 | reward/训练 | finalizer单次映射 + TRL内部batch/metrics | 不进入领域模型；不复制PolicyTrace/GRPOBatch |
 | run/checkpoint | 根级config/run与Trainer原生checkpoint/final adapter | 不进入Task/Trajectory/metadata |
 
-特别注意：LoRA hash变化只证明bytes改变，不能单独证明有效学习；有效学习仍要求group reward非退化、非零finite grad和可训练参数变化三者同时成立。
+特别注意：LoRA hash变化只证明bytes改变。reward是否退化、advantage/gradient是否非零以及可训练参数是否变化都只作为本run观察值记录，不构成第一阶段系统闭环的通过条件。
 
 ### 6.8 专项复审的十三项结论
 
@@ -832,28 +834,29 @@ close 失败 → cleanup_failed（保留 ID，可再次 close）
 - `reset()`：如果 environment 仍有上个 episode 的 container handle，先调用 `close()`。本次 close 一旦失败，当前 reset 立即以 infrastructure failure 结束；即使稍后 runner 重试成功，本次 reset 也不得继续创建新 container。只有确认旧 handle 已清除，才能建立新的 episode。
 - `finalize()`：正常 episode 收束。它只做一次 completion/termination 对账，冻结 patch 和必须从 live rollout container 读取的证据，关闭 rollout，随后才运行 fresh verifier并产生唯一 binary outcome。若 rollout cleanup 失败，不启动 verifier、不返回 0；若已经完成 verifier而最终清理失败，也不返回普通 reward。为避免重复计分，重复 finalize 应复用已冻结的 patch/verifier事实；若此前只是 cleanup 失败，可重试 cleanup，但不得重跑 verifier制造第二个 reward。
 - `close()`/`cleanup()`：只释放当前 environment 的 rollout 资源，允许无 episode/no handle，且可重复调用；它不能假设 reward function 曾经或将会执行。
-- runner 顶层 `finally`：覆盖 Trainer 构造失败、生成后端异常、tool loop 异常、reward/finalize 从未调用、Python 异常和用户中断。它对 factory 已构造的**全部** environment 逐一做 best-effort 退出证据冻结和 `close()`，不能因一个 environment cleanup 失败而跳过其余实例。environment/verifier 每次 cleanup attempt 只追加本地结构化事件；main process在每个`close()`返回或抛错后立即drain该缓冲并原子更新`run.json`，最后再写汇总状态。不创建第二种清理产物，也不是新的 lifecycle manager。
+- runner 顶层 `finally`：覆盖 Trainer 构造失败、生成后端异常、tool loop 异常、reward/finalize 从未调用、Python 异常和用户中断。它以run为唯一资源所有权边界，对factory已构造的**全部**environment逐一做best-effort退出证据冻结和`close()`，随后收束Trainer、vLLM、已知worker和本run资源句柄；不能因一个资源cleanup失败而跳过其余资源。environment/verifier每次cleanup操作只追加本地结构化事件；main process在每个`close()`返回或抛错后立即drain该缓冲并原子更新`run.json`，最后再写汇总状态。不创建第二种清理产物，也不是新的lifecycle manager。Trainer/vLLM只在run开始时构造一次，在run结束或失败时统一释放，不在group之间销毁重建。
 
-最外层控制流应保留一个 `primary_error`，并使用 `except BaseException` 只为记录后再原样传播；`finally` 总会执行。若没有原始错误而 cleanup 失败，首个 cleanup error成为 run 的 infrastructure failure，其余 cleanup errors结构化记录。不能把“TRL 会调用 custom reward”作为容器清理前提。[建议]
+最外层控制流应保留一个 `primary_error`，并使用 `except BaseException` 只为记录后再原样传播；`finally` 总会执行。若没有原始错误而 run级cleanup出现未恢复失败，首个cleanup error成为`failure.category="cleanup"`的primary failure，其余cleanup errors结构化记录。不能把“TRL 会调用 custom reward”作为容器清理前提。[建议]
 
 #### 8.1.4 verifier 生命周期
 
 旧 `SWEGymVerifier.verify()` 已经每次调用 factory 构造 fresh sandbox，并用 `with sandbox` 包住 patch check/apply和测试；这是正确边界，应复制后适配。新实现需要强化以下合同：[代码事实+建议]
 
 1. verifier factory 构造、container create/start、patch apply、测试执行、marker/结果解析的任一步异常，都进入 verifier 自己的 `finally`；只要已取得 verifier container ID，就尝试 `close()`。
-2. verifier sandbox 是局部变量；rollout sandbox 仍属于 environment。两者的 ID、cleanup attempts和错误分别记录，永不互相覆盖。
+2. verifier sandbox 是局部变量；rollout sandbox 仍属于 environment。两者的ID、cleanup操作历史和错误分别记录，永不互相覆盖。
 3. verifier业务结果与 cleanup 结果分开。测试 failed 是合法 `unresolved=0`；verifier setup/parse/cleanup failure 是 infrastructure failure。cleanup failure不得降格为 reward 0。
-4. 若 verifier执行异常和 verifier cleanup异常同时存在，执行异常是 primary，cleanup错误和可能残留的 verifier container ID另记；若只有 cleanup失败，则 cleanup failure是 primary。
+4. 若 verifier执行异常和 verifier cleanup异常同时存在，执行异常是 primary，cleanup错误和可能残留的 verifier container ID另记；若只有 cleanup失败，则以`failure.category="cleanup"`记录primary，不归入policy、verifier或trainer失败。
 
 #### 8.1.5 异常优先级、输出写入顺序与“已清理”声明
 
 最小异常合同如下，不引入异常框架：[建议]
 
-- 已有业务/基础设施异常时，保留同一个异常为 primary failure 并原样抛出；cleanup failure 作为独立事件写入对应的 `run.json.cleanup.containers[].attempts[]`或`processes[].attempts[]`，GPU释放检查写入`gpu_allocations[]`，`run.json.failure`只保存 primary failure 摘要，同时可用 `BaseException.add_note()`补充终端诊断，但不能用 cleanup 异常覆盖原异常。
-- 没有原异常时，cleanup failure本身成为 infrastructure primary failure。runner仍继续清理其余 environment。
-- `run.json.cleanup`严格使用第18.2节冻结的`state/clean_release/residuals/containers/processes/gpu_allocations`字段。初始为`state="pending"/clean_release=null`；所有已知资源均完成释放检查后才可写`state="completed"`，任一资源仍残留则写`state="failed"/clean_release=false`。`clean_release=true`仅在所有container已删除、所有已发现的vLLM/Trainer子进程已退出、所有本run GPU allocation已回到资格时记录的空闲基线，且从未出现cleanup attempt failure时成立。
-- 只要任一次 cleanup attempt失败，run不得宣称“资源已干净释放”或“系统闭环通过”。后续重试若成功，在同一container/process记录中追加成功attempt并写终态、顶层`residuals=[]`、`state="completed"`，但仍保留`clean_release=false`；若重试仍失败，则写`final_state="residual"`、`residual=true`并把资源标识加入顶层`residuals`。不得另造未在第18.2节schema中的同义字段。
-- colocate vLLM若在主进程内持有engine而没有独立worker PID，不制造虚假process记录；runner显式关闭engine、释放模型引用并记录`gpu_allocations[]`的cleanup前后计数。真实子进程只记录本run启动并能明确识别的PID，逐个terminate/join/verify-exit；不扫描或治理其他作业。主CLI自身退出由终端退出码证明，进程内`run.json`不能承诺在自身退出后再写一次状态。[建议]
+- 已有业务/基础设施异常时，保留同一个异常为primary failure并原样抛出；cleanup failure作为独立事件写入对应的`run.json.cleanup.containers[].operations[]`、`processes[].operations[]`或`runtime_handles[].operations[]`，进程内CUDA计数仅写入`gpu_diagnostics[]`，`run.json.failure`只保存primary failure摘要，同时可用`BaseException.add_note()`补充终端诊断，但不能用cleanup异常覆盖原异常。
+- 没有原异常时，未恢复的cleanup failure本身成为`category="cleanup"`的primary failure。runner仍继续清理其余environment与run级资源。
+- `run.json.cleanup`严格使用第18.2节冻结的`state/clean_release/residuals/containers/processes/runtime_handles/gpu_diagnostics`字段。初始为`state="pending"/clean_release=null`；所有已知资源均完成硬释放检查后才可写终态。`clean_release=true`只要求：本run container均已删除或确认不存在；本run明确启动的worker PID均已退出或确认不存在；vLLM engine shutdown已成功返回；environment、Trainer和vLLM等本run持有的资源句柄已关闭或释放；不存在未恢复的cleanup error或已确认残留。任一硬条件不满足时写`state="failed"/clean_release=false`并记录residual。
+- `torch.cuda.memory_allocated()`、`torch.cuda.memory_reserved()`及其与run前数值的差异只能作为主进程退出前的诊断观察，不能单独把GPU标为residual、把`cleanup`写成failed、把`clean_release`写成false或改变run lifecycle。CUDA context与caching allocator可在主进程退出前合法保留显存；本进程不能在`run.json`中证明自身退出后的GPU状态。若未来确需主进程退出后的GPU占用验收，只能由父launcher在训练子进程退出后另行观察，本阶段不把它加入run内硬门禁。
+- 某次cleanup operation失败后仍须继续best-effort收束；若后续重试使资源通过最终硬检查，可将cleanup写为completed并保留完整失败/恢复历史。只有未恢复失败或确认残留才令cleanup failed。核心系统闭环是否通过仍由第15节并列验收事实独立判定；cleanup不得启动新的训练run，也不得覆盖先前primary failure。不得另造未在第18.2节schema中的同义字段。
+- colocate vLLM若在主进程内持有engine而没有独立worker PID，不制造虚假process记录；runner显式调用engine shutdown、释放模型/Trainer引用并在`runtime_handles[]`记录返回结果，同时可在`gpu_diagnostics[]`记录cleanup前后进程内CUDA计数。真实子进程只记录本run启动并能明确识别的PID，逐个terminate/join/verify-exit；不扫描或治理其他作业。主CLI自身退出由终端退出码证明，进程内`run.json`不能承诺在自身退出后再写一次状态。[建议]
 
 正常 finalize 和异常退出都遵守最短的证据/清理顺序：[建议]
 
@@ -865,7 +868,7 @@ close 失败 → cleanup_failed（保留 ID，可再次 close）
 → container删除后写最终trajectory/verifier文件并由单写者原子更新run.json
 ```
 
-只有 patch、changed paths 和需要在 container 内读取的诊断必须在删除前取得；messages、Action/Observation、异常、`Verification`、cleanup attempts 和最终 run 状态都可从内存于删除后落盘。异常退出时读取 diff 只能 best-effort 且有界，失败要记录但不能阻止 cleanup；不能为了写输出长期保留 container。run 的 `output_dir` 应在创建 Docker 前建立；batch/group/rollout 目录由 recorder 按已资格化的 TRL generation 顺序分配。若落盘本身失败，仍按相同 finally 清理资源，并至少向终端/`train.log`报告无法更新 `run.json`。[建议]
+只有patch、changed paths和需要在container内读取的诊断必须在删除前取得；messages、Action/Observation、异常、`Verification`、cleanup operations和最终run状态都可从内存于删除后落盘。异常退出时读取diff只能best-effort且有界，失败要记录但不能阻止cleanup；不能为了写输出长期保留container。run的`output_dir`应在创建Docker前建立；batch/group/rollout目录由recorder按已资格化的TRL generation顺序分配。若落盘本身失败，仍按相同finally清理资源，并至少向终端/`train.log`报告无法更新`run.json`。[建议]
 
 #### 8.1.6 用户中断和不可恢复终止边界
 
@@ -923,7 +926,7 @@ SWEEnvironment.read_file(path, start_line, end_line)
 | max tool turns/总长度、无 submit、submit 空 patch、submit 后继续调用 | 0，具体 termination | 不构造结果 | 保留；截断 mask 按配置 |
 | patch apply 正常失败、真实 pytest failed | 0，`unresolved` | 已运行 | 保留 |
 | pytest passed | 1，`resolved` | 已运行 | 保留 |
-| Docker daemon/image/base mismatch、exec plumbing、verifier setup/timeout/无 marker、cleanup 失败 | 无 reward；run级infrastructure failure | 不构造`Verification` | raise，中止本 generation batch；不得写成 0 |
+| Docker daemon/image/base mismatch、exec plumbing、verifier setup/timeout/无 marker、cleanup 失败 | 无 reward；前者按真实infrastructure category，cleanup-only按`category="cleanup"` | 不构造`Verification` | raise，中止本 generation batch；不得写成 0 |
 
 命令 timeout 是否策略归因需看容器健康与命令本身：旧 verifier timeout 属 infra；agent 主动运行超时命令属于策略失败。该区分应有显式枚举而非异常字符串猜测。
 
@@ -950,18 +953,31 @@ configs/
 | base precision | BF16 | A100原生支持；这是未量化base |
 | quantization | disabled；`load_in_4bit=false`且不传`BitsAndBytesConfig` | 配置测试必须拒绝“文件名LoRA但实际启用4-bit” |
 | LoRA | r16/alpha32/dropout0；target固定`q_proj,k_proj,v_proj,o_proj` | 启动前要求四类target全部精确存在且只有预期LoRA参数可训练；不使用`all-linear`或自动扩展 |
-| GRPO | binary reward、DAPO、beta0、`num_generations=4`、`num_iterations=1` | group固定4，不把它当有效学习保证 |
+| GRPO | binary reward、DAPO、beta0、`num_generations=4`、`num_iterations=1` | group固定4；reward分布和更新数值只如实观察 |
 | generation | temp1/top-p1/top-k0；`max_tool_calling_iterations=20`；`max_completion_length=22528`；margin 2048 | 禁用grammar约束；动态工具输出与消息边界计入总completion预算，安全余量不可被运行时借用 |
 | generation backend | colocate vLLM、TP1、sleep true、`use_vllm=true` | 以非量化BF16推理并验证PEFT merge/full sync；任一gate失败停止，配置保持不变 |
-| Trainer | 单GPU、`max_steps=1`、batch/accumulation均为1、checkpoint每step保存且最多保留2个 | 不引入FSDP/DeepSpeed；一次系统闭环只做一个optimizer step |
+| Trainer | 单GPU、第一阶段验收run使用`max_steps=1`、batch/accumulation均为1、checkpoint每step保存且最多保留2个 | 不引入FSDP/DeepSpeed；一个run只构造一次Trainer/vLLM并执行一次基于在线group的GRPO optimizer step；不保证非零parameter update |
 
 本机有4×A100 80GB。第一阶段7B固定以单GPU TP1资格vLLM；wheel/ABI、HBM、sleep/wake或同步失败时按第12.2节停止并记录，不改`use_vllm`、memory utilization或GPU拓扑，也不建立GPU owner/claim/lock。该7B选择不推导30B拓扑。[运行事实+用户决策+待实施验证]
 
-7B完整YAML还固定`base_seed`和`effective_learning_max_runs=8`。一次正式CLI调用内部按`attempt_index=0..7`顺序构造相互独立的Trainer run：每个run都生成新的UTC-Z `output_dir`、使用`seed=base_seed+attempt_index`并保持`max_steps=1`；首个run已满足有效学习即不再创建后续run，未满足则在总计32条rollout上限内继续。这个有界顺序循环只负责重复同一标准入口，不共享checkpoint、不复用已完成run，也不是实验registry或自研Trainer。[用户决策]
+7B完整YAML固定一个`seed`作为本run复现输入，不包含run数量、循环索引、自动重启或跨run选择字段。一次正式CLI调用只生成一个UTC-Z `output_dir`，只构造一次`GRPOTrainer`与colocate vLLM，并在该run内维持唯一policy、optimizer和scheduler状态。第一阶段验收run使用一个真实group与`max_steps=1`；reward全0、advantage为0、gradient为0或LoRA参数不变都按实际结果记录，不触发另一个run。[用户决策]
 
-一次CLI调用结束时只向终端打印一份跨run JSON摘要，不创建顶层summary文件、跨run目录、软链接或adapter副本。字段固定为：`overall_status`（`effective_learning_passed/system_only/failed/interrupted`）、按执行顺序排列的`attempted_run_ids`、首个系统闭环通过的`system_evidence_run_id`、首个有效学习通过的`effective_learning_run_id`、硬失败或中断所在的`stopped_run_id`、`primary_result_run_id`、`primary_result_reason`（`effective_learning/system_closed_loop/none`）和`primary_final_model_ref`。选择规则固定为：有效学习通过时指向首次通过的run；否则若至少一个run系统闭环通过，则指向首次系统闭环通过的run；两者皆无则为null。后续run若硬失败或中断，`overall_status`仍必须是`failed/interrupted`并保留`stopped_run_id`，不能被较早的系统证据掩盖；`primary_result_run_id`仅表示最强已有证据，不把整次CLI伪装成成功。`primary_final_model_ref`只是该run自己的`run.json.training.final_model_ref`引用，不是跨run“最终adapter”，不得复制、合并或覆盖任何run产物。[用户决策]
+正式CLI只打印本run的终端摘要，字段限于`run_id`、`lifecycle`、`native_policy_path_reached`、`trainer_group_consumed`、`system_closed_loop`、`failure`引用、`final_model_ref`和`cleanup`摘要；不创建跨run summary、跨run目录、软链接或adapter副本。任何execution failure或interruption都结束当前CLI并保留当前run；正常policy未达到native path也结束当前CLI，但不写failure。第一阶段没有自动重试。用户随后显式再次执行CLI时创建的是新的独立run，该动作不由前一个run的reward、gradient或cleanup状态自动触发。[用户决策]
 
-`generation_batch_size`、`steps_per_generation`、`gradient_accumulation_steps`和process数由锁定`GRPOConfig`校验。完整7B YAML必须显式记录这些值、`num_generations`、`max_steps`和save策略；测试证明group整除、generation batch边界以及预期 optimizer step。第一闭环固定只有`batch-0000`、`global_step_at_generation=0`和一次成功后的`trainer.state.global_step=1`；train runner在成功返回后把公开state写成`consumed_by_global_steps=[1]`，失败前保持空数组。不为该记录关系添加callback或Trainer subclass。[官方接口事实+用户决策]
+正式层级关系固定为：[用户决策]
+
+```text
+一次CLI调用
+└── 一个run / 一个output_dir
+    └── 一套Trainer + colocate vLLM + optimizer/scheduler + 持续policy状态
+        └── run内部generation batch
+            └── 同一prompt的GRPO group
+                └── 4条rollout
+```
+
+group及其多条rollout是GRPO在run内部的采样与训练结构，不是独立作业；Trainer/vLLM和policy状态的构造、持有与释放均以run为边界。
+
+`generation_batch_size`、`steps_per_generation`、`gradient_accumulation_steps`和process数由锁定`GRPOConfig`校验。完整7B YAML必须显式记录这些值、`num_generations`、`max_steps`和save策略；测试证明group整除、generation batch边界以及预期optimizer step。第一阶段验收run固定只有`batch-0000`、`global_step_at_generation=0`和一次成功后的`trainer.state.global_step=1`；train runner在成功返回后把公开state写成`consumed_by_global_steps=[1]`，失败前保持空数组。不为该记录关系添加callback或Trainer subclass。batch/group索引属于run内部结构，不表示新的run层级。[官方接口事实+用户决策]
 
 ### 9.3 后续 30B-A3B QLoRA 完整配置合同
 
@@ -1094,18 +1110,18 @@ prompt builder已确定为`src/swe_agent/prompts.py::build_prompt(task)`纯函�
 
 采用`outputs/<run-id>/`。`run-id`使用UTC（格林尼治零时区）`YYYYMMDDTHHMMSSZ-<4 hex>`，例如`20260719T153012Z-a13f`；未来实现必须以`datetime.now(UTC)`取得时间，`Z`明确表示UTC+00:00。该目录直接作为`GRPOConfig.output_dir`；不配置本地run name，不增加模型、算法、日期或实验系列中间层。[用户决策]
 
-新run若目标目录已存在则fail closed，禁止静默覆盖。显式resume只能指向同一run中的Trainer原生checkpoint，继续使用原`output_dir`；不复制、移动或改名checkpoint。第一阶段不建设run registry、目录扫描服务或实验数据库。[建议]
+新run若目标目录已存在则fail closed，禁止静默覆盖。第一阶段正式CLI不提供自动resume或失败后自动续跑；checkpoint保持Trainer原生可恢复格式，但实际resume属于后续单独授权范围。不复制、移动或改名checkpoint。第一阶段不建设run registry、目录扫描服务或实验数据库。[建议]
 
 ### 11.2 目录相关配置的最小集合
 
 ```text
 output_root: outputs
-run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只用于受控resume
+run_id: null                 # 第一阶段固定由入口按UTC-Z+4位随机码生成
 ```
 
 程序从`output_root + run_id`派生唯一`output_dir`和全部rollout相对路径，不提供trajectory/patch/verifier/log/checkpoint/report等独立路径配置。`GRPOConfig.output_dir`由入口最终注入，不能在model/environment配置中另写一份。[建议]
 
-第一闭环显式配置Trainer原生项`logging_steps=1`、`save_strategy="steps"`、`save_steps=1`和`save_total_limit=2`，因为`max_steps=1`时默认save间隔不会产生所需checkpoint。这些是训练语义，不是路径抽象。真实SWE闭环总是保存第18节的最小rollout事实；TRL的`log_completions`显式为`False`，避免框架completion dump与`rollouts/`重复。[官方接口事实+用户决策]
+第一阶段验收run显式配置Trainer原生项`logging_steps=1`、`save_strategy="steps"`、`save_steps=1`和`save_total_limit=2`，因为`max_steps=1`时默认save间隔不会产生所需checkpoint。这些是训练语义，不是路径抽象。真实SWE闭环总是保存第18节的最小rollout事实；TRL的`log_completions`显式为`False`，避免框架completion dump与`rollouts/`重复。[官方接口事实+用户决策]
 
 `config.yaml`是项目解析后的完整配置主源。checkpoint内Transformers原生生成的`training_args.bin`、adapter config、tokenizer文件和`trainer_state.json`是Trainer可加载合同，不视为项目重复配置，也不得为了“目录整齐”搬出checkpoint。[官方接口事实]
 
@@ -1136,19 +1152,19 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 
 总体结论：目标主路径不是“不可实现”，但也不能写“TRL 自动完成”。准确等级是：**接口层需要小型适配，版本和资源层有明确 qualification gate；没有证据要求自造大型补丁。**
 
-该可行性判断按模型分层：7B BF16 LoRA的vLLM gate覆盖Torch/vLLM wheel与CUDA ABI、BF16模型/PEFT、colocate、sleep/wake和更新后同步；全部都是计划内硬gate。bitsandbytes作为唯一依赖集合成员必须通过resolver/wheel安装硬门，但其import、CUDA扩展、4-bit与MoE功能不属于7B通过条件。30B-A3B QLoRA运行资格全部推迟到7B闭环后，第一阶段不锁定或验证其GPU拓扑。[用户决策+待实施验证]
+该可行性判断按模型分层：7B BF16 LoRA的vLLM gate覆盖Torch/vLLM wheel与CUDA ABI、BF16模型/PEFT、colocate、sleep/wake和受控adapter权重同步机制；全部都是计划内硬gate。bitsandbytes作为唯一依赖集合成员必须通过resolver/wheel安装硬门，但其import、CUDA扩展、4-bit与MoE功能不属于7B通过条件。30B-A3B QLoRA运行资格全部推迟到7B闭环后，第一阶段不锁定或验证其GPU拓扑。[用户决策+待实施验证]
 
 ### 12.2 7B固定vLLM路径与失败证据合同
 
 1. 7B固定采用`TRL 1.8.0 + 经资格的vLLM + colocate TP1 + sleep`，完整配置始终`use_vllm=true`、`vllm_gpu_memory_utilization=0.3`；精确Torch/vLLM版本按第1.4节在冻结前最多迭代3组有官方依据的候选，不默认取范围最高版本。
 2. 首个成功lock后依赖manifest/lock冻结。此后的wheel安装/import/extension/ABI失败、单卡显存不足、sleep/wake或PEFT同步失败，均停止对应阶段。不得删除vLLM依赖、改冻结版本、改`use_vllm`、改memory utilization、换独立server、TP2/TP4、多卡、Transformers生成或自研循环。
-3. 失败时保留冻结后的`pyproject.toml/uv.lock`和两份计划配置；若三次resolver均失败，则保留最后provisional manifest及三次attempt摘要，不以“修复”为名继续试探。若尚未创建正式`output_dir`，终端和实施汇报必须给出失败stage、精确命令、候选版本/wheel来源、原始错误及资源状态；若run已经初始化，则同样的primary failure写入`run.json.failure`，原始输出进入`train.log`，cleanup独立写入`run.json.cleanup`。
+3. 失败时保留冻结后的`pyproject.toml/uv.lock`和两份计划配置；若三次resolver候选评估均失败，则保留最后provisional manifest及三次候选评估摘要，不以“修复”为名继续试探。若尚未创建正式`output_dir`，终端和实施汇报必须给出失败stage、精确命令、候选版本/wheel来源、原始错误及资源状态；若run已经初始化，则同样的primary failure写入`run.json.failure`，原始输出进入`train.log`，cleanup独立写入`run.json.cleanup`。
 4. failure记录只证明该组合在本次环境/参数下未通过，不得被描述为TRL/vLLM普遍不可行；实施Agent停止并等待用户根据证据修改计划。除第1.4节明确允许的冻结前最多3组resolver候选外，不得继续循环试版本、参数或拓扑，也不得fork/patch第三方库。
 5. 30B不适用本节的TP1资源结论：第一阶段不运行30B；后续资源拓扑在7B闭环后基于4×A100和30B QLoRA实测单独设计，但生成框架仍以vLLM为目标。[用户决策]
 
 ## 13. 第一阶段实施计划
 
-> **执行授权冻结：当前只制定计划。只有用户明确确认“计划修改完毕，可以开始实施”后，以下阶段才可执行；该一次指令授权Agent按顺序连续推进到7B系统闭环和32条rollout以内的有效学习验收，不再为CUDA、7B模型、vLLM、固定Docker或GRPO逐项询问。**[用户决策]
+> **执行授权冻结：当前只制定计划。只有用户明确确认“计划修改完毕，可以开始实施”后，以下阶段才可执行；该一次指令授权Agent按顺序完成A–J前置资格，并推进到7B单run真实在线group与GRPO optimizer step验收，不再为CUDA、7B模型、vLLM、固定Docker或该次GRPO验收逐项询问。正式CLI只执行一次；失败直接结束并记录本run，不自动创建下一run。**[用户决策]
 
 ### 阶段 0：环境manifest、lock与独立`.venv`
 
@@ -1191,30 +1207,31 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 
 - 输入：阶段4执行器和已通过的TRL最小environment合同；
 - 前置：不再新增旧Trainer/XML/vLLM lifecycle模块；
-- 输出：无副作用constructor、fresh `reset`、6个sync tool methods、submit terminal-pending、single custom binary reward/finalizer、以`Step.index`排序的精简trajectory、动态`run.json`单写者和run-scoped finally；第一闭环由runner在调用`trainer.train()`前预分配唯一`batch-0000/group-0000/0000..0003`，environment reset按已资格的TRL输入顺序领取一个空rollout槽，训练返回后读取公开`trainer.state.global_step`完成batch消费记录；
+- 输出：无副作用constructor、fresh `reset`、6个sync tool methods、submit terminal-pending、single custom binary reward/finalizer、以`Step.index`排序的精简trajectory、动态`run.json`单写者和run-scoped finally；run recorder按TRL generation顺序在同一run内分配batch/group/rollout目录；第一阶段验收run分配`batch-0000/group-0000/0000..0003`，environment reset按已资格的TRL输入顺序领取rollout槽，训练返回后读取公开`trainer.state.global_step`完成batch消费记录；
 - 风险：pool复用串repo；误以为callable能拿wire ID；tool内infra被TRL吞成普通error；generation早退遗留容器；
-- 验收：factory创建的probe和pool扩容实例均进入runner普通引用列表；连续reset和**同一逻辑训练作业/group内**同时active的instance隔离；旧container清理失败时reset不创建新container；固定四条rollout与四个目录一一对应；多call有序；Observation稳定字符串；completion只读对账；policy/infra分类；即使reward/finalize未调用，顶层finally仍遍历close。每个environment/verifier只追加自己的内存事件缓冲，main process在generation/reward/finally边界归并并原子写`run.json`，不增加callback、Trainer subclass、writer线程、queue、共享文件写或多作业并发治理。此阶段可用fake Docker client做单元合同，但不算真实闭环。
+- 验收：factory创建的probe和pool扩容实例均进入runner普通引用列表；连续reset和**同一逻辑训练作业/group内**同时active的instance隔离；旧container清理失败时reset不创建新container；固定四条rollout与四个目录一一对应；多call有序；Observation稳定字符串；completion只读对账；policy/infra分类；即使reward/finalize未调用，run级finally仍遍历close并继续收束Trainer/vLLM/GPU。每个environment/verifier只追加自己的内存事件缓冲，main process在generation/reward/finally边界归并并原子写`run.json`，不增加callback、Trainer subclass、writer线程、queue、共享文件写或多作业并发治理。Trainer和vLLM在一个run中只构造、释放各一次，不随group重建。此阶段可用fake Docker client做单元合同，但不算真实闭环。
 
-### 阶段 6：真实 SWE group 与系统闭环
+### 阶段 6：真实 SWE group、GRPO step 与并列验收
 
 - 输入：固定task、真实7B LoRA policy、真实environment/Docker/verifier和经资格的vLLM colocate后端；
 - 前置：第16.2节A–J门禁全部通过；group/batch派生值已由锁定`GRPOConfig`测试；Agent打印精确命令、固定vLLM配置、GPU、固定task/image、预计时长、最大输出增长与cleanup preflight后直接执行；
-- 输出：一个新的`outputs/<run-id>`，其中含一个真实group的4条rollout、二值rewards、恰好一次TRL optimizer step、原生`checkpoint-<global_step>/`及`save_model(output_dir)`生成的根级final adapter；
+- 输出：一次CLI调用创建一个新的`outputs/<run-id>`和一套Trainer/vLLM/policy状态；其中含一个真实group的4条rollout、二值rewards、一次由`GRPOTrainer`消费该在线group而执行的GRPO optimizer step、原生`checkpoint-<global_step>/`及`save_model(output_dir)`生成的根级final adapter；
 - 风险：时长/上下文、全0/全1、vLLM IS全mask、infra混入0、checkpoint与episode错配；
-- 验收：第15.1节系统闭环；若group非退化，再同时验第15.2节有效学习。若退化，只能报告系统闭环通过/有效学习未通过。
+- 验收：第15节并列验收。`native_policy_path_reached`与`trainer_group_consumed`都在同一次`trainer.train()`结束后按真实证据独立判定，二者都为true时`system_closed_loop=passed`。不得在正式Trainer前额外生成rollout，也不得因四条rollout没有tool call而在reward阶段抛出基础设施异常；`no_tool_call`按策略结果reward 0并继续进入group消费。reward全0、advantage为0、gradient为0或LoRA参数不变均按观察事实记录，不触发新的run。
 
-### 阶段 7：系统闭环后的限定工作
+### 阶段 7：单run收束与第一阶段结束
 
-- 有效学习仍未通过时，正式CLI按7B配置中的有界attempt循环保持`num_generations=4`与`max_steps=1`。已结束run不得重新打开追加训练；同一次CLI调用最多再创建7个新的`outputs/<run-id>`，每个仍只运行一个`batch-0000/group-0000`和一次optimizer step，累计上限8 runs/8 groups/32 rollouts。seed固定为`base_seed + attempt_index`（首次为index 0），避免同seed机械复现；每个run前打印累计GPU时长、Docker container次数和`outputs/`增长，达到有效学习或预算上限即停止，不再逐次询问。不得改变reward、任务、group size或人工筛completion。
-- CLI结束时按第9.2节打印唯一跨run终端摘要。若第1个run仅通过系统闭环而第4个run首次通过有效学习，则`system_evidence_run_id`指第1个run、`effective_learning_run_id/primary_result_run_id`指第4个run；若8个run均只通过系统闭环，则`overall_status="system_only"`且primary指首个系统run，并明确预算耗尽、有效学习未通过。每个run继续拥有独立checkpoint和final adapter，不存在跨run隐式“最终adapter”。
-- 完整optimizer resume、长期吞吐和post-update真实SWE rollout不属于第一阶段验收，不自动执行。同步资格只需受控生成探针与step前后参数identity/数值证据，不要求再跑一条真实SWE rollout。
+- `trainer.train()`正常返回、失败或中断后都只进入当前run的统一收束路径：先保留既有primary failure，再关闭所有environment与仍存container，随后释放Trainer、vLLM、已知worker与本run资源句柄，最后完成checkpoint/final adapter引用、cleanup事实、CUDA诊断观察和`run.json`终态写入。
+- 当前run的reward分布、advantage、gradient和参数变化只写为观察结果；任何零值或参数不变都不启动另一run。当前第一阶段没有自动重试、自动resume或CLI内部再次执行训练。
+- CLI打印本run摘要后结束。若用户以后显式再次执行CLI，入口创建新的run；前一个run不决定、触发或汇总后一个run。
+- 完整optimizer resume、长期吞吐和post-step真实SWE rollout不属于第一阶段验收，不自动执行。vLLM同步机制在正式run前以受控adapter权重探针资格；正式run只记录step前后参数identity、是否发生数值变化，以及变化发生时可获得的同步证据。参数未变时明确记为`post-step policy is numerically unchanged`，不虚构“新policy”或以数值相同证明同步。
 - 第一阶段到此结束，不运行30B。30B YAML和共享代码必须已完成，但其vLLM TP、训练并行和4×A100资源布局不在本阶段拍板；后续30B实施需基于当时QLoRA显存/吞吐证据单独制定运行资格，不重写SWEEnvironment/tools/verifier。
 
 ## 14. 测试计划
 
 测试范围同样服从第0.1节：不增加网络安全、认证授权、漏洞扫描、并发 admission、分布式锁/租约或多个独立训练作业共享资源测试。唯一的并行正确性测试是 TRL 可能同时激活的同一 group environment 之间 repo/container 不串扰；Docker `no-network` 只断言固定任务配置未回归，不做网络安全认证。[用户决策]
 
-普通测试默认只产生终端输出和pytest自己的`.pytest_cache/`；任何文件写入使用`tmp_path`并由测试清理。JUnit/coverage只在具体命令或CI显式要求时写到临时/外部路径。只有`full system`/`effective learning`通过`scripts/grpo.sh`与正式train入口运行时才创建标准`outputs/<run-id>`。[建议]
+普通测试默认只产生终端输出和pytest自己的`.pytest_cache/`；任何文件写入使用`tmp_path`并由测试清理。JUnit/coverage只在具体命令或CI显式要求时写到临时/外部路径。只有`full system`通过`scripts/grpo.sh`与正式train入口运行时才创建标准`outputs/<run-id>`。[建议]
 
 普通`pytest`只运行CPU、纯函数、fake-client和小fixture测试。所有会加载真实模型、使用CUDA/GPU、启动vLLM、访问Docker或执行真实GRPO的测试都必须带显式marker并默认skip，避免开发过程或无参数`pytest`意外占用大型资源。用户发出第0.3节的一次实施授权后，实施Agent才可按第13节显式选择这些marker或正式CLI，并在每次大型动作前打印资源preflight后连续执行；preflight不是新的授权点。[用户决策]
 
@@ -1234,15 +1251,15 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 | reward/verifier unit | policy termination、resolved、unresolved、infra | policy→0；真实`Verification`才映射0/1；infra raise且不构造`Verification`/不进入group；每episode只计一次；`result`字段保持不变 |
 | trajectory unit | 单call、多call、连续Step.index、termination、messages去重 | 一个实际执行调用恰好一个Step；多call按执行顺序；Action/Observation无ID/event_seq/wire refs仍可复盘；termination与`Verification`不混合；messages与Trajectory不复制完整相同内容；Trajectory无patch/path/ref/cleanup/run metadata |
 | output layout unit | run-id、拒绝覆盖、batch/group层级、原子run记录、checkpoint路径 | 唯一`outputs/<run-id>`；目录名满足UTC-Z+4hex；`batch.json/group.json`关联顺序/rewards/consumed steps且均支持interrupted；无扁平索引；Trainer checkpoint原样在根下；resume才复用目录 |
-| run record unit | 单写者、原子replace、生命周期/训练/cleanup正交 | 多active env只提交事件不直接写文件；run/batch/group的running/completed/failed/interrupted映射正确；training判定以pending/passed/failed/not_applicable区分未评估；cleanup以pending/completed/failed和nullable clean_release区分未完成；primary failure不被cleanup覆盖；container/process失败后重试成功仍保留attempt且`clean_release=false`；GPU基线与residual准确 |
+| run record unit | 单写者、原子replace、生命周期/训练/cleanup正交 | 多active env只提交事件不直接写文件；run/batch/group的running/completed/failed/interrupted映射正确；`native_policy_path_reached`与`trainer_group_consumed`并列记录；正常policy未达标允许`lifecycle=completed/failure=null/system_closed_loop=failed`；cleanup以pending/completed/failed和nullable clean_release区分未完成；primary failure不被cleanup覆盖；container/process/runtime handle硬释放事实准确，进程内CUDA数值仅作诊断 |
 | dependency qualification | lock、wheel source、基础import、Torch/vLLM CUDA extension | 按A–D以退出码/终端分层判断；bitsandbytes wheel解析/安装失败会阻断唯一环境，wheel已安装仍不等于BNB可import或4-bit可用；7B gate不执行BNB CUDA/4-bit探针；失败测试证明冻结后failure handler不会改写`pyproject.toml/uv.lock/configs/*.yaml`；大型层默认skip，只由获一次实施授权的Agent显式运行；默认不落长期目录 |
-| config unit | 两份完整YAML、无继承、模型路径、context、tools、group/batch/save | 两份均为`num_generations=4`、`max_tool_calling_iterations=20`、`max_prompt_length=8192`、`max_completion_length=22528`、`context_safety_margin=2048`、`max_steps=1`、batch/accumulation均1、每step保存且`save_total_limit=2`；测试用真实tokenizer计最终模板并断言三者之和≤32768；7B另固定`base_seed`、`effective_learning_max_runs=8`、`use_vllm=true`、TP1、sleep true、memory utilization 0.3；7B `load_in_4bit=false/quantization_config=None`，30B NF4+BF16 compute+double quant且`use_vllm=true/runtime_qualified=false`；配置完整不等于资格通过 |
+| config unit | 两份完整YAML、无继承、模型路径、context、tools、group/batch/save | 两份均为`num_generations=4`、`max_tool_calling_iterations=20`、`max_prompt_length=8192`、`max_completion_length=22528`、`context_safety_margin=2048`、第一阶段验收run的`max_steps=1`、batch/accumulation均1、每step保存且`save_total_limit=2`；测试用真实tokenizer计最终模板并断言三者之和≤32768；7B另固定单个run seed、`use_vllm=true`、TP1、sleep true、memory utilization 0.3，且不存在run循环或跨run汇总字段；7B `load_in_4bit=false/quantization_config=None`，30B NF4+BF16 compute+double quant且`use_vllm=true/runtime_qualified=false`；配置完整不等于资格通过 |
 | 7B LoRA qualification | BF16 base、无quant config、LoRA trainable set、forward/backward、save/reload | r16/alpha32/dropout0；target精确为`q_proj,k_proj,v_proj,o_proj`且全部存在；base frozen；仅预期LoRA参数可训练；非零tiny grad；不要求BNB import、Params4bit或4-bit load；真实模型/GPU测试默认skip，由一次实施授权后的阶段2显式运行 |
 | 30B QLoRA static contract | 完整YAML、BNB字段、Qwen3架构声明、PEFT target、`runtime_qualified=false` | 第一阶段只做解析、交叉字段校验和CLI拒绝真实启动；不加载30B、不验证Params4bit/forward/backward/vLLM/TP拓扑，也不以7B证据替代未来30B资格 |
-| 7B vLLM qualification | 固定vLLM colocate/TP1/sleep/wake/sync/cache | 验证BF16+PEFT更新同步且不要求BNB realization；`use_vllm=true`、memory utilization 0.3保持不变；注入每类gate失败时都停止、记录且配置hash不变；默认skip且不得由普通pytest触发 |
-| batch/recording contract | 固定第一闭环batch/group/rollout关联、公开global step、run单写者 | runner预分配`batch-0000/group-0000/0000..0003`；reset顺序经fixture资格；训练成功后只读`trainer.state.global_step==1`写消费关系；per-environment buffer由main process归并；无callback/subclass，不读私有tensor |
-| full system | fixed task real group（4 rollouts）→verifier→TRL step | 满足系统闭环标准；只由一次实施授权后的正式入口执行，普通测试不得触发 |
-| effective learning | non-degenerate group + update | 满足有效学习标准；保持group size 4与每run `max_steps=1`，总预算最多8个独立runs/8 groups/32 rollouts，seed按attempt递增；测试第1个run系统通过、第4个run有效学习通过、8个全退化、后续硬失败/中断四种汇总，断言primary/stopped引用和overall状态准确且没有跨run adapter复制；Agent在同一次实施授权内按preflight连续执行，不逐组询问 |
+| 7B vLLM qualification | 固定vLLM colocate/TP1/sleep/wake/sync/cache | 以受控adapter权重验证BF16+PEFT同步机制且不要求BNB realization；该资格与正式run是否发生非零parameter update分离；`use_vllm=true`、memory utilization 0.3保持不变；注入每类gate失败时都停止、记录且配置hash不变；默认skip且不得由普通pytest触发 |
+| batch/recording contract | run内batch/group/rollout关联、公开global step、run单写者 | recorder支持按generation顺序分配run内索引；第一阶段验收run产生`batch-0000/group-0000/0000..0003`；reset顺序经fixture资格；训练成功后只读`trainer.state.global_step==1`写消费关系；per-environment buffer由main process归并；无callback/subclass，不读私有tensor |
+| full system | 同一次`trainer.train()`内并行观察fixed task真实group的native tools/repo/patch/verifier/reward路径与TRL group consumption | `native_policy_path_reached`和`trainer_group_consumed`分别据实记录，二者都为true才满足第15节系统闭环；不得在Trainer前另采样或因无tool call中止reward/消费；一次CLI只创建一个run与一套Trainer/vLLM；全0 reward、零advantage、零gradient和参数不变均允许；只由一次实施授权后的正式入口执行，普通测试不得触发 |
+| single-run control | CLI、Trainer/vLLM构造次数、失败终止、终端摘要 | 一次CLI恰好一个run；Trainer/vLLM各构造一次；不存在内部run循环、自动重启、跨run选择或汇总；任一failure/interruption结束CLI并保留当前run；cleanup不覆盖更早primary failure |
 
 ### 14.1 Container 生命周期定向合同测试
 
@@ -1253,64 +1270,65 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 | create成功、start失败 | create stdout ID在start前已保存；按该ID调用remove；start错误为primary，cleanup错误若有则另记 |
 | start成功、image/base/clean校验失败 | 每个失败点都进入close；ID不因校验失败而提前清空 |
 | 取得ID后rollout目录或recorder初始化失败 | 初始化错误为primary；仍按ID清理；落盘失败不跳过close |
-| 正常finalize | patch/必要证据先冻结；rollout先关闭；fresh verifier独立创建/关闭；只计算一次reward；所有cleanup attempts提交给run recorder |
+| 正常finalize | patch/必要证据先冻结；rollout先关闭；fresh verifier独立创建/关闭；只计算一次reward；所有cleanup operations提交给run recorder |
 | reward/finalize完全未调用 | 模拟Trainer构造或生成后端提前抛错；runner finally仍关闭probe/pool list中所有active environment |
 | 同一environment连续多次reset | 每次得到新episode/ID；第二次create只发生在前一ID确认删除之后 |
 | reset前旧container cleanup失败 | reset直接报infrastructure failure；本次不执行任何新create；旧ID仍在handle中供runner重试 |
 | cleanup失败后再次close、成功后再次close | 第一次失败保留ID且第二次真正重试；成功后清除ID；其后重复close为no-op |
 | rollout与verifier handle隔离 | 即使测试中两者同时存在，verifier构造/close不改变environment的rollout ID，反之亦然 |
 | verifier构造、create/start、apply、test、parse任一步异常 | 已取得verifier ID时总会close；cleanup失败不转reward0；rollout evidence不被覆盖 |
-| 业务/基础设施异常与cleanup异常同时发生 | 原异常对象/类型是primary；container/process/GPU cleanup failure和残留标识结构化进入`run.json`；`clean_release=false` |
+| 业务/基础设施异常与cleanup异常同时发生 | 原异常对象/类型是primary；container/process/runtime handle cleanup failure和残留标识结构化进入`run.json`；进程内CUDA计数仅进diagnostics；存在未恢复cleanup failure时`clean_release=false` |
 | `KeyboardInterrupt` | 从reset、tool、generation或finalize任一阶段中断，runner finally均遍历其余environment；active batch/group和run均写interrupted；CLI退出语义为130 |
 | `SIGTERM` best-effort | 第8.1.6节薄handler必须实现；首次信号触发Python栈展开/finally，active batch/group和run均写interrupted并返回143；重复信号不覆盖原终止原因；不测试SIGKILL自动恢复 |
-| runner最终集成检查 | 正常/失败运行后，按`run.json`记录container ID和子PID逐一确认不存在，GPU计数回到本run记录的空闲基线；若任一cleanup attempt失败，即使后来释放成功也不能声称clean release；训练failure与cleanup failure维度互不覆盖；不扫描或治理其他作业 |
+| runner最终集成检查 | 正常/失败运行后，按`run.json`确认container已删除、已知子PID已退出、vLLM shutdown成功返回且本run的runtime handle已关闭；进程内CUDA allocated/reserved变化只验证被记录为diagnostic且不能单独令cleanup失败；未恢复cleanup failure与训练failure维度互不覆盖；不扫描或治理其他作业 |
 
 不增加SIGKILL、主机崩溃后的自动恢复测试，也不增加多个独立训练作业的锁、租约、冲突或stale cleanup测试。不可恢复终止只测试label和已经原子落入`run.json`的ID/名称足够人工检查，不测试自动删除。[用户决策]
 
 旧 111 项 tests 不能整包复制。优先迁移 loader/schema、ToolExecutor、Docker create/cleanup、verifier分类的测试意图；删除/重写 raw XML、`PolicyTrace`、custom objective/FSDP/service lifecycle tests。TRL自身已覆盖的 loss/logprob/mask不在项目中重测数学实现，只做锁定版本 smoke/contract assertion。
 
-## 15. 两级验收标准
+## 15. 第一阶段单run系统闭环验收标准
 
-### 15.1 系统闭环通过
+### 15.1 同一次 `trainer.train()` 的两项并列事实
 
-必须同时满足：
+正式run只调用一次`trainer.train()`。generation、tool loop、reward、group normalization、loss和optimizer step都属于这一次Trainer控制流，因此以下两项只能在同一次调用内收集、在调用返回或异常收束后并列判定，不能实现成“先证明native path，再允许Trainer消费group”的运行时顺序：[用户决策+纠偏结论]
 
-1. 固定 SWE-Gym task从锁定数据加载，oracle不泄漏；
-2. 使用完整`configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml`，同一task生成固定4条rollout的真实group，completion来自当前7B LoRA policy，无人工completion；
-3. 每条rollout使用fresh隔离Docker repo，native多轮tools真实执行；
-4. patch来自repo实际diff，无gold/mock；
-5. verifier在fresh container运行真实offline pytest；
-6. reward仅由策略termination或真实`Verification.result`映射0/1；infra单独失败；
-7. TRL 1.8标准group normalization/DAPO执行，并恰好完成一次optimizer step；
-8. 单一`outputs/<run-id>`内保存batch/group/rollout复盘文件、Trainer原生`checkpoint-<global_step>/`，并由训练入口原生`save_model(output_dir)`保存根级final adapter；不移动或手工复制框架文件；
-9. `run.json`最终原子写为completed/failed/interrupted之一，`training.system_closed_loop`写成passed/failed而非遗留pending，包含训练摘要、checkpoint/final adapter引用，以及全部container/子进程/GPU allocation释放证据；本run记录的所有container ID和子PID已确认不存在，GPU计数已回到本run资格时记录的空闲基线，`cleanup.state="completed"/clean_release=true`。若曾cleanup失败，即使后来释放成功，也必须保留历史并令`clean_release=false`，不得标系统闭环通过；
-10. `run.json.generation_backend`固定为`vllm`，并证明rollout policy是step前版本、vLLM更新后同步的是step后版本；受控step前/后生成探针和LoRA参数证据必须排除陈旧副本。
+1. `native_policy_path_reached`：固定SWE-Gym task从锁定数据加载且oracle不泄漏；同一task的4条completion来自当前7B LoRA policy；四条rollout使用fresh隔离Docker repo；其中至少一条形成TRL可识别的native tool call、进入实际repo工具执行、产生非空实际diff并submit，随后由fresh verifier container运行真实offline pytest，形成`Verification.resolved`或`Verification.unresolved`及其真实0/1 reward。policy文本中的普通JSON、只创建container、程序退出0、人工completion、gold/mock patch或checkpoint存在均不能替代这些证据。
+2. `trainer_group_consumed`：上述同一真实4-rollout group及其reward由同一个`GRPOTrainer`按TRL 1.8标准group normalization/DAPO消费，并执行一次GRPO optimizer step；消费关系由公开`trainer.state.global_step==1`和`batch.json.consumed_by_global_steps=[1]`记录，不能只由checkpoint文件名倒推。
 
-允许 group 退化和 gradient=0，但只能标为“系统闭环通过、有效学习未通过”。程序无报错本身不够，以上证据缺一不可。
+两项没有可执行的先后门禁关系。不得在正式Trainer前额外生成一批rollout来预先证明native path；也不得在reward阶段因`no_tool_call`、未形成patch或策略termination而抛出基础设施异常阻止Trainer消费。此类正常策略结果映射reward 0并留在原group中。Docker、verifier setup/parse、recording或Trainer自身异常仍按真实基础设施类别失败，不能伪装成reward 0。
 
-本验收必然涉及真实7B、vLLM、Docker和GRPO。它不能由普通`pytest`或“实现完成”隐式触发。用户发出第0.3节的一次实施授权后，Agent须在执行前打印精确命令、固定vLLM配置、GPU/显存范围、固定image和container数量、预计时长、最多4条rollout的输出增长与清理方式，然后按第13节连续执行，不再停下来请求该次运行授权。[用户决策]
+`run.json.training.system_closed_loop`仅在`native_policy_path_reached=true`且`trainer_group_consumed=true`时写`passed`，否则在可控终态写`failed`。一次CLI只创建一个`outputs/<run-id>`，只构造一次`GRPOTrainer`、colocate vLLM、optimizer/scheduler和该run唯一policy状态；batch/group/rollout证据、Trainer原生checkpoint和`save_model(output_dir)`产物都保存在该run内。
 
-### 15.2 有效学习通过
+reward可以是`[0,0,0,0]`，group advantage可以全0，gradient norm可以为0，LoRA参数可以不变。必然要求的是一次基于真实在线group的GRPO optimizer step，不是非零parameter update。非零reward方差、非零advantage、非零gradient、parameter update和vLLM IS mask统计只作为非门禁观察字段记录；参数不变时明确记录`post-step policy is numerically unchanged`。正式run前的vLLM同步资格以受控adapter权重验证同步机制；正式run参数不变时不以相同数值虚构“更新后同步”或“新policy”证据。
 
-在系统闭环基础上还必须：
+### 15.2 Run生命周期与资源结果正交记录
 
-- 同一 group至少同时出现 reward 0和1；
-- TRL记录 `frac_reward_zero_std < 1`（本group）且advantages至少一个非零；
-- policy loss路径有效，finite gradient norm 且 `>0`；
-- 至少一个预期LoRA trainable tensor在optimizer step后发生数值变化；
-- 变化不是checkpoint序列化或optimizer state初始化的假象；
-- vLLM IS correction未把所有有效tokens/sequences mask为0；
-- 从根级final adapter或目标checkpoint重新加载可复现step后LoRA参数。
+run结束、失败或中断时，必须在同一个run级`finally`中收束全部environment、仍存container、Trainer、vLLM、已知worker和本run资源句柄。Trainer/vLLM不在group之间重建或销毁。cleanup状态与两项正式run验收事实分别记录：cleanup失败不能抹去已经完成的真实工具/verifier/GRPO事实，也不能覆盖更早的primary failure；若没有更早failure，未恢复的cleanup failure才以`failure.category="cleanup"`成为本run的primary failure。
 
-不要求单步后任务解决率提高；那是更长训练的效果指标，不是“一次有效update”的验收。
+`clean_release`的硬证据仅来自本run container终态、明确worker PID终态、vLLM engine shutdown返回和本run资源句柄关闭结果。进程内CUDA allocated/reserved计数及其与run前基线的差异只进入`gpu_diagnostics`，不能单独改变cleanup、lifecycle或failure。主进程退出后的GPU状态不由主进程内`run.json`声称。
 
-如果固定任务上的7B持续全0，系统闭环仍成立，但有效学习失败。`num_generations=4`与`max_steps=1`始终不变；一次实施授权内最多运行8个相互独立的run，每个run一个真实group/一次optimizer step，累计32条rollout，seed为`base_seed + attempt_index`。第一次run之后，Agent在每次新run前打印累计GPU时间、Docker container次数和`outputs/`增长并连续执行，不逐组等待批准，也不复用已完成`output_dir`、改reward、塞gold或人工挑completion。若32条预算内始终退化，只能保持“系统闭环通过/有效学习未通过”并停止。第二个任务不属于本计划：只有用户未来主动扩大范围，且先看到第0.2节规定的下载量、镜像/数据/输出空间说明并明确批准后，才能另行修订计划和运行。
+第一阶段没有自动重试、自动resume、基于reward结果的新run启动或跨run结果汇总。任何execution failure或interruption都结束当前CLI并记录当前run；正常策略未达到native path也结束当前CLI，但它是验收结果而不是execution failure。重新执行只能由用户显式再次调用CLI，并创建另一个新run。
 
-第一阶段不要求optimizer step后再执行一条真实SWE rollout。更新后同步由受控生成探针、step前后policy identity及LoRA参数数值证据验收；该探针属于一次实施授权内的阶段2/6生成后端资格，不另行申请授权。resolved率变化不是单步有效学习的验收条件。[用户决策]
+### 15.3 状态组合矩阵
+
+`lifecycle`描述CLI执行是否正常完成，`failure`只记录异常/中断根因，`system_closed_loop`描述两项验收是否同时成立，`cleanup`描述run持有资源的收束结果。四者不得互相代替：[用户决策+纠偏结论]
+
+| 事实组合 | `lifecycle.state` | `failure` | `system_closed_loop` | `cleanup` |
+|---|---|---|---|---|
+| `trainer.train()`正常返回；两项并列事实都为true；硬cleanup通过 | `completed` | `null` | `passed` | `completed / clean_release=true` |
+| `trainer.train()`正常返回；正常策略结果使native path为false；group仍被消费；硬cleanup通过 | `completed` | `null` | `failed` | `completed / clean_release=true` |
+| execution/infrastructure异常 | `failed` | 对应真实category，非null | 两项都为true才可`passed`，否则可控终态为`failed` | 按独立cleanup事实 |
+| 只有cleanup出现未恢复失败 | `failed` | `category="cleanup"` | 仍按两项并列事实判定 | `failed / clean_release=false` |
+| 捕获`KeyboardInterrupt`或可展开SIGTERM | `interrupted` | `category="interrupted"` | 两项都为true才可`passed`，否则可控终态为`failed` | 按best-effort cleanup事实 |
+| 仅进程内CUDA计数未回到run前值，所有硬cleanup证据通过 | 不受该观察影响 | 不受该观察影响 | 不受该观察影响 | `completed / clean_release=true`，差异只写diagnostic |
+
+`pending`只用于run正在进行或SIGKILL/主机崩溃导致最终状态无法写回；正常策略失败不得写入`failure`，也不得归因为environment、verifier或trainer异常。
+
+本验收必然涉及真实7B、vLLM、Docker和GRPO。它不能由普通`pytest`或“实现完成”隐式触发。用户发出第0.3节的一次实施授权后，Agent须在执行前打印精确命令、固定vLLM配置、GPU/显存范围、固定image和container数量、预计时长、4条rollout的输出增长与run级清理范围，然后按第13节执行一次正式CLI。[用户决策]
 
 ## 16. 已确定决策、资格门禁与停止条件
 
-本计划不再保留需要实施Agent临场选择的第一阶段架构未决项。尚未获得运行证据的内容称为**资格门禁**，不是新的授权点。通过则按顺序继续；失败则停止、保存证据并报告。实施Agent不得临场更换依赖范围、模型、任务、LoRA target、量化方案、vLLM参数/拓扑、生成后端、训练框架或另造生成循环，也不得通过改写计划配置掩盖失败。[用户决策]
+本计划不再保留需要实施Agent临场选择的第一阶段架构未决项。正式run之前尚未获得运行证据的内容称为**前置资格门禁**，不是新的授权点；第16.2节A–J通过则按顺序继续，失败则停止、保存证据并报告。正式run中的native policy path与Trainer group consumption不是前后门禁，而是同一次`trainer.train()`后的并列结果。实施Agent不得临场更换依赖范围、模型、任务、LoRA target、量化方案、vLLM参数/拓扑、生成后端、训练框架或另造生成循环，也不得通过改写计划配置掩盖失败。[用户决策+纠偏结论]
 
 ### 16.1 已确定的实现合同
 
@@ -1322,44 +1340,55 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 | Python package/CLI | 显式`src/swe_agent/__init__.py`；`pyproject.toml`固定`swe-agent = swe_agent.cli:main`；唯一正式命令`.venv/bin/swe-agent grpo --config <完整YAML路径>`；`cli.py`只进入`train.run()` |
 | submit | `submit`成功后environment进入terminal-pending，返回terminal observation；TRL再生成一次无工具final assistant turn结束episode；该额外turn计入20次上限 |
 | tokenizer/tool template | 先用目标revision原生模板；失败时只允许一次基于官方Transformers/TRL合同的最小training-safe适配；仍失败即停止，不引入XML/provider协议 |
-| batch/group/step记录 | 第一闭环只创建`batch-0000/group-0000/0000..0003`；runner在train前预分配，reset顺序由TRL fixture证明，成功后只读公开`trainer.state.global_step==1` |
+| batch/group/step记录 | batch/group是run内部索引；第一阶段验收run创建`batch-0000/group-0000/0000..0003`；runner在train前分配，reset顺序由TRL fixture证明，成功后只读公开`trainer.state.global_step==1` |
 | batch/step关联 | 初始`consumed_by_global_steps=[]`；一次optimizer step成功且公开global step为1后写`[1]`；失败保持空数组；无callback、无Trainer subclass、无私有tensor |
 | run writer | 每个environment/verifier仅追加本地内存事件缓冲；main process在generation、reward和finally边界归并，作为唯一写者原子更新`run.json`；不建writer线程、queue或共享文件写 |
 | signal | 必须实现薄SIGTERM handler：设置终止状态并让Python栈进入finally，best-effort返回143；KeyboardInterrupt返回130；SIGKILL/主机/daemon崩溃只保留人工检查边界 |
-| 7B采样 | 正式group固定`num_generations=4`且每run固定`max_steps=1`；系统闭环先运行1个run；有效学习最多累计8个独立runs/8 groups/32 rollouts，seed=`base_seed+attempt_index`；一次实施授权覆盖预算内连续执行，每run只做资源preflight，不再询问 |
+| 7B单run控制 | 正式group固定`num_generations=4`，第一阶段验收run使用`max_steps=1`；一次CLI只创建一个run、一次Trainer/vLLM和一个seed；reward、advantage、gradient或参数变化不触发新run；failure/interruption直接结束CLI |
 | 7B LoRA | BF16 base；r16/alpha32/dropout0；target仅`q_proj,k_proj,v_proj,o_proj`且必须全部存在；失败停止，不扩为all-linear |
 | 30B QLoRA | 第一阶段只冻结完整YAML静态合同：NF4、BF16 compute、double quant、r16/alpha32/dropout0、q/k/v/o projection、context32768和`runtime_qualified=false`；不加载模型，不选TP/DP/FSDP拓扑 |
 | 7B生成后端/GPU | 固定单GPU TP1 colocate+sleep、`use_vllm=true`、`vllm_gpu_memory_utilization=0.3`；不资格0.4/0.5或其他拓扑 |
 | 失败合同 | vLLM任一gate失败即停止并按第12.2节记录；不得切Transformers generate、独立server、自研loop、TP2/TP4、多卡、其他模型/任务/reward或训练框架，依赖与配置保持不变 |
-| post-update SWE | 不属于第一阶段要求；同步用受控生成探针、policy identity和LoRA参数证据验证，不自动再跑真实SWE rollout |
+| post-step SWE | 不属于第一阶段要求；vLLM同步机制在正式run前用受控adapter权重探针验证，正式run只记录参数是否发生数值变化，不自动再跑真实SWE rollout |
 | verifier文件名 | 类型固定`Verification`，文件名固定`verifier.json`；本计划不再讨论重命名 |
 
-### 16.2 实施时必须依次通过的证据门禁
+### 16.2 正式run前必须依次通过的A–J资格门禁
 
 | 门禁 | 通过证据 | 失败动作 |
 |---|---|---|
-| A manifest/resolver | Agent按第1.4节在既定范围内最多尝试3组不重复Torch/vLLM候选；首个成功lock冻结`pyproject.toml/uv.lock` hash；全部计划依赖可解析且不意外落sdist/source build | 单次失败可进入下一候选；三组均失败则保留最后provisional manifest与attempt摘要并停止。冻结后不删依赖、不换版本或后端 |
+| A manifest/resolver | Agent按第1.4节在既定范围内最多评估3组不重复Torch/vLLM候选；首个成功lock冻结`pyproject.toml/uv.lock` hash；全部计划依赖可解析且不意外落sdist/source build | 单个候选失败可进入下一候选；三组均失败则保留最后provisional manifest与候选评估摘要并停止。冻结后不删依赖、不换版本或后端 |
 | B install | locked wheel全部安装成功并记录wheel来源，包括bitsandbytes wheel | 任一声明包wheel失败都意味着唯一环境未建立并停止；这是BNB安装硬门，不是BNB运行能力或7B模型能力gate |
 | C base import | Python、Torch、Transformers、TRL、PEFT、Accelerate、datasets、jmespath、PyArrow、Pydantic、PyYAML和vLLM导入成功 | 任一必需import失败即记录并停止；不执行bitsandbytes import，BNB运行能力仍不参与7B判定 |
 | D CUDA ABI | 一次实施授权下证明Torch wheel/driver/CUDA以及vLLM extension/ABI可用 | 任一失败即停止7B；不改driver、依赖、配置、后端或拓扑 |
 | E tokenizer/native tools | 本地7B tokenizer完成schema、render/parse、EOS和native tool round-trip；原生失败时允许的一次官方模板适配也通过 | 仍失败则停止原生工具路径 |
 | F minimal environment | fixture证明factory/reset、多个call、字符串tool result、submit terminal turn、completion/environment顺序和异常cleanup | 停止，不写完整SWEEnvironment |
 | G 7B LoRA | 一次实施授权下证明BF16构造、冻结base、固定target、trainable set、最小forward/backward及原生save/reload | 停止7B模型路径 |
-| H 7B vLLM | 证明固定单GPU TP1 colocate、sleep/wake、缓存和PEFT更新后merge/full sync | 任一失败即按第12.2节停止并记录；不得修改配置、引入独立server、自研loop或其他拓扑 |
-| I recording合同 | fixture证明固定四条reset顺序稳定映射预分配目录、`trainer.state.global_step`在成功后为1，且main writer正确归并多environment缓冲 | 失败则修正项目recording适配；不得修改或subclass `GRPOTrainer` |
+| H 7B vLLM | 以受控adapter权重证明固定单GPU TP1 colocate、sleep/wake、缓存和PEFT merge/full sync机制 | 任一失败即按第12.2节停止并记录；不得修改配置、引入独立server、自研loop或其他拓扑；该资格不要求正式run产生非零parameter update |
+| I recording合同 | fixture证明run内batch/group索引、固定四条reset顺序、`trainer.state.global_step`在成功后为1，且main writer正确归并多environment缓冲 | 失败则修正项目recording适配；不得修改或subclass `GRPOTrainer` |
 | J Docker/tools/verifier | 一次实施授权下证明固定image、真实六工具、fresh verifier及全部cleanup合同 | 停止，不启动真实训练 |
-| K system loop | 一次实施授权下完成固定task、4 rollouts、真实verifier、一次TRL optimizer step、checkpoint/output/cleanup | 按第15节报告系统通过或失败；不得把程序退出0替代证据 |
-| L effective learning | 在最多8个独立runs/8 groups/32 rollouts预算内出现非退化group、非零gradient和LoRA参数变化 | 未通过则报告“系统闭环通过/有效学习未通过”并停止 |
-| M 30B static boundary | 30B完整YAML可严格解析、`runtime_qualified=false`、CLI拒绝真实启动，业务模块无模型名分支 | 第一阶段不执行BNB/MoE/QLoRA/vLLM/拓扑资格；未来进入30B阶段时先基于4×A100实测制定资格计划，不影响7B结论 |
+
+30B static boundary是第一阶段的独立静态合同：30B完整YAML必须可严格解析、`runtime_qualified=false`、CLI拒绝真实启动且业务模块无模型名分支。第一阶段不执行BNB/MoE/QLoRA/vLLM/拓扑资格；未来进入30B阶段时先基于4×A100实测制定资格计划，不影响7B结论。
 
 上述状态必须严格区分：resolver成功≠安装成功≠import成功≠CUDA extension可用≠7B模型资格通过≠vLLM资格通过≠Docker/SWE系统闭环通过；7B全部通过不等于30B QLoRA通过。bitsandbytes因属于唯一lock而必须通过resolver/wheel安装门禁，但其import、CUDA扩展和4-bit能力仍只在未来30B gate验证。配置字段完整只表示能独立解析和表达方案，不表示对应运行资格已通过；gate失败也不得反向修改配置以制造“通过”。[用户决策]
 
-### 16.3 授权边界
+### 16.3 正式run结束后的并列结果与run级cleanup
+
+以下三项由同一次正式CLI产生，不是依次触发的门禁：[用户决策+纠偏结论]
+
+| 结果维度 | 判定证据 | 结果影响 |
+|---|---|---|
+| `native_policy_path_reached` | 至少一条真实7B rollout形成native tool call、实际repo工具执行、非空patch、submit、fresh verifier和真实reward | true/false据实记录；false是正常policy验收未达标，不抛基础设施异常、不阻止同一group继续被Trainer消费 |
+| `trainer_group_consumed` | 同一run、同一Trainer/vLLM/policy状态下，真实4-rollout group及其reward被`GRPOTrainer`消费并执行一次GRPO optimizer step | reward全0、advantage/gradient为0或参数不变只记录观察值；只有真实Trainer/基础设施异常才令执行失败 |
+| run lifecycle/cleanup | run结束或失败时收束environment、container、Trainer、vLLM、已知worker和runtime handle | cleanup未恢复失败单独记录且不覆盖更早primary failure；进程内CUDA计数只作diagnostic；不在group间重建训练栈，不自动重试或resume |
+
+`system_closed_loop=passed`要求前两项同时为true。它们的证据都来自同一次`trainer.train()`，不得在Trainer前增加预采样，也不得根据第一项的中间结果提前阻断第二项。
+
+### 16.4 授权边界
 
 | 授权 | 允许范围 | 明确不允许 |
 |---|---|---|
 | 当前计划审查 | 只修改本报告 | 任何项目实施或资格 |
-| 用户明确说“计划修改完毕，可以开始实施” | 第0.3节和第13节第一阶段全范围：Agent自行建依赖环境、写源码/配置/测试，显式执行CPU、CUDA、7B模型、固定vLLM colocate TP1、固定Docker、真实rollout、一次GRPO step，以及32条rollout预算内有效学习采样 | 失败后改配置/依赖/后端/拓扑，30B真实运行、第二任务/下载、系统driver/CUDA变更、第三方fork/patch、超过32条rollout或本计划外架构变化 |
+| 用户明确说“计划修改完毕，可以开始实施” | 第0.3节和第13节第一阶段全范围：Agent自行建依赖环境、写源码/配置/测试，显式执行CPU、CUDA、7B模型、固定vLLM colocate TP1、固定Docker，以及一次CLI、一个run、一个真实4-rollout group和一次GRPO optimizer step | CLI内创建第二个run、根据reward/gradient结果自动重启、失败后自动resume、改配置/依赖/后端/拓扑、30B真实运行、第二任务/下载、系统driver/CUDA变更或第三方fork/patch |
 | 第一阶段范围外的新指令 | 只在用户未来明确扩大范围后另行制定 | 不得把第一阶段一次授权外推到30B、第二任务或无上限训练 |
 
 第二任务永远不由本计划自动启用。只有用户未来主动提出扩大任务范围，实施Agent先说明下载量、镜像本地占用、临时峰值、`data/assets/outputs`增长和剩余磁盘，再获得手动批准，才可修改计划；在此之前固定任务`getmoto__moto-7023`是唯一允许的Docker/SWE样本。[用户决策]
@@ -1374,7 +1403,7 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 2. **一开始就要求 4×A100 全量组合不提高7B核心闭环可信度。** 第一阶段7B只资格单GPU TP1 vLLM；多卡会额外引入DDP/TP/NCCL，却不能证明SWE领域链更正确。若固定TP1失败，应记录并停止，不临场探索多卡。30B不在第一阶段运行，未来拓扑不能从7B结论推导。
 3. **vLLM colocate/sleep是本项目固定生成后端，但普通测试不能隐式启动大型vLLM。** 用户给出一次实施授权后，Agent应在资源preflight后主动完成7B vLLM资格和真实GRPO，无需逐次询问；若vLLM失败，忠实保留计划配置和失败证据并停止。把失败自动转换为另一后端会使最终系统与已审计划不一致，因此明确禁止。
 4. **要求“保留完整Trajectory schema”若指字段逐字兼容，会把旧训练概率惯性带入新项目。** 应保留语义，不保留每Step全量messages/raw response和PolicyTrace；否则适配成本高于审计价值。
-5. **第一阶段同时追求系统闭环与固定任务上的非退化group可能不现实。** 7B能力和二值稀疏reward可能使固定任务长期全0。两级验收的区分是合理的；若强制二者必须在同一次固定task run中成功，可能把随机能力问题误作系统失败。
+5. **第一阶段不能把特定reward分布或非零parameter update作为硬目标。** 7B能力和二值稀疏reward可能使固定任务group全0，但只要真实native tool call、repo交互、patch、fresh verifier、reward和TRL消费链成立，零advantage、零gradient和参数不变都是合法观察结果。用自动新run寻找非零parameter update会把随机结果误作系统资格，并破坏单run policy语义。
 6. **为30B预建通用模型插件、FSDP状态机或MoE业务特例都应删除。** 第一阶段只需两份完整、平铺、独立YAML和共享代码边界；旧30B资源/生命周期复杂度不能自动搬到7B。30B的TP/DP/FSDP选择必须留给未来真实QLoRA与4×A100证据，不能提前锁成TP1。
 7. **网络安全、认证和通用并发治理不是“以后再补”，而是永久非目标。** 旧项目中的owner receipt、GPU owner状态、provider/policy identity和digest链不能以“可审计”或“并发安全”为由迁移。组内多个rollout只需要显式资源handle和repo隔离；把它升级成接入认证、租约、锁或调度平台会直接偏离核心闭环。[用户决策]
 
@@ -1410,7 +1439,7 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 3. `SWEEnvironment`提供native tool methods、内存中的`Step`列表、submit/finalize；
 4. `binary_reward(completions,environments)`运行fresh verifier，一个`train.py`按完整YAML构造7B LoRA（未来同入口构造30B QLoRA）/Trainer并用顶层`finally`收束资源。
 
-只使用一个`outputs/<run-id>`：根级`config.yaml/run.json/train.log`，`rollouts/batch-*/group-*`下每条SWE rollout保存`messages.json/trajectory.json/final_patch.diff/verifier.json`中的实际适用项；全部container、子进程和GPU allocation cleanup历史只进入动态`run.json`；Trainer自己写`checkpoint-<global_step>/`并由原生`save_model(output_dir)`写根级final adapter。没有单独ToolSpec runtime registry（只有固定六工具定义与共享validator）、没有`PolicyVersion/PolicyTrace/GRPOBatch`、没有外部vLLM service manager、没有第二套report/failure/manifest体系，也没有post-update rollout硬门。
+只使用一个`outputs/<run-id>`：根级`config.yaml/run.json/train.log`，`rollouts/batch-*/group-*`下每条SWE rollout保存`messages.json/trajectory.json/final_patch.diff/verifier.json`中的实际适用项；全部container、子进程和runtime handle cleanup历史及CUDA diagnostic只进入动态`run.json`；Trainer自己写`checkpoint-<global_step>/`并由原生`save_model(output_dir)`写根级final adapter。没有单独ToolSpec runtime registry（只有固定六工具定义与共享validator）、没有`PolicyVersion/PolicyTrace/GRPOBatch`、没有外部vLLM service manager、没有第二套report/failure/manifest体系，也没有post-step rollout硬门。
 
 | 对照 | 前文推荐迁移架构 | 从零最小架构 |
 |---|---|---|
@@ -1429,28 +1458,28 @@ run_id: null                 # 默认按UTC-Z+4位随机码生成；显式值只
 |---|---|---|---|
 | native env无法表达submit立即done | **部分成立**：environment没有done hook | 不阻塞 | 固定采用terminal observation + 一次无工具final assistant turn；计入20次上限 |
 | Qwen2.5原生template不兼容 | 官方模板/TRL映射支持，实际revision未测 | 阻塞native tool路径 | 只允许一次官方training-safe模板适配；仍失败即停止 |
-| PEFT更新无法同步colocate vLLM | 源码有merge/full sync路径，完整组合未测 | 阻塞第一阶段系统闭环 | 保持`use_vllm=true`和原配置，记录同步证据并停止；不引入其他后端、独立server或自研loop |
+| PEFT权重无法通过merge/full路径同步到colocate vLLM | 源码有merge/full sync路径，完整组合未测 | 阻塞第一阶段系统闭环 | 正式run前用受控adapter权重资格同步机制；保持`use_vllm=true`和原配置，失败时记录并停止；不要求正式run必须产生非零parameter update，也不引入其他后端、独立server或自研loop |
 | sleep或单GPU TP1显存不成立 | 源码有路径，但wheel/显存未测 | 阻塞第一阶段系统闭环 | 只资格计划值`gpu_memory_utilization=0.3`；失败记录并停止，不改参数或拓扑 |
 | pool env导致repo串扰 | 若reset不重建则必然成立 | 阻塞可信度 | reset必须先清理旧sandbox再创建fresh sandbox；cleanup失败则停止reset |
 | TRL completion无法一一映射Observation wire ID | callable拿不到稳定wire ID，但environment掌握执行顺序 | 不阻塞 | `Step.index`是领域关联；`messages.json`独立保存wire事实，不做不可靠双向ID |
 | generation batch没有独立公开ID | 锁定源码需fixture确认reset/completion顺序；第一闭环只有一个预分配batch/group | 不阻塞GRPO数学，只影响记录 | 固定目录由runner预分配，成功后读取公开global step；不为ID增加callback/subclass |
-| 固定task的7B group持续退化 | 旧30B真实group已有全0证据，风险现实 | 不阻塞系统闭环，阻塞有效学习 | group固定4、每run固定一步；一次实施授权内最多8个独立runs/32 rollouts，seed按attempt递增，每run preflight但不询问；仍退化则停止并如实报告 |
-| vLLM IS把全部有效序列mask | sequence-level mask在锁定版本真实存在 | 阻塞有效学习 | 保持标准TRL配置并记录公开ratio/mask聚合；若全部mask则有效学习失败，不关correction |
+| 固定task的7B group reward全0或全1 | 旧30B真实group已有全0证据，风险现实 | 不阻塞系统闭环 | group固定4；如实记录reward、advantage、gradient和参数变化；不改变任务/group size，不启动新run |
+| vLLM IS把全部有效序列mask | sequence-level mask在锁定版本真实存在 | 不阻塞系统路径事实，但会令本次更新无有效数值贡献 | 保持标准TRL配置并记录公开ratio/mask聚合；不关闭correction，不启动新run |
 | 30B无需改SWE主流程但资源拓扑未知 | 软件边界成立，QLoRA/MoE/BNB与4×A100资源边界未证明 | 不阻塞7B | 第一阶段只验证静态配置与CLI拒绝运行；未来30B阶段先取实测证据再选择拓扑，不写模型专属业务补丁 |
 
-“optimizer step后必须立即post-update真实SWE rollout”已从第一阶段删除。它不是证明这一次GRPO update所必需；权重同步采用受控生成探针、step前后policy identity和LoRA参数证据。该探针属于一次实施授权内的生成后端资格，不启动额外真实SWE/Docker episode。
+“optimizer step后必须立即执行post-step真实SWE rollout”已从第一阶段删除。一次GRPO optimizer step不保证发生非零parameter update；vLLM权重同步机制在正式run前采用受控adapter权重探针资格。正式run记录step前后policy identity、参数是否变化及可获得的同步事实；参数不变时只声明`post-step policy is numerically unchanged`。该探针属于一次实施授权内的生成后端资格，不启动额外真实SWE/Docker episode。
 
 ### 17.6 独立最终判断
 
 - **总体合理**：TRL控制通用rollout/GRPO，旧项目保留SWE领域资产，是正确分界；
 - **原样保留**：固定Task/资产资格、私有offline evaluator输入、gold仅资格可见边界、Docker隔离、六工具领域校验、fresh verifier、二值reward、termination/Verification/run-infra分离、Action/Observation/patch证据；
 - **简化**：Trajectory字段、run metadata和submit终止；第一阶段7B不建设多卡/FSDP平台，30B运行拓扑推迟到未来实证阶段；
-- **推迟**：完整optimizer resume、长期吞吐、Signal Reshaping和context management；post-update真实SWE rollout从第一阶段删除；
+- **推迟**：完整optimizer resume、长期吞吐、Signal Reshaping和context management；post-step真实SWE rollout从第一阶段删除；
 - **删除**：raw XML production协议、旧model client/AgentLoop控制面、PolicyTrace、GRPOBatch、自研objective/trainer、外部vLLM service和adapter激活状态机、旧vLLM plugin；
 - **当前不可原样实现**：旧submit立即终止；本计划已经固定采用terminal final turn，不保留另一条TRL路线；
-- **当前不能实施**：目标7B文件可用性已经解决，但报告仍待用户确认，driver兼容的Torch/vLLM lock及目标栈加载资格尚未执行；只有用户明确发出一次实施授权后，Agent才从阶段0连续推进；
+- **当前暂停实施**：依赖环境、目标7B文件和大部分工程底座已经存在，但第21节记录的native policy path和系统闭环尚未通过；历史run只按旧CUDA基线硬门记录cleanup失败，修订后的container/PID/vLLM shutdown/runtime handle硬释放合同尚未由新run验证；只有用户审查修订计划并明确授权后，Agent才从实际未通过的门禁继续；
 - **最终推荐**：采用第5节主方案，并吸收第17.4节最小架构的克制原则；
-- **对前文修订**：先建立环境与入口，再做接口资格和领域迁移；vLLM colocate/sleep是7B唯一生成后端，失败时保留配置、记录并停止；一次实施授权覆盖完整第一阶段，不逐gate询问；post-update SWE rollout不进入第一阶段；custom reward+environment finalizer是唯一reward源；领域执行只用`Step.index`，不假设存在wire ID。
+- **对前文修订**：先建立环境与入口，再做接口资格和领域迁移；vLLM colocate/sleep是7B唯一生成后端；一次CLI只产生一个run并构造一次Trainer/vLLM，失败时保留当前run、记录并停止；group是run内部采样/训练单位；非零parameter update仅作观察；post-step SWE rollout不进入第一阶段；custom reward+environment finalizer是唯一reward源；领域执行只用`Step.index`，不假设存在wire ID。
 
 ## 18. 单次 `output_dir` 的文件合同
 
@@ -1517,7 +1546,8 @@ lifecycle:
   state: "running" | "completed" | "failed" | "interrupted"
 failure: null | {
   category: "dependency" | "model" | "generation_backend" | "environment" |
-            "docker" | "verifier" | "trainer" | "recording" | "interrupted",
+            "docker" | "verifier" | "trainer" | "recording" | "cleanup" |
+            "interrupted",
   primary_type: str,
   message: str,
   stage: str,
@@ -1525,7 +1555,8 @@ failure: null | {
 }
 training:
   system_closed_loop: "pending" | "passed" | "failed"
-  effective_learning: "pending" | "passed" | "failed" | "not_applicable"
+  native_policy_path_reached: bool | null
+  trainer_group_consumed: bool | null
   global_step: int
   groups_generated: int
   rollouts_generated: int
@@ -1536,19 +1567,24 @@ training:
   frac_reward_zero_std: float | null
   checkpoints: list[str]
   final_model_ref: str | null
-  lora_parameters_changed: "pending" | "passed" | "failed" | "not_applicable"
+  observations:
+    reward_degenerate: bool | null
+    nonzero_advantage_observed: bool | null
+    nonzero_gradient_observed: bool | null
+    nonzero_parameter_update_observed: bool | null
+    all_sequences_masked_by_is: bool | null
 cleanup:
   state: "pending" | "completed" | "failed"
   clean_release: bool | null
-  residuals: list[str]                # container ID/name、PID或GPU device标识
+  residuals: list[str]                # container ID/name、PID或runtime handle标识；不由CUDA计数单独生成
   containers: list[{
     episode_id: str | null,
     task_id: str,
     scope: "rollout" | "verifier",
     container_id: str | null,
     container_name: str,
-    attempts: list[{
-      attempt: int,
+    operations: list[{
+      sequence: int,
       at: UTC-Z str,
       operation: "remove",
       result: "success" | "not_found" | "failed",
@@ -1560,8 +1596,8 @@ cleanup:
   processes: list[{
     scope: "vllm_worker" | "trainer_worker",
     pid: int,
-    attempts: list[{
-      attempt: int,
+    operations: list[{
+      sequence: int,
       at: UTC-Z str,
       operation: "terminate" | "join" | "verify_exit",
       result: "success" | "not_found" | "failed",
@@ -1570,7 +1606,20 @@ cleanup:
     final_state: "exited" | "not_found" | "residual",
     residual: bool
   }]
-  gpu_allocations: list[{
+  runtime_handles: list[{
+    scope: "environment" | "trainer" | "vllm_engine" | "model",
+    identifier: str,
+    operations: list[{
+      sequence: int,
+      at: UTC-Z str,
+      operation: "close" | "shutdown" | "release",
+      result: "success" | "not_initialized" | "failed",
+      error: str | null
+    }],
+    final_state: "closed" | "released" | "not_initialized" | "residual",
+    residual: bool
+  }]
+  gpu_diagnostics: list[{
     device: str,
     owner_pid: int,
     allocated_bytes_before: int | null,
@@ -1579,21 +1628,23 @@ cleanup:
     reserved_bytes_after: int | null,
     baseline_allocated_bytes: int | null,
     baseline_reserved_bytes: int | null,
-    verified_at: UTC-Z str | null,
-    state: "pending" | "released" | "residual",
-    error: str | null
+    observed_at: UTC-Z str | null,
+    diagnostic_only: true,
+    note: str | null
   }]
 ```
 
-这些状态不得用`false`同时表达“尚未评估”和“评估未通过”。`run.json`创建时三个training判定均为`pending`；某项没有进入实际评估才写`not_applicable`，已经取得证据的项即使run后来因其他原因失败也保留自己的`passed/failed`。cleanup初始为`state="pending"/clean_release=null`，只有释放检查结束后才写终态。训练失败与cleanup失败是正交维度：`failure`保存primary训练/基础设施根因；`cleanup.containers/processes`保存全部释放attempt，`gpu_allocations`保存本run GPU释放前后与空闲基线。某次remove/terminate/join失败、稍后重试成功时，旧attempt不可覆盖，最终应为`residual=false`但`clean_release=false`。只要有residual，overall lifecycle不能声称completed；若训练成功但cleanup历史有一次可恢复失败，lifecycle可以记录completed，同时系统闭环验收仍因`clean_release=false`不通过。[用户决策+建议]
+`native_policy_path_reached`与`trainer_group_consumed`按第15.1节在同一次`trainer.train()`后并列写入；`system_closed_loop`只在二者均为true时passed。两者任一为false时，正常返回的run可以是`lifecycle="completed"/failure=null/system_closed_loop="failed"`。`observations`中的布尔值为nullable数值事实，不是通过门禁；其中`nonzero_parameter_update_observed=false`明确表示optimizer step后参数数值不变，不能写成发生了parameter update。`pending/null`只用于仍在运行或未能完成观测的状态。[用户决策+纠偏结论]
 
-`processes[]`只登记本run明确启动的vLLM/Trainer子进程，不登记或扫描其他作业；colocate engine完全在主进程内且没有子PID时数组可以为空。`gpu_allocations[]`由main writer在资格时记录空闲基线，并在engine/model teardown、worker join和framework cache释放后写cleanup前后计数；只有回到该基线才可写`released`。主CLI进程退出本身由调用方观察的退出码证明，不伪造为run内已经退出的process记录。[建议]
+cleanup初始为`state="pending"/clean_release=null`，只有run级硬释放检查结束后才写终态。execution failure与cleanup failure是正交维度：`failure`保存最早的primary根因；`cleanup.containers/processes/runtime_handles`保存释放操作和最终硬状态。cleanup错误不能覆盖更早primary failure；若没有更早错误，首个未恢复cleanup错误以`category="cleanup"`成为primary。只要这些硬资源存在residual，lifecycle不能声称completed。[用户决策+建议]
+
+`processes[]`只登记本run明确启动的vLLM/Trainer子进程，不登记或扫描其他作业；colocate engine完全在主进程内且没有子PID时数组可以为空。`runtime_handles[]`记录vLLM engine shutdown是否返回、Trainer/model/environment句柄是否关闭或释放。`gpu_diagnostics[]`只记录主进程退出前PyTorch allocator的before/after/baseline数值；不提供`released/residual`状态，不参与`clean_release`或lifecycle判定。主CLI进程退出本身由调用方观察的退出码证明，进程内`run.json`不能证明自身退出后的GPU状态；未来如需该事实，只能由父launcher在训练子进程退出后单独观察。[建议]
 
 `run.json`不复制完整config、messages、Trajectory、patch或verification stdout/stderr。run级reward摘要是跨batch聚合；每个group的reward vector以`group.json`为主。固定输入hash可记录，但不建立digest chain。[建议]
 
 ### 18.3 Batch、group 与 rollout 文件职责
 
-`batch.json`表达一次generation batch而非checkpoint。字段集合和类型固定如下；索引可支持后续长run，但第一阶段每个独立run只有index 0：[用户决策]
+`batch.json`表达一个run内部的一次generation batch而非checkpoint。字段集合和类型固定如下；索引属于run内部，第一阶段验收run只有index 0：[用户决策]
 
 ```text
 schema_version: "1"
@@ -1630,7 +1681,7 @@ verification_counts:
   not_run: int
 ```
 
-第一阶段每个run固定`max_steps=1`，所以实际值必须为`batch_index=0`、`batch_id="batch-0000"`、`global_step_at_generation=0`、`groups=["group-0000"]`；成功完成一次optimizer step后`consumed_by_global_steps=[1]`，此前、失败或中断时为`[]`。捕获到`KeyboardInterrupt`或薄`SIGTERM`边界时，当前active batch/group都原子更新为`interrupted`，batch和run写各自`finished_at`，run lifecycle同步为`interrupted`；普通异常写`failed`。`SIGKILL`、主机崩溃或无法回到Python的runtime崩溃可能遗留`running`及仍为null的结束时间，它表示未完成写回的崩溃证据，不能被读取方猜成failed或interrupted。有效学习的追加尝试创建新的run，而不是在已完成run中产生`batch-0001`；上述泛化索引只为将来真正增加单run训练步数时保持文件合同稳定，不改变第一阶段行为。[用户决策]
+第一阶段验收run固定`max_steps=1`，所以实际值必须为`batch_index=0`、`batch_id="batch-0000"`、`global_step_at_generation=0`、`groups=["group-0000"]`；成功完成一次optimizer step后`consumed_by_global_steps=[1]`，此前、失败或中断时为`[]`。捕获到`KeyboardInterrupt`或薄`SIGTERM`边界时，当前active batch/group都原子更新为`interrupted`，batch和run写各自`finished_at`，run lifecycle同步为`interrupted`；普通异常写`failed`。`SIGKILL`、主机崩溃或无法回到Python的runtime崩溃可能遗留`running`及仍为null的结束时间，它表示未完成写回的崩溃证据，不能被读取方猜成failed或interrupted。reward或更新数值不触发新的batch或run；同一CLI内不存在run级循环。[用户决策]
 
 两者不保存完整messages、patch、verification正文、advantage、old/current/reference logprob或token mask。失败详情统一进入`run.json.failure`和`train.log`，避免再造batch/group泛型failure对象。
 
@@ -1641,13 +1692,13 @@ verification_counts:
 - `final_patch.diff`：最终冻结patch的唯一正文；无合法非空patch时可以不存在，不在其他JSON嵌正文/hash/path。
 - `verifier.json`：仅在真实verifier形成resolved/unresolved结论时存在，内容schema是`Verification`及有界必要输出。verifier setup/timeout/无marker/Docker/cleanup失败不制造假result，详情进入`run.json.failure/cleanup`和`train.log`。
 
-run recorder负责目录分配与索引文件写入。environment/verifier只维护领域事实和自己的本地内存事件缓冲，不能调用共享writer或直接竞争写`run.json`。第一闭环只有一个预分配`batch-0000/group-0000`；TRL按input顺序reset并将同序environments传给reward的合同先由fixture确认，然后四次episode reset依次绑定`0000..0003`。训练成功后只读取公开`trainer.state.global_step`写消费关系。不得为记录引入callback/Trainer subclass，不得用checkpoint编号倒推rollout，也不得读取TRL私有tensor。[官方源码事实+用户决策+待实施验证]
+run recorder负责run内目录分配与索引文件写入。environment/verifier只维护领域事实和自己的本地内存事件缓冲，不能调用共享writer或直接竞争写`run.json`。第一阶段验收run分配一个`batch-0000/group-0000`；TRL按input顺序reset并将同序environments传给reward的合同先由fixture确认，然后四次episode reset依次绑定`0000..0003`。训练成功后只读取公开`trainer.state.global_step`写消费关系。不得为记录引入callback/Trainer subclass，不得用checkpoint编号倒推rollout，也不得读取TRL私有tensor。[官方源码事实+用户决策+待实施验证]
 
 ### 18.4 Checkpoint与最终adapter
 
 `GRPOConfig`继承Transformers `TrainingArguments`。在无超参搜索时，`Trainer._save_checkpoint()`固定写`output_dir/checkpoint-<global_step>/`，并在默认`save_only_model=False`时保存adapter/model、optimizer、scheduler、RNG和`trainer_state.json`；`resume_from_checkpoint=True`也从同一`output_dir`寻找最后checkpoint。[官方源码事实]
 
-第一闭环显式`max_steps=1, save_strategy="steps", save_steps=1`，预期产生`checkpoint-1/`；长期运行则按真实global step产生多个目录。checkpoint是模型/optimizer状态，不是rollout容器：一个batch可被多个optimizer step消费，多个batch/group也可能共同参与一个step，保存频率又由save策略决定。因此明确拒绝自定义`checkpoints/0000 ↔ rollouts/0000`一一对应，也不建立包装层。最小关系只写`batch.json.consumed_by_global_steps`和`run.json.training.checkpoints[]`。[官方源码事实+用户决策]
+第一阶段验收run显式`max_steps=1, save_strategy="steps", save_steps=1`，预期产生`checkpoint-1/`；checkpoint是模型/optimizer状态，不是rollout容器，一个batch/group与checkpoint不存在一一对应关系。因此明确拒绝自定义`checkpoints/0000 ↔ rollouts/0000`包装层，最小关系只写`batch.json.consumed_by_global_steps`和`run.json.training.checkpoints[]`。第一阶段保存完整Trainer checkpoint事实，但不自动resume。[官方源码事实+用户决策]
 
 训练完成后，入口调用Trainer原生`save_model(output_dir)`。本地TRL main的官方`trl/scripts/grpo.py`确实在`trainer.train()`后这样调用；Transformers `save_model`写`training_args.bin`，PEFT `save_pretrained`通常写`adapter_config.json`与`adapter_model.safetensors`。这些根级文件是最终可加载adapter，不是resume checkpoint；具体额外文件集合必须以最终锁定版本实测为准。[官方源码事实]
 
@@ -1658,24 +1709,24 @@ run recorder负责目录分配与索引文件写入。environment/verifier只维
 ```text
 解析配置并生成run-id
 → 以“必须不存在”方式创建output_dir
-→ 原子写config.yaml和初始run.json(lifecycle=running；training判定=pending；cleanup.state=pending/clean_release=null)，打开train.log
+→ 原子写config.yaml和初始run.json(lifecycle=running；system_closed_loop=pending；cleanup.state=pending/clean_release=null)，打开train.log
 → 每次generation由run recorder分配batch/group/rollout目录
 → 原子写messages/trajectory/final_patch/verifier与batch/group索引
-→ environment/verifier把cleanup attempt追加到各自本地内存缓冲
+→ environment/verifier把cleanup operation追加到各自本地内存缓冲
 → Trainer原生写checkpoint-<global_step>/
 → train结束调用原生save_model(output_dir)
-→ finally先冻结live container才可取得的patch/诊断，再遍历container cleanup，关闭vLLM engine并join已知子进程，释放本run GPU allocation
-→ main process在generation/reward/finally边界归并缓冲，合并primary failure、training摘要、全部cleanup历史、GPU基线对账和residual
+→ finally先冻结live container才可取得的patch/诊断，再遍历container cleanup，关闭vLLM engine、释放Trainer/model/environment句柄并join已知子进程
+→ main process在generation/reward/finally边界归并缓冲，合并primary failure、两项并列验收事实、全部cleanup硬证据、进程内CUDA诊断数值和residual
 → 最后原子更新run.json的finished_at与lifecycle
 ```
 
 `run.json`只有一个主进程写者：environment、verifier和reward不持有writer，不启动writer线程或queue，只在各自本地内存中追加事件；main process在generation、reward和`finally`边界确定性地drain/merge。signal handler本身只设置终止标志/抛出可展开异常，不在handler内做文件I/O，主控制流进入`finally`后再归并和写入。writer每次构造完整新文档，写同目录临时文件、flush/fsync后`os.replace`，必要时fsync父目录。`batch.json`/`group.json`及rollout JSON采用相同的单文件原子替换；`train.log`允许追加。Trainer checkpoint/final model完全交给框架，不套项目原子协议。[用户决策+建议]
 
-普通异常令lifecycle=`failed`，`KeyboardInterrupt`/可展开SIGTERM令run及active batch/group为`interrupted`；两者都先在memory保留primary failure，再执行finally cleanup，最后一次原子写入同时保存原始根因、training各项判定和cleanup维度。cleanup期间每个environment/verifier的`close()`或子进程退出尝试返回/抛错后，main process立即drain全部attempt并刷新，避免后续中断丢掉已知container ID/PID；environment内部不直接写文件。一个资源cleanup失败不能阻止其余资源尝试。[建议]
+普通异常令lifecycle=`failed`，`KeyboardInterrupt`/可展开SIGTERM令run及active batch/group为`interrupted`；两者都先在memory保留primary failure，再执行run级finally cleanup，最后一次原子写入同时保存原始根因、training事实和cleanup维度。正常策略未达到native path但`trainer.train()`正常返回时，lifecycle仍为`completed`、failure为null、system_closed_loop为failed。cleanup期间每个environment/verifier的`close()`、runtime handle释放或子进程退出操作返回/抛错后，main process立即drain全部operations并刷新，避免后续中断丢掉已知container ID/PID/handle；environment内部不直接写文件。一个资源cleanup失败不能阻止其余资源的best-effort收束，也不能覆盖更早primary failure；只有最终未恢复的cleanup失败才改变cleanup/lifecycle，CUDA diagnostic偏离基线本身不改变终态。[建议]
 
-若SIGKILL/主机崩溃发生在最终写前，`run.json`可能仍是`running`或只含部分cleanup attempts；这解释为异常中止/最终状态未知，人工根据mtime、train.log、已记录ID和labels检查，不自动恢复。原子替换保证读者看到旧完整版本或新完整版本，不保证最后一个事件必然落盘。[建议]
+若SIGKILL/主机崩溃发生在最终写前，`run.json`可能仍是`running`或只含部分cleanup operations；这解释为异常中止/最终状态未知，人工根据mtime、train.log、已记录ID和labels检查，不自动恢复。原子替换保证读者看到旧完整版本或新完整版本，不保证最后一个事件必然落盘。[建议]
 
-默认新run绝不复用已有目录。resume必须显式指定已有run-id和Trainer checkpoint并在原`output_dir`继续；不能仅因发现lifecycle仍为running就自动resume，也不能复制checkpoint到新run伪装连续训练。[建议]
+默认新run绝不复用已有目录。第一阶段不因发现`lifecycle=running/failed/interrupted`而自动恢复，也不把旧checkpoint复制到新run继续；任何重新执行都必须由用户显式启动新的CLI调用和新run。Trainer checkpoint仍保留原生完整性，但resume不属于本阶段自动控制流。[建议]
 
 ### 18.6 专项复审的十项结论
 
@@ -1747,16 +1798,157 @@ run recorder负责目录分配与索引文件写入。environment/verifier只维
 
 ## 20. 最终迁移决策摘要
 
-在报告经用户确认定稿并明确授权实施后，首先以 **TRL 1.8.0目标源码基线 + driver兼容的待解析依赖搜索空间**执行阶段0，而不是直接采用“Transformers5.13/vLLM0.23/Torch2.11”预选栈。实施Agent在既定范围内最多迭代3组不重复Torch/vLLM精确候选，首个resolver成功解才冻结`pyproject.toml/uv.lock`，随后对冻结lock只执行一次`uv sync --locked`并验证基础import；冻结后不再换版本或后端。bitsandbytes因属于唯一普通依赖集合，其resolver/wheel安装是环境硬门，但BNB import、CUDA扩展、4-bit和MoE能力不是7B gate。随后先建立完整配置和正式入口，再依次执行Torch/vLLM CUDA、已核验本地Qwen2.5模型、固定vLLM colocate TP1/sleep/sync资格。本机模型可读别名与4个权重分片已经确认齐全，不需要下载。普通pytest默认不触发GPU/Docker；大型资格和真实作业由Agent在一次实施授权后经资源preflight显式执行。任一vLLM gate失败都保留依赖与配置、记录并停止。`scripts/`只保留启动真实作业的`grpo.sh`。当前没有执行上述任何步骤。
+环境阶段已经实际冻结并安装`TRL 1.8.0 + vLLM 0.22.1+cu129 + Torch 2.11.0+cu129`等组合，项目骨架、领域实现、固定任务资产、Docker/tools/verifier和真实run产物也已存在；这些事实以第21节及当前lock/run记录为准，不再把阶段0描述成尚未执行。修订计划获批后只从实际未通过的门禁继续，同时仍以既有冻结lock、固定Qwen2.5模型和vLLM colocate TP1/sleep/sync合同为基线。普通pytest默认不触发GPU/Docker；大型资格和一次正式run由Agent在后续授权后经资源preflight显式执行。任一硬gate失败都保留依赖、配置和当前run证据并停止。`scripts/`只保留启动真实作业的`grpo.sh`。
 
 Docker/SWE-Gym 实施始终受第0.2节约束：只运行 `getmoto__moto-7023` 和当前已存在的固定 image ID，不自动 pull/build/load/rmi/prune。任何第二任务在用户收到下载量、镜像本地占用、临时峰值、`data/assets/outputs`增长与磁盘余量说明并明确批准前，不得下载或运行。固定 image 长期保留；每条 rollout/verifier 的临时 container 才在 `finally` 中清理。
 
 领域实现仍采用pooled `SWEEnvironment.reset()`为每次rollout创建fresh repo；custom binary reward只通过`finalize()`执行正常证据冻结、rollout close和fresh verifier，runner顶层`finally`则独立于reward遍历factory创建的全部environment并兜底`close()`。这让TRL独占messages、token/logprob/mask/advantage/loss/optimizer/checkpoint和vLLM同步，又不把container cleanup建立在reward一定被调用的假设上。一个实际执行tool call形成一个`Step`，只用连续`Step.index`排序和配对Action/Observation；wire messages独立落盘，不向核心领域模型注入tool call ID或message index。工具严格复用旧六工具语义，但新调用链只使用`Action(tool_name, arguments)`和精简`Observation`，没有XML或重复参数解析。
 
-首个正式目标是7B BF16 LoRA + native multi-turn + real Docker/verifier + 一个TRL optimizer step。生成后端固定为单GPU TP1 vLLM colocate/sleep/sync，`use_vllm=true`、memory utilization 0.3；任一gate失败时按已冻结合同保留配置、记录并停止，不切Transformers generate、独立server、自研loop、其他参数或多卡vLLM。7B资格不要求BNB import、BNB CUDA extension、4-bit load、Params4bit或vLLM BNB realization。实际tokenized prompt上限8192、completion上限22528并保留不可借用的2048-token context margin，资格与正式入口使用同一计数函数。正式group固定4条rollout且每run固定一步；系统闭环先跑一个run，有效学习在同一次实施授权内最多累计8个独立runs/8 groups/32 rollouts，seed按attempt递增，每run做资源preflight但不另行批准。CLI结束只在终端汇总全部run ID，并分别指向首个系统证据run、首个有效学习run、停止run和最强已有证据run；每个run的checkpoint/final adapter始终独立，不存在跨run隐式“最终adapter”。后续30B-A3B只在第一阶段提供完整QLoRA/vLLM配置入口与共享代码边界；BNB/MoE/PEFT/forward-backward、vLLM realization/sync与4×A100拓扑全部尚未运行证明，也不被预先锁为TP1。
+首个正式目标是7B BF16 LoRA + native multi-turn + real Docker/verifier + 一个基于真实在线group的GRPO optimizer step。生成后端固定为单GPU TP1 vLLM colocate/sleep/sync，`use_vllm=true`、memory utilization 0.3；任一前置gate失败时按已冻结合同保留配置、记录并停止，不切Transformers generate、独立server、自研loop、其他参数或多卡vLLM。7B资格不要求BNB import、BNB CUDA extension、4-bit load、Params4bit或vLLM BNB realization。实际tokenized prompt上限8192、completion上限22528并保留不可借用的2048-token context margin，资格与正式入口使用同一计数函数。正式group固定4条rollout；一次CLI只创建一个run、一次Trainer/vLLM和一条run内policy状态，第一阶段验收run完成一个group和一次GRPO optimizer step。`native_policy_path_reached`与`trainer_group_consumed`在同一次`trainer.train()`后并列判定，二者均为true才是系统闭环；正常policy未达标允许`lifecycle=completed/failure=null/system_closed_loop=failed`。reward全0、advantage/gradient为0或参数不变只作为观察事实，不启动新run。CLI结束只汇总当前run。后续30B-A3B只在第一阶段提供完整QLoRA/vLLM配置入口与共享代码边界；BNB/MoE/PEFT/forward-backward、vLLM realization/sync与4×A100拓扑全部尚未运行证明，也不被预先锁为TP1。
 
 新项目唯一Python包是`src/swe_agent/`，内部导入统一`from swe_agent...`，核心领域模型只定义于`src/swe_agent/models.py`；当前filesystem目录名不进入import路径，也不是命名债务。两份配置`configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml`与`configs/grpo_swegym_qwen3_coder_30b_a3b_qlora.yaml`平铺在`configs/`，都是完整、独立、无继承的配置入口：每份可独立解析并表达完整方案，但实际可执行性必须由各自资格决定，尤其30B不得描述为已经通过。锁定数据集放`data/`，版本化小型任务输入放`assets/`，所有真实run只进入`outputs/<run-id>`并直接作为TRL/Transformers `output_dir`；run ID始终由`datetime.now(UTC)`生成UTC-Z时间戳并追加4位十六进制随机码。
 
-Trainer原生写`checkpoint-<global_step>/`，训练入口原生`save_model(output_dir)`写根级final adapter；项目不搬运、不改名、不按rollout编号包装checkpoint。第一闭环预分配唯一`batch-0000/group-0000/0000..0003`，训练成功后只读公开`trainer.state.global_step==1`写`consumed_by_global_steps=[1]`；不增加callback或Trainer subclass。batch/group捕获中断时显式写`interrupted`，只有无法返回Python的崩溃才可能遗留`running`。每个environment/verifier只缓冲本地事件，main process在确定边界归并并作为唯一写者原子更新`run.json`；training与cleanup使用显式pending/终态，不用false混淆未评估，cleanup分别记录container、子进程和GPU allocation释放证据。旧项目artifact路径只作为历史证据，不迁入新项目。
+Trainer原生写`checkpoint-<global_step>/`，训练入口原生`save_model(output_dir)`写根级final adapter；项目不搬运、不改名、不按rollout编号包装checkpoint。第一阶段验收run分配`batch-0000/group-0000/0000..0003`，训练成功后只读公开`trainer.state.global_step==1`写`consumed_by_global_steps=[1]`；不增加callback或Trainer subclass。batch/group捕获中断时显式写`interrupted`，只有无法返回Python的崩溃才可能遗留`running`。每个environment/verifier只缓冲本地事件，main process在确定边界归并并作为唯一写者原子更新`run.json`；两项正式run验收事实、非门禁数值观察和cleanup正交记录。cleanup硬判据只使用container、已知子进程、vLLM shutdown和runtime handle终态；进程内CUDA allocated/reserved只记录为diagnostic，不能单独制造residual或failure，且cleanup不能覆盖更早primary failure。旧项目artifact路径只作为历史证据，不迁入新项目。
 
-结论是：**报告仍处于用户审查与修订阶段，当前没有任何实施授权。只有用户明确确认“计划修改完毕，可以开始实施”后，实施Agent才从阶段0开始，并在一次授权内连续完成第一阶段环境、代码、测试、CUDA/7B模型、固定vLLM colocate TP1、固定Docker、真实rollout、一次GRPO更新及32条rollout预算内的有效学习验收。大型动作必须先打印资源与命令preflight，但不再逐次等待批准。任一硬gate失败都应保留计划配置、忠实记录并停止，不临场换依赖、参数、后端或拓扑。30B真实运行、第二任务、系统环境变更和超预算训练仍在授权外。** 当前计划已经可以在未来授权后被Agent直接遵循；尚未实机验证的vLLM/Torch/TRL组合是资格结果而非计划未决项，失败时计划规定的正确结果就是“有证据地停止”。这条路线既没有把旧项目否定为“过度工程”，也没有把其历史训练基础设施搬进新项目；保留的是已验证且TRL不提供的SWE事实与执行边界，删除的是TRL已经成为唯一运行时真相的通用Agent RL控制面。
+结论是：**报告正处于实施后纠偏审查阶段，当前没有继续实现授权。只有用户明确确认修订计划可以继续实施后，实施Agent才从实际未通过的A–J前置门禁推进，并在一次授权内完成剩余代码/测试修正、必要资格，以及一次CLI、一个run、一个真实4-rollout group和一次GRPO optimizer step。大型动作必须先打印资源与命令preflight，但不再逐项等待批准。任一前置硬gate或run内execution故障都应保留当前配置与run证据、忠实记录并停止，不临场换依赖、参数、后端或拓扑，也不自动创建另一run；正常policy未达到native path则以completed run和failed验收事实结束，不伪装成execution failure。30B真实运行、第二任务、重新执行正式CLI和系统环境变更仍在授权外。** 当前路线保留已经验证且TRL不提供的SWE事实与执行边界，删除旧多run抽样层级，并以TRL作为唯一通用rollout/训练控制面。
+
+## 21. 实施过程中产生的 blocked 与目标偏移纠偏事实记录
+
+### 21.1 记录信息与性质
+
+- 记录时间：`2026-07-20 16:26:51 CST (+0800)`；
+- 记录阶段：原计划已经进入实施并产生真实7B、vLLM、Docker、GRPO输出之后；
+- 记录性质：实施过程中产生的`blocked`与目标偏移纠偏记录；
+- 事实来源：当前`docs/plan.md`、当前项目源码、`outputs/`中的六个真实run、对应checkpoint/trajectory/group/run记录，以及同日只读宿主机进程、固定任务容器和GPU 2计算进程审计；
+- 当前goal状态：`paused`。本节记录形成时未继续训练、未清理输出、未修改运行产物、未查询或使用GPU 1。
+
+本节只追加截至记录时间已经能够由代码或落盘产物确认的事实、偏移事实及其形成基础，不把尚未实施的纠偏方向写成既定方案，也不覆盖前文作为原始计划的历史文本。
+
+本节出现的`attempt`、多run预算、跨run汇总及相关字段仅用于保存旧计划和既有实现的历史错误证据，不对第0—20节修订后的正式流程、配置、schema、阶段、门禁或验收产生规范效力。
+
+### 21.2 原计划自身限定的运行形态
+
+原计划第13、15、16、20节把第一阶段正式运行固定为以下形态：
+
+- 训练数据只有固定任务`getmoto__moto-7023`；
+- 每个group固定4条rollout；
+- 每个run固定`max_steps=1`；
+- 有效学习资格最多8个相互独立的run，每个run重新建立单独`output_dir`、Trainer、checkpoint和final adapter；
+- run之间不复用已完成run的adapter或optimizer状态；
+- 完整optimizer resume、长期吞吐、post-update真实SWE rollout不属于第一阶段；
+- 第一阶段结束后只保留未来30B静态边界，没有定义一个7B连续训练阶段。
+
+因此，原计划第一阶段在训练语义上是一次真实在线GRPO update及非零更新路径的资格验证，而不是一条持续存在的policy训练链。原计划将“有效学习通过”用于命名一次非退化group、非零gradient和LoRA参数变化的资格结果，但同时明确不要求单步后能力提升、连续更新或训练前后真实评估。
+
+当前实现忠实固化了上述边界，而不是只在YAML中把它们作为可修改默认值：
+
+- `src/swe_agent/config.py`把`max_steps`声明为`Literal[1]`，把`effective_learning_max_runs`声明为`Literal[8]`；
+- `src/swe_agent/train.py::run()`的函数合同是“最多八个相互独立的单步run，首个有效学习后停止”；
+- 每次`_run_attempt()`都以配置中的base model路径重新构造`GRPOTrainer`，没有传入`resume_from_checkpoint`或上一个run的adapter；
+- 每次attempt只调用一次`trainer.train()`，要求`trainer.state.global_step == 1`，随后保存并释放Trainer/vLLM；
+- `_recording_reward()`只允许reward被调用一次，并要求恰好4条对齐rollout；
+- recorder只预分配并消费`batch-0000/group-0000`；
+- `build_training_dataset()`只构造含一个固定task/prompt的单行Dataset。
+
+由此产生的多个run在policy关系上是多条从base独立出发的单步路径，而不是`π₀ → π₁ → π₂ → …`的累积训练路径。每个run保存的optimizer checkpoint是真实框架产物，但当前正式入口不消费这些checkpoint继续下一步训练。
+
+### 21.3 六个真实run的落盘事实
+
+截至本节记录时间，`outputs/`包含6个run目录，总占用约`1.1G`：
+
+1. `20260720T061446Z-3e59`；
+2. `20260720T062645Z-3b52`；
+3. `20260720T063219Z-e1b9`；
+4. `20260720T064252Z-baee`；
+5. `20260720T064759Z-2239`；
+6. `20260720T065825Z-dec5`。
+
+六个run均确认了以下相同事实：
+
+- `global_step=1`；
+- 生成1个group、4条rollout；
+- reward为`[0, 0, 0, 0]`，`reward_mean=0`、`reward_std=0`；
+- `frac_reward_zero_std=1`、`loss=0`、`grad_norm=0`；
+- `lora_parameters_changed=failed`；
+- 产生`checkpoint-1`和根级adapter；
+- `training.system_closed_loop=failed`；
+- `training.effective_learning=not_applicable`；
+- run最终`lifecycle.state=failed`，落盘primary failure均在cleanup阶段。
+
+六个run的24条trajectory全部是：
+
+- `steps=[]`；
+- `termination="no_tool_call"`；
+- 没有实际工具执行；
+- 没有提交patch；
+- 没有构造`Verification`；
+- group中的`verification_counts`均为`resolved=0, unresolved=0, not_run=4`；
+- Trainer指标中的`tools/call_frequency=0.0`。
+
+代表性模型输出不是TRL识别的native tool call，而是assistant文本content中的Markdown代码围栏和JSON文本。因此真实run虽然为每条rollout创建并随后删除了fresh rollout container，但没有沿模型策略路径执行六工具、冻结patch或启动fresh verifier。
+
+六个输出目录是彼此独立的单步执行，但不能准确描述为六个不同seed的attempt：前5个run记录的seed均为`20260714`，第6个run的seed为`20260719`。落盘事实只证明使用了两个不同seed值。
+
+### 21.4 门禁状态与实施偏移事实
+
+原计划第15.1节把真实native多轮tools、repo实际diff、fresh verifier、binary verifier reward、一次optimizer step、checkpoint和clean release共同列为系统闭环条件。原计划第13节将阶段7命名为“系统闭环后的限定工作”，第16.2节也规定先通过K system loop，随后才进入L effective learning。
+
+当前落盘状态中，K system loop从未通过：六个run均为`system_closed_loop=failed`。在K未通过期间仍继续产生了后续单步run；这些run不能按原计划门禁顺序归类为已经进入L effective learning，也不能合并表述为多步训练。
+
+当前`src/swe_agent/train.py`中的`system_passed`实际判定只组合以下条件：
+
+- `training_succeeded`；
+- recorder中的group为completed；
+- cleanup completed且`clean_release=true`；
+- 没有failure。
+
+该代码判定没有另外要求至少一次真实tool call、至少一次submit、至少一份实际patch或至少一次fresh verifier执行。因而当前run虽然因为cleanup失败而没有被错误标记为system passed，但若只改变cleanup结果，现有判定路径本身无法排除“4条rollout全部no_tool_call、verifier全部not_run”的group被标为系统闭环通过。这个实现判定与第15.1节文字验收条件之间存在事实上的覆盖缺口。
+
+目标偏移的形成基础是：原始goal要求继续实施`docs/plan.md`，而原计划把第一阶段终点明确收缩为单步系统/非零更新资格，并把连续7B训练、optimizer resume和训练前后评估排除在交付外；实现又用严格schema、单次reward recorder和单group目录合同把该资格形态固定为唯一正式入口。在此基础上，有限attempt预算被用于重复寻找一次非退化group，资格验收逐步成为实际实施的终点，但这些独立单步run没有形成一条累积policy训练轨迹。
+
+同时，真实run首先暴露的是policy没有形成native tool call，而不是仅仅固定任务reward稀疏。24条trajectory没有进入工具/verifier路径，因此这些全0结果不能只解释为“已完成真实SWE尝试但任务未解决”。cleanup failure又成为`run.json`记录的primary failure，使native tool path未进入这一事实没有成为run级primary failure。
+
+### 21.5 GPU、进程与容器资源记录事实
+
+六个run的四个rollout container均记录了成功remove，当前固定任务label `swe_agent.task_id=getmoto__moto-7023`下没有残留container。六个`run.json`的`cleanup.processes`均为空数组。
+
+六个run的cleanup失败来自当前Python owner进程内的CUDA allocation/reservation没有在`_finalize_gpu()`检查时回到run开始前的零基线，而不是来自落盘记录中的容器删除失败。前两次记录的检查时显存分别约为：
+
+- `36,460,141,568 allocated / 36,601,593,856 reserved bytes`；
+- `40,254,586,368 allocated / 40,359,690,240 reserved bytes`。
+
+后四次检查时的allocated约为`15,382,024,704`、`15,382,024,704`、`15,382,024,704`、`15,382,023,680 bytes`，reserved约为`25.06 GiB`。每次run因此记录`cleanup.state=failed`、`clean_release=false`和GPU device `2` residual。
+
+当前GPU清理判定的代码事实是：
+
+- `_gpu_baseline()`把当前主Python进程的PID写成`owner_pid`；
+- `_release_trainer()`在同一进程内尝试sleep/shutdown vLLM engine、清理optimizer并把Trainer model移到CPU；
+- `_finalize_gpu()`在该主进程尚未退出时读取`torch.cuda.memory_allocated()`和`torch.cuda.memory_reserved()`；
+- 只有二者都回到本run的进程内基线才标记released；
+- `_run_attempt()`随后无条件调用`recorder.set_processes([])`，当前实现没有把实际发现、跟踪和退出确认的vLLM/worker子PID写入该数组。
+
+因此，现有`run.json`中的GPU residual直接证明的是“主进程退出前的PyTorch CUDA记账未回到零基线”。它本身不等价于“run结束后宿主机仍存在项目进程”，空的`cleanup.processes`也不构成对子进程不存在的独立发现证据。
+
+同日稍后的只读宿主机审计未发现包含本项目路径、`swe-agent`、`test_7b_vllm`或项目vLLM命令的残留进程，也未发现固定任务container。审计时GPU 2仍有两个属于其他用户`YYL@ZJU`且路径与本项目无关的计算进程：PID `573307`占用约`30994 MiB`，PID `2149942`占用约`5246 MiB`。这两个外部进程不是上述run的cleanup对象。该宿主机审计说明审计时点没有项目残留进程，但不反向改写各run在主进程退出前记录的CUDA residual事实。
+
+当前资源生命周期按原计划的单步attempt划分：每个group都重新构造Trainer/vLLM，并在该唯一step后立即执行整套Trainer/vLLM/GPU teardown和零基线验收。因此，GPU teardown问题与“独立单步attempt是正式运行单位”的计划形态直接耦合；它记录的是每个资格run终止时的资源收束结果，而不是一条连续训练作业内部多个generation/update step之间的资源状态。
+
+### 21.6 截至记录时间的纠偏状态事实
+
+截至`2026-07-20 16:26:51 CST`，本项目不能表述为已经完成实际GRPO后训练，也不能表述为已经通过原计划的真实SWE系统闭环。准确状态是：
+
+- 真实TRL、vLLM、LoRA、Docker、SWE领域对象、工具适配、verifier、recording和checkpoint基础设施已经形成；
+- 真实Trainer已六次到达单个`global_step=1`并保存框架checkpoint/adapter；
+- 六次step均为零reward方差、零gradient、LoRA未变化；
+- 24条rollout均未形成native tool call，真实工具和verifier策略路径未进入；
+- 系统闭环K为failed，有效学习L为not applicable；
+- 多个run彼此不继承，未形成连续训练；
+- GPU cleanup hard gate在主进程退出前的CUDA零基线检查上失败，但审计时没有项目进程或固定任务container残留；
+- 当前goal保持paused，本节记录的是实施中blocked与目标偏移纠偏事实，而不是对原计划后续实施路径的确认。
+
+2026-07-20第二次计划审查后，第0—20节又完成以下纠偏；这些是计划文本状态，不表示实现已经修改或重新运行：
+
+- 进程内`torch.cuda.memory_allocated/reserved`及其基线差异降为`gpu_diagnostics`，不再单独构成GPU residual、cleanup failure或lifecycle failure；正式硬释放证据改为container、明确worker PID、vLLM shutdown返回和本run runtime handle终态；
+- 原K/L顺序门禁从正式设计删除，替换为同一次`trainer.train()`后的`native_policy_path_reached`与`trainer_group_consumed`两项并列事实；
+- 正常policy未形成native tool path时，正式状态合同明确允许`lifecycle=completed`、`failure=null`、`system_closed_loop=failed`；仅cleanup发生未恢复失败时使用独立`failure.category="cleanup"`；
+- 正式术语以GRPO optimizer step表示必然执行事实，只有参数确实发生数值变化时才记录non-zero parameter update；参数不变时记录post-step policy numerically unchanged。

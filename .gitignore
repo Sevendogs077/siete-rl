@@ -1,27 +1,22 @@
-# =========================
-# Python
-# =========================
-
+# Python bytecode and build outputs
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 *.pyd
-
 .Python
-.python-version
-!.python-version
-
 build/
 dist/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
 
+# Test, type-checking, lint, and coverage caches
 .pytest_cache/
 .mypy_cache/
 .pyre/
 .pytype/
+.pyright/
 .ruff_cache/
 .coverage
 .coverage.*
@@ -29,21 +24,18 @@ htmlcov/
 .tox/
 .nox/
 
-# =========================
-# Virtual environments
-# =========================
-
+# Virtual environments and local environment variables
 .venv/
 venv/
 env/
 ENV/
 conda_env/
 .envrc
+.env
+.env.*
+!.env.example
 
-# =========================
-# IDE / Editor / OS
-# =========================
-
+# IDE, editor, and OS files
 .vscode/
 .idea/
 *.swp
@@ -57,58 +49,23 @@ Thumbs.db
 .Spotlight-V100
 .Trashes
 
-# =========================
-# Secrets / local config
-# =========================
-
-.env
-.env.*
-!.env.example
-
+# Secrets and credentials
 /secrets/
 *.pem
 *.key
 *.crt
 *.token
 
-# =========================
-# Logs
-# =========================
-
-/logs/
-*.log
-*.out
-*.err
-
-# =========================
-# RepoRecover runtime outputs
-# =========================
-
-/artifacts/
-/reports/generated/
-
-/outputs/*
-!/outputs/.gitkeep
-
-/runs/*
-!/runs/.gitkeep
-
-# =========================
-# Local datasets, repo caches, and external references
-# =========================
-
+# Project-local inputs and external source mirrors
 /data/
+/assets/
 /.external/
 
-# =========================
-# Model checkpoints and large binary artifacts
-# =========================
-
-/checkpoints/
+# Training runs, models, checkpoints, and generated artifacts
+/outputs/
 /models/
 /weights/
-/ckpts/
-
+/checkpoints/
 *.safetensors
 *.pt
 *.pth
@@ -120,8 +77,7 @@ pytorch_model.bin
 model.safetensors
 adapter_model.safetensors
 
-# Dataset / numeric cache formats. JSON/JSONL stay trackable by default so
-# small fixtures, configs, and golden files can be committed deliberately.
+# Dataset and numerical cache formats
 *.parquet
 *.arrow
 *.pkl
@@ -129,16 +85,12 @@ adapter_model.safetensors
 *.npy
 *.npz
 
-# =========================
-# HuggingFace / vLLM / Ray / experiment caches
-# =========================
-
+# Hugging Face, vLLM, Ray, and experiment caches
 /.cache/
 /.cache_huggingface/
 /hf_cache/
 /huggingface/
 /transformers_cache/
-
 /ray_results/
 /.ray/
 /plasma_store/
@@ -147,14 +99,11 @@ adapter_model.safetensors
 /tensorboard/
 /tb_logs/
 
-# =========================
-# Temporary workspaces
-# =========================
-
+# Docker and temporary local workspaces
+/.docker/
+/docker_tmp/
 /tmp/
 /temp/
-/.cache_repo_recover/
-
 /workspaces/
 /sandbox/
 /.sandbox/
@@ -162,31 +111,13 @@ adapter_model.safetensors
 /eval_workspaces/
 /agent_workspaces/
 
-# Generated task repositories and local task workspaces. Hand-written task
-# fixtures belong under fixtures/ and remain trackable.
-/tasks/generated/
-/tasks/tmp/
-/tasks/workspaces/
-/tasks/cache/
-
-# =========================
-# Docker / local runtime
-# =========================
-
-/.docker/
-/docker_tmp/
+# Logs, process state, notebooks, and editor leftovers
+/logs/
+*.log
+*.out
+*.err
 *.pid
-
-# =========================
-# Jupyter
-# =========================
-
 .ipynb_checkpoints/
-
-# =========================
-# Temporary patch/editor files
-# =========================
-
 *.diff.tmp
 *.patch.tmp
 *.bak
