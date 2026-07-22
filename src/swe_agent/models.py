@@ -9,14 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Termination = Literal[
     "submitted",
-    "no_tool_call",
-    "invalid_tool_call",
-    "max_turns",
-    "truncated",
-    "invalid_after_submit",
-    "tool_timeout",
-    "infrastructure_interrupted",
+    "model_stopped",
+    "iteration_cap",
+    "context_overlong",
+    "infra_error",
 ]
+
+LoopExit = Literal["model_stopped", "iteration_cap", "context_overlong"]
 
 
 class StrictModel(BaseModel):
@@ -78,6 +77,13 @@ class Step(StrictModel):
     index: int = Field(ge=0)
     action: Action
     observation: Observation
+
+
+class TerminalEvent(StrictModel):
+    """回合终止事件：由终止动作本身在发生时刻记录，而非事后从过程状态推导。"""
+
+    kind: Literal["submitted", "infra_error"]
+    step_index: int = Field(ge=0)
 
 
 class Trajectory(StrictModel):

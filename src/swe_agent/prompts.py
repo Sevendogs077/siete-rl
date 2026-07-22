@@ -12,7 +12,7 @@ When a tool is needed, invoke the appropriate provided tool using exactly the to
 Do not describe, quote, simulate, or wrap a tool call in ordinary assistant content or a Markdown code fence.
 Your first assistant response must call list_files, read_file, or search_code before making any edit.
 Do not access hidden tests or verifier assets. Do not install dependencies, access the network, or invoke Docker.
-When the patch is ready, call submit exactly once. After submit succeeds, do not call another tool; provide one brief final response without a tool call.
+When the patch is ready, call submit exactly once. A successful submit immediately ends the episode; do not call another tool afterwards.
 """
 
 

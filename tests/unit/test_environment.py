@@ -199,7 +199,7 @@ def test_multiple_calls_record_contiguous_steps_and_policy_failure(harness) -> N
     assert reward == 0.0
     assert environment.trajectory is not None
     assert [step.index for step in environment.trajectory.steps] == [0, 1]
-    assert environment.trajectory.termination == "no_tool_call"
+    assert environment.trajectory.termination == "model_stopped"
     assert not verifiers
 
 
@@ -218,20 +218,21 @@ def test_submit_final_turn_verifies_once_and_is_idempotent(harness) -> None:
     assert verifiers[0].verify_calls == 1
 
 
-def test_invalid_arguments_before_submit_never_run_verifier(harness) -> None:
+def test_invalid_arguments_do_not_lock_termination(harness) -> None:
     config, environment, sandboxes, verifiers = harness
     environment.reset(config.dataset.task_id)
     invalid = environment.read_file("x", start_line=3, end_line=2)
     assert "end_line" in invalid
     assert environment._finalize([]) == 0.0
     assert environment.trajectory is not None
-    assert environment.trajectory.termination == "invalid_tool_call"
+    assert environment.trajectory.termination == "model_stopped"
     assert not verifiers
 
 
-def test_wire_rejected_tool_calls_are_classified_without_fabricating_steps(harness) -> None:
+def test_finalize_uses_terminal_event_or_loop_exit(harness) -> None:
     config, environment, sandboxes, verifiers = harness
     environment.reset(config.dataset.task_id)
+    assert not environment.terminated
     unknown = [
         {
             "role": "assistant",
@@ -246,31 +247,36 @@ def test_wire_rejected_tool_calls_are_classified_without_fabricating_steps(harne
     ]
     assert environment._finalize(unknown) == 0.0
     assert environment.trajectory is not None
-    assert environment.trajectory.termination == "invalid_tool_call"
+    assert environment.trajectory.termination == "model_stopped"
     assert environment.trajectory.steps == []
     assert not verifiers
 
     environment.reset(config.dataset.task_id)
-    exhausted = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "type": "function",
-                    "function": {"name": "read_file", "arguments": {"path": "x.py"}},
-                }
-            ],
-        }
-    ]
-    assert environment._finalize(exhausted) == 0.0
+    environment._record_loop_exit("iteration_cap")
+    assert environment._finalize([]) == 0.0
     assert environment.trajectory is not None
-    assert environment.trajectory.termination == "max_turns"
+    assert environment.trajectory.termination == "iteration_cap"
 
     environment.reset(config.dataset.task_id)
     sandboxes[-1].diff = "diff --git a/x b/x\n"
     environment.submit()
+    assert environment.terminated
     environment.list_files(".")
+    assert environment._finalize([]) == 1.0
+    assert environment.trajectory is not None
+    assert environment.trajectory.termination == "submitted"
+    assert verifiers[-1].verify_calls == 1
+
+
+def test_tool_error_does_not_lock_termination_and_submit_still_wins(harness) -> None:
+    config, environment, sandboxes, verifiers = harness
+    environment.reset(config.dataset.task_id)
+    sandboxes[0].responses.append(command_result(exit_code=1, stderr="boom"))
+    result = environment.run_command("cat missing.py")
+    assert "boom" in result
+    assert not environment.terminated
+    sandboxes[0].diff = "diff --git a/x b/x\n"
+    environment.submit()
     assert environment._finalize([]) == 1.0
     assert environment.trajectory is not None
     assert environment.trajectory.termination == "submitted"

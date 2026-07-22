@@ -80,7 +80,6 @@ class PeftConfig(StrictConfig):
 class ChatConfig(StrictConfig):
     native_tool_calling: Literal[True]
     add_response_schema: Literal[True]
-    submit_requires_final_response: Literal[True]
     max_prompt_length: Literal[8192]
     max_observation_chars: int = Field(ge=256)
 

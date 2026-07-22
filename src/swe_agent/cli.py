@@ -1,4 +1,4 @@
-"""swe-agent 唯一正式命令行入口。"""
+"""swe_agent 唯一正式命令行入口。"""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class SignalBoundary:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="swe-agent")
+    parser = argparse.ArgumentParser(prog="swe_agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
     grpo = subparsers.add_parser("grpo", help="运行固定 SWE-Gym GRPO 作业")
     grpo.add_argument("--config", type=Path, required=True)

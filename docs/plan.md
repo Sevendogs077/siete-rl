@@ -66,7 +66,7 @@ Docker inspect Size: 2,849,787,451 bytes（约 2.85 GB / 2.65 GiB）
 
 当前是实施后纠偏计划审查阶段，继续实现未获授权；首页冻结边界保持有效。用户一旦明确确认修订计划可以继续实施，实施Agent即获得**从当前事实状态推进到第一阶段7B真实闭环所需的一次性连续授权**，无需在已批准范围的门禁之间反复询问。[用户决策]
 
-该授权包含：创建`pyproject.toml/uv.lock/.venv`，执行`uv lock/uv sync --locked`，编写源码、两份配置、`swe-agent` CLI、`grpo.sh`和测试；运行静态/CPU/fixture测试；执行CUDA与7B模型资格；启动7B vLLM colocate/sleep资格；使用固定`getmoto__moto-7023`镜像执行真实Docker工具/verifier集成；最后由一次正式CLI调用创建一个run，在同一Trainer/vLLM/policy状态下运行固定4条rollout的真实GRPO group、完成一次基于该在线group的GRPO optimizer step并保存checkpoint/final adapter。该step是否产生非零parameter update只在运行后观察。
+该授权包含：创建`pyproject.toml/uv.lock/.venv`，执行`uv lock/uv sync --locked`，编写源码、两份配置、`swe_agent` CLI、`grpo.sh`和测试；运行静态/CPU/fixture测试；执行CUDA与7B模型资格；启动7B vLLM colocate/sleep资格；使用固定`getmoto__moto-7023`镜像执行真实Docker工具/verifier集成；最后由一次正式CLI调用创建一个run，在同一Trainer/vLLM/policy状态下运行固定4条rollout的真实GRPO group、完成一次基于该在线group的GRPO optimizer step并保存checkpoint/final adapter。该step是否产生非零parameter update只在运行后观察。
 
 连续授权仍有明确范围：
 
@@ -190,7 +190,7 @@ E层允许小型第三方接口fixture，但不得使用人工completion、mock 
 
 ### 2.1 入口、配置与运行命令
 
-`pyproject.toml` 将 `swe-agent` 映射到 `swe_agent.cli:main`；`scripts/grpo_once.sh` 实际调用 `uv run --no-sync swe-agent grpo --config configs/grpo_single_instance.yaml`；CLI 构造 `SingleInstanceWorkflow` 并调用 `run()`（`src/swe_agent/workflow.py:115,147`）。[代码事实]
+`pyproject.toml` 将 `swe_agent` 映射到 `swe_agent.cli:main`；`scripts/grpo_once.sh` 实际调用 `uv run --no-sync swe_agent grpo --config configs/grpo_single_instance.yaml`；CLI 构造 `SingleInstanceWorkflow` 并调用 `run()`（`src/swe_agent/workflow.py:115,147`）。[代码事实]
 
 当前正式 YAML 的关键合同是：
 
@@ -1029,7 +1029,7 @@ group及其多条rollout是GRPO在run内部的采样与训练结构，不是独�
 | `resources.py::ManagedVLLMService` | 外部服务停/重启/owner控制 | 不再保留 | colocate由TRL构造与同步；owner协议属于明确非目标 | 是 | 只做一次只读GPU空闲检查和运行finally，不保留claim/lock/服务状态机 |
 | `synchronization.py` | adapter publish/HTTP activate | 由TRL替代 | colocate同步机制不同 | 是 | 直接引用Trainer原生checkpoint相对路径；不另存checkpoint manifest，不自行激活 |
 | `vllm_context_plugin.py` | vLLM0.12 Qwen3MoE LoRA patch | 不再保留 | 新版本且7B主路径不需要；第一阶段不运行30B | 是/上游 | 不迁移或重建plugin；未来30B先验证官方路径，再单独修订计划 |
-| CLI/run report/output IO | 旧`pyproject`已有`swe-agent`console script，但命令落到旧Workflow | 复制后适配 | 稳定本地CLI与证据入口有价值，旧Workflow控制面不保留 | 部分 | `pyproject.toml`固定`swe-agent = swe_agent.cli:main`；`scripts/grpo.sh`调用`.venv/bin/swe-agent grpo --config <完整YAML路径>`；CLI只解析命令并进入薄`train.run()`；一个`outputs/<run-id>`；删除旧多份report与并发/owner协议 |
+| CLI/run report/output IO | 旧`pyproject`已有`swe_agent`console script，但命令落到旧Workflow | 复制后适配 | 稳定本地CLI与证据入口有价值，旧Workflow控制面不保留 | 部分 | `pyproject.toml`固定`swe_agent = swe_agent.cli:main`；`scripts/grpo.sh`调用`.venv/bin/swe_agent grpo --config <完整YAML路径>`；CLI只解析命令并进入薄`train.run()`；一个`outputs/<run-id>`；删除旧多份report与并发/owner协议 |
 | 旧 tests | 111项模块合同混合历史架构 | 拆分后部分保留 | 领域回归价值高 | 部分 | 迁移schema/tools/Docker/verifier fixtures；删除XML/custom objective/lifecycle tests |
 | 旧 `artifacts/grpo_runs` | 历史事实与失败样例 | 不再保留 | 只作为本报告事实依据，不是新项目运行输入或生产资产 | 否 | 不复制历史run；若具体领域测试需要输入，按对应旧测试的最小fixture重新建模，不承接artifact目录 |
 
@@ -1063,7 +1063,7 @@ group及其多条rollout是GRPO在run内部的采样与训练结构，不是独�
 │   └── grpo.sh                       # 只启动一次真实GRPO作业
 ├── src/swe_agent/                    # 唯一Python包；物理仓库目录名不进入import identity
 │   ├── __init__.py                   # 显式普通Python包
-│   ├── cli.py                        # swe-agent console script；仅本地grpo命令
+│   ├── cli.py                        # swe_agent console script；仅本地grpo命令
 │   ├── config.py
 │   ├── models.py                      # 九个核心领域对象
 │   ├── swegym.py                      # 固定数据与任务资产加载
@@ -1102,7 +1102,7 @@ prompt builder已确定为`src/swe_agent/prompts.py::build_prompt(task)`纯函�
 
 新项目不建立笼统artifact根、资格结果根、长期测试结果根、全局日志根或自定义checkpoint根。`data/`和`assets/`都是固定输入，不允许一次运行写入；`outputs/`只含真实训练/闭环run。普通测试和资格命令默认只输出终端或使用pytest `tmp_path`。[用户决策+建议]
 
-`pyproject.toml`固定console script：`swe-agent = swe_agent.cli:main`。`src/swe_agent/cli.py`只提供本地`grpo --config <完整YAML路径>`命令、SIGINT/SIGTERM边界和退出码，不引入网络/API/通用任务管理。`scripts/grpo.sh`只调用`.venv/bin/swe-agent grpo --config "$1"`；`cli.py`再调用`train.run(config_path)`。所有内部导入使用`from swe_agent...`，当前filesystem目录名不进入package identity。[用户决策]
+`pyproject.toml`固定console script：`swe_agent = swe_agent.cli:main`。`src/swe_agent/cli.py`只提供本地`grpo --config <完整YAML路径>`命令、SIGINT/SIGTERM边界和退出码，不引入网络/API/通用任务管理。`scripts/grpo.sh`只调用`.venv/bin/swe_agent grpo --config "$1"`；`cli.py`再调用`train.run(config_path)`。所有内部导入使用`from swe_agent...`，当前filesystem目录名不进入package identity。[用户决策]
 
 `assets/private_eval/`没有独立必要性，改为自然的`assets/swegym/<instance_id>/`。`gold.patch`只由loader/资产资格测试读取，永不构造进运行时`Evaluation`；`test.patch`和original script也只用于资格一致性，正式verifier只从私有`Evaluation.offline_eval_script`取得已核验脚本。上述内容都不能进入Dataset row、prompt、`reset`公开参数、environment public attributes或tool-readable mount；目录名本身不提供安全边界，也不因此增加权限系统。[建议+用户决策]
 
@@ -1127,7 +1127,7 @@ run_id: null                 # 第一阶段固定由入口按UTC-Z+4位随机码
 
 ### 11.3 资格与测试不建立第二套脚本或输出系统
 
-- `scripts/`只有`grpo.sh`，它通过`.venv/bin/swe-agent grpo --config ...`启动真实作业。依赖解析/安装/import由实施Agent直接运行uv与`.venv/bin/python -c`命令；可复现的第三方接口、模型构造和vLLM gate进入`tests/integration/`并用pytest marker显式选择；正式CLI再做便宜、确定、无副作用的preflight。三者职责互补，不新增资格脚本。[用户决策]
+- `scripts/`只有`grpo.sh`，它通过`.venv/bin/swe_agent grpo --config ...`启动真实作业。依赖解析/安装/import由实施Agent直接运行uv与`.venv/bin/python -c`命令；可复现的第三方接口、模型构造和vLLM gate进入`tests/integration/`并用pytest marker显式选择；正式CLI再做便宜、确定、无副作用的preflight。三者职责互补，不新增资格脚本。[用户决策]
 - 稳定版本进入`pyproject.toml/uv.lock`，架构边界留在本报告，正式run实际版本/模型/image进入`run.json`。当前无需另建环境说明文档；lock无法表达的稳定主机前置条件直接写入本报告的资格合同，失败即停止，不临场新增文档或脚本体系。
 - 普通pytest只依赖退出码、终端输出和`.pytest_cache/`；文件型测试使用`tmp_path`。JUnit、coverage等仅由具体命令或CI写到临时/外部路径。
 - Docker集成测试的container、patch和日志在`tmp_path`内产生并在测试finally清理；默认不长期保存。真正执行“固定任务真实rollout→verifier→Trainer step”的验收必须通过`grpo.sh`/正式train入口创建普通`outputs/<run-id>`，不能伪装成pytest证据。
@@ -1176,8 +1176,8 @@ run_id: null                 # 第一阶段固定由入口按UTC-Z+4位随机码
 ### 阶段 1：先建立项目骨架、完整配置和正式入口
 
 - 输入：第9、11节固定目录、两份配置合同与CLI合同；
-- 动作：建立`src/swe_agent/__init__.py/config.py/cli.py/train.py`、两份平铺完整YAML、唯一`scripts/grpo.sh`和最小测试目录；`pyproject.toml`注册`swe-agent = swe_agent.cli:main`；
-- 输出：两份YAML可独立严格解析；`.venv/bin/swe-agent grpo --config ...`可进入preflight但在领域模块尚未完成时明确拒绝真实训练；`train.py`提供模型/PEFT/GRPOConfig/environment_factory/reward的薄构造边界；
+- 动作：建立`src/swe_agent/__init__.py/config.py/cli.py/train.py`、两份平铺完整YAML、唯一`scripts/grpo.sh`和最小测试目录；`pyproject.toml`注册`swe_agent = swe_agent.cli:main`；
+- 输出：两份YAML可独立严格解析；`.venv/bin/swe_agent grpo --config ...`可进入preflight但在领域模块尚未完成时明确拒绝真实训练；`train.py`提供模型/PEFT/GRPOConfig/environment_factory/reward的薄构造边界；
 - 验收：7B与30B配置字段完整、无继承；7B LoRA/30B QLoRA互斥正确；CLI、config和preflight单元测试通过。该阶段只建立后续资格所依赖的真实文件，解决“先资格却没有配置/入口”的循环依赖。
 
 ### 阶段 2：第三方接口与7B模型/vLLM资格
@@ -1337,7 +1337,7 @@ run结束、失败或中断时，必须在同一个run级`finally`中收束全�
 | prompt | 唯一由`src/swe_agent/prompts.py::build_prompt(task)`构造；Dataset调用，environment不得重复拼接 |
 | 数据目录 | `data/swegym/SWE-Gym__SWE-Gym/bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb`与`data/swegym/SumanthRH__SWE-Gym-Subset/3f22e68f673027edbaebe3424e4c20ae580563fd`；值直接来自旧loader已资格常量，不留路径占位符 |
 | private Evaluation配对 | loader返回`sample, evaluation`并建立进程内只读`task_id -> (Sample, Evaluation)`映射；Dataset只有`task_id+prompt`；不依赖row位置或pool slot，不给Evaluation增加ID |
-| Python package/CLI | 显式`src/swe_agent/__init__.py`；`pyproject.toml`固定`swe-agent = swe_agent.cli:main`；唯一正式命令`.venv/bin/swe-agent grpo --config <完整YAML路径>`；`cli.py`只进入`train.run()` |
+| Python package/CLI | 显式`src/swe_agent/__init__.py`；`pyproject.toml`固定`swe_agent = swe_agent.cli:main`；唯一正式命令`.venv/bin/swe_agent grpo --config <完整YAML路径>`；`cli.py`只进入`train.run()` |
 | submit | `submit`成功后environment进入terminal-pending，返回terminal observation；TRL再生成一次无工具final assistant turn结束episode；该额外turn计入20次上限 |
 | tokenizer/tool template | 先用目标revision原生模板；失败时只允许一次基于官方Transformers/TRL合同的最小training-safe适配；仍失败即停止，不引入XML/provider协议 |
 | batch/group/step记录 | batch/group是run内部索引；第一阶段验收run创建`batch-0000/group-0000/0000..0003`；runner在train前分配，reset顺序由TRL fixture证明，成功后只读公开`trainer.state.global_step==1` |
@@ -1929,7 +1929,7 @@ Trainer原生写`checkpoint-<global_step>/`，训练入口原生`save_model(outp
 
 因此，现有`run.json`中的GPU residual直接证明的是“主进程退出前的PyTorch CUDA记账未回到零基线”。它本身不等价于“run结束后宿主机仍存在项目进程”，空的`cleanup.processes`也不构成对子进程不存在的独立发现证据。
 
-同日稍后的只读宿主机审计未发现包含本项目路径、`swe-agent`、`test_7b_vllm`或项目vLLM命令的残留进程，也未发现固定任务container。审计时GPU 2仍有两个属于其他用户`YYL@ZJU`且路径与本项目无关的计算进程：PID `573307`占用约`30994 MiB`，PID `2149942`占用约`5246 MiB`。这两个外部进程不是上述run的cleanup对象。该宿主机审计说明审计时点没有项目残留进程，但不反向改写各run在主进程退出前记录的CUDA residual事实。
+同日稍后的只读宿主机审计未发现包含本项目路径、`swe_agent`、`test_7b_vllm`或项目vLLM命令的残留进程，也未发现固定任务container。审计时GPU 2仍有两个属于其他用户`YYL@ZJU`且路径与本项目无关的计算进程：PID `573307`占用约`30994 MiB`，PID `2149942`占用约`5246 MiB`。这两个外部进程不是上述run的cleanup对象。该宿主机审计说明审计时点没有项目残留进程，但不反向改写各run在主进程退出前记录的CUDA residual事实。
 
 当前资源生命周期按原计划的单步attempt划分：每个group都重新构造Trainer/vLLM，并在该唯一step后立即执行整套Trainer/vLLM/GPU teardown和零基线验收。因此，GPU teardown问题与“独立单步attempt是正式运行单位”的计划形态直接耦合；它记录的是每个资格run终止时的资源收束结果，而不是一条连续训练作业内部多个generation/update step之间的资源状态。
 

@@ -74,7 +74,7 @@ cleanup() {
   fi
   [[ -z "$server_pid" ]] || wait "$server_pid" 2>/dev/null || true
 
-  if ! container_output=$(docker ps -aq --filter "label=swe-agent.run_id=$SWE_AGENT_RUN_ID"); then
+  if ! container_output=$(docker ps -aq --filter "label=swe_agent.run_id=$SWE_AGENT_RUN_ID"); then
     cleanup_failed=1
   elif [[ -n "$container_output" ]]; then
     mapfile -t containers <<< "$container_output"
@@ -114,7 +114,7 @@ for ((attempt = 1; attempt <= vllm_ready_timeout_sec; attempt++)); do
     exit 1
   fi
   if curl --fail --silent --show-error "$server_url/health" >/dev/null 2>&1; then
-    CUDA_VISIBLE_DEVICES="$trainer_gpu" .venv/bin/swe-agent grpo --config "$config_path"
+    CUDA_VISIBLE_DEVICES="$trainer_gpu" .venv/bin/swe_agent grpo --config "$config_path"
     exit $?
   fi
   sleep 1

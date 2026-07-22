@@ -111,15 +111,15 @@ class DockerSandbox:
             raise ValueError("DockerSandbox task and environment do not match")
         suffix = uuid4().hex[:12]
         safe_episode = re.sub(r"[^A-Za-z0-9_.-]", "-", self.episode_id)[-28:]
-        self.container_name = f"swe-agent-{self.scope}-{safe_episode}-{suffix}"
+        self.container_name = f"swe_agent-{self.scope}-{safe_episode}-{suffix}"
 
     @property
     def labels(self) -> dict[str, str]:
         return {
-            "swe-agent.run_id": self.run_id,
-            "swe-agent.episode_id": self.episode_id,
-            "swe-agent.task_id": self.task.task_id,
-            "swe-agent.scope": self.scope,
+            "swe_agent.run_id": self.run_id,
+            "swe_agent.episode_id": self.episode_id,
+            "swe_agent.task_id": self.task.task_id,
+            "swe_agent.scope": self.scope,
         }
 
     def open(self) -> "DockerSandbox":

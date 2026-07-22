@@ -208,7 +208,7 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
     recorder.write_rollout(
         1,
         messages=messages,
-        trajectory=trajectory("no_tool_call"),
+        trajectory=trajectory("model_stopped"),
         patch=None,
         verification=None,
     )

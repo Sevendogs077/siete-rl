@@ -2064,7 +2064,7 @@ wheels = [
 ]
 
 [[package]]
-name = "swe-agent"
+name = "swe_agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

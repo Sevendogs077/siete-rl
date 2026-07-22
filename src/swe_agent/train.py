@@ -50,6 +50,7 @@ REQUIRED_DOMAIN_MODULES = (
     "environment.py",
     "rewards.py",
     "recording.py",
+    "trainer.py",
 )
 
 
@@ -211,11 +212,11 @@ def build_trainer(
     reward_func: Callable[..., list[float]],
     processing_class: Any | None = None,
 ) -> Any:
-    """构造官方 GRPOTrainer，不引入自研 Trainer 或生成循环。"""
+    """构造 SWEGRPOTrainer（GRPOTrainer 子类，加入环境信号终止）。"""
 
-    from trl import GRPOTrainer
+    from swe_agent.trainer import SWEGRPOTrainer
 
-    return GRPOTrainer(
+    return SWEGRPOTrainer(
         model=config.model.model_path,
         args=build_grpo_config(config, output_dir, seed=seed),
         train_dataset=train_dataset,

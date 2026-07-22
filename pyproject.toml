@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "swe-agent"
+name = "swe_agent"
 version = "0.1.0"
 description = "基于 TRL 的 SWE-Gym GRPO 训练项目"
 requires-python = ">=3.12,<3.13"
@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-swe-agent = "swe_agent.cli:main"
+swe_agent = "swe_agent.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/swe_agent"]

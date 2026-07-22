@@ -10,9 +10,11 @@ from swe_agent.docker import DockerRuntimeError, DockerSandbox
 from swe_agent.models import (
     Action,
     Evaluation,
+    LoopExit,
     Observation,
     Sample,
     Step,
+    TerminalEvent,
     Trajectory,
     Verification,
 )
@@ -49,7 +51,8 @@ class SWEEnvironment:
         self._verifier: SWEGymVerifier | None = None
         self._steps: list[Step] = []
         self._events: list[dict[str, object]] = []
-        self._termination: str | None = None
+        self._terminal_event: TerminalEvent | None = None
+        self._loop_exit: LoopExit | None = None
         self._infrastructure_error: BaseException | None = None
         self._submitted = False
         self._frozen_patch: str | None = None
@@ -62,6 +65,12 @@ class SWEEnvironment:
     @property
     def trajectory(self) -> Trajectory | None:
         return self._trajectory
+
+    @property
+    def terminated(self) -> bool:
+        """供 TRL tool-call loop 轮询的终止信号；property 不会被暴露为工具。"""
+
+        return self._terminal_event is not None
 
     @property
     def verification(self) -> Verification | None:
@@ -85,7 +94,8 @@ class SWEEnvironment:
         self._evaluation = evaluation
         self.episode_id = uuid4().hex
         self._steps = []
-        self._termination = None
+        self._terminal_event = None
+        self._loop_exit = None
         self._infrastructure_error = None
         self._submitted = False
         self._frozen_patch = None
@@ -104,7 +114,7 @@ class SWEEnvironment:
             )
         except BaseException as exc:
             self._infrastructure_error = exc
-            self._termination = "infrastructure_interrupted"
+            self._terminal_event = TerminalEvent(kind="infra_error", step_index=0)
             try:
                 self._close_rollout()
             except BaseException as cleanup_exc:
@@ -223,7 +233,6 @@ class SWEEnvironment:
         try:
             validate_tool_arguments(name, arguments)
         except ToolContractError as exc:
-            self._termination = "invalid_tool_call"
             return Observation(
                 text=str(exc), exit_code=1, error_type="tool_error"
             ).model_dump_json()
@@ -233,24 +242,31 @@ class SWEEnvironment:
             observation = self._executor.execute(action)
         except DockerRuntimeError as exc:
             self._infrastructure_error = exc
-            self._termination = "infrastructure_interrupted"
+            self._terminal_event = TerminalEvent(
+                kind="infra_error", step_index=len(self._steps)
+            )
             raise
         self._append_step(action, observation)
-        if observation.timed_out:
-            self._termination = "tool_timeout"
-        elif observation.error_type is not None:
-            self._termination = "invalid_tool_call"
-        elif name == "submit":
+        if name == "submit" and observation.error_type is None and not observation.timed_out:
             if self._executor.submitted_patch is None:
                 raise RuntimeError("successful submit did not freeze a patch")
             self._submitted = True
             self._frozen_patch = self._executor.submitted_patch
+            self._terminal_event = TerminalEvent(
+                kind="submitted", step_index=len(self._steps) - 1
+            )
         return observation.model_dump_json()
+
+    def _record_loop_exit(self, reason: LoopExit) -> None:
+        """由 trainer 在 tool-call loop 出口写回该样本的循环结束原因。"""
+
+        self._loop_exit = reason
 
     def _append_step(self, action: Action, observation: Observation) -> None:
         self._steps.append(Step(index=len(self._steps), action=action, observation=observation))
 
     def _finalize(self, completion: object) -> float:
+        del completion  # 终止原因不再从 completion 推导
         if self._finalized:
             if self._reward is None:
                 raise RuntimeError("finalized environment is missing its reward")
@@ -260,8 +276,12 @@ class SWEEnvironment:
         if self._sample is None or self._evaluation is None or self.episode_id is None:
             raise RuntimeError("environment was finalized before reset")
 
-        termination = self._derive_termination(completion)
-        self._termination = termination
+        if self._terminal_event is not None:
+            termination = self._terminal_event.kind
+        elif self._loop_exit is not None:
+            termination = self._loop_exit
+        else:
+            termination = "model_stopped"
         self._trajectory = Trajectory(
             task_id=self._sample.task.task_id,
             environment_id=self._sample.environment.environment_id,
@@ -286,27 +306,6 @@ class SWEEnvironment:
         self._reward = 1.0 if self._verification.result == "resolved" else 0.0
         self._finalized = True
         return self._reward
-
-    def _derive_termination(self, completion: object) -> str:
-        if self._submitted:
-            return "submitted"
-        if self._termination in {
-            "invalid_after_submit",
-            "invalid_tool_call",
-            "tool_timeout",
-            "infrastructure_interrupted",
-        }:
-            return self._termination
-        wire_failure = _wire_failure(completion)
-        if wire_failure is not None:
-            return wire_failure
-        if not self._submitted:
-            if _ends_with_tool_call(completion):
-                return "max_turns"
-            return "no_tool_call"
-        if _ends_with_tool_call(completion):
-            return "invalid_after_submit"
-        return "submitted"
 
     def _close_rollout(self) -> None:
         if self._sandbox is None:
@@ -358,43 +357,3 @@ class SWEEnvironment:
 
 def _without_none(arguments: Mapping[str, Any]) -> dict[str, Any]:
     return {name: value for name, value in arguments.items() if value is not None}
-
-
-def _ends_with_tool_call(completion: object) -> bool:
-    if not isinstance(completion, list) or not completion:
-        return False
-    last = completion[-1]
-    return isinstance(last, dict) and bool(last.get("tool_calls"))
-
-
-def _wire_failure(completion: object) -> str | None:
-    """只读核对被 TRL 拒绝、因而未进入 bound method 的 wire tool call。"""
-
-    if not isinstance(completion, list):
-        return None
-    submitted = False
-    for message in completion:
-        if not isinstance(message, dict):
-            continue
-        calls = message.get("tool_calls")
-        if not isinstance(calls, list):
-            continue
-        for call in calls:
-            if not isinstance(call, dict):
-                return "invalid_tool_call"
-            function = call.get("function")
-            if not isinstance(function, dict):
-                return "invalid_tool_call"
-            name = function.get("name")
-            arguments = function.get("arguments")
-            if submitted:
-                return "invalid_after_submit"
-            if not isinstance(name, str) or not isinstance(arguments, dict):
-                return "invalid_tool_call"
-            try:
-                validate_tool_arguments(name, arguments)
-            except ToolContractError:
-                return "invalid_tool_call"
-            if name == "submit":
-                submitted = True
-    return None

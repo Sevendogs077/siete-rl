@@ -17,14 +17,14 @@ def test_only_planned_launcher_exists() -> None:
     assert 'CUDA_VISIBLE_DEVICES="$trainer_gpu"' in launcher
     assert 'curl --fail --silent --show-error "$server_url/health"' in launcher
     assert 'kill -TERM -- "-$server_pid"' in launcher
-    assert 'label=swe-agent.run_id=$SWE_AGENT_RUN_ID' in launcher
-    assert '.venv/bin/swe-agent grpo --config "$config_path"' in launcher
+    assert 'label=swe_agent.run_id=$SWE_AGENT_RUN_ID' in launcher
+    assert '.venv/bin/swe_agent grpo --config "$config_path"' in launcher
     assert "accelerate launch" not in launcher
     assert "--use_fsdp" not in launcher
 
 
 def test_console_script_targets_cli_main() -> None:
-    matches = [point for point in entry_points(group="console_scripts") if point.name == "swe-agent"]
+    matches = [point for point in entry_points(group="console_scripts") if point.name == "swe_agent"]
     assert len(matches) == 1
     assert matches[0].value == "swe_agent.cli:main"
 
