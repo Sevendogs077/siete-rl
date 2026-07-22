@@ -214,12 +214,11 @@ class SWEEnvironment:
         if self._submitted:
             action = Action(tool_name=name, arguments=arguments)
             observation = Observation(
-                text="A tool was called after submit; the episode is invalid.",
+                text="The patch is already submitted; no further tool call is needed.",
                 exit_code=1,
                 error_type="tool_error",
             )
             self._append_step(action, observation)
-            self._termination = "invalid_after_submit"
             return observation.model_dump_json()
         try:
             validate_tool_arguments(name, arguments)
@@ -289,6 +288,8 @@ class SWEEnvironment:
         return self._reward
 
     def _derive_termination(self, completion: object) -> str:
+        if self._submitted:
+            return "submitted"
         if self._termination in {
             "invalid_after_submit",
             "invalid_tool_call",

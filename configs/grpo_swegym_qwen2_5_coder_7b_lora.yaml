@@ -102,10 +102,11 @@ grpo:
 
 vllm:
   use_vllm: true
-  mode: colocate
+  mode: server
   model_impl: vllm
-  enable_sleep_mode: true
-  tensor_parallel_size: 1
+  enable_sleep_mode: false
+  tensor_parallel_size: null
+  server_base_url: http://127.0.0.1:8000
   gpu_memory_utilization: 0.3
   max_model_length: 32768
 

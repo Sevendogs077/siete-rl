@@ -23,7 +23,9 @@ def test_both_complete_configs_parse_independently() -> None:
     assert config_7b.model.training_mode == "lora"
     assert config_7b.quantization.load_in_4bit is False
     assert config_7b.runtime.runtime_qualified is True
-    assert config_7b.vllm.tensor_parallel_size == 1
+    assert config_7b.vllm.mode == "server"
+    assert config_7b.vllm.tensor_parallel_size is None
+    assert config_7b.vllm.server_base_url == "http://127.0.0.1:8000"
 
     assert config_30b.model.training_mode == "qlora"
     assert config_30b.quantization.load_in_4bit is True
@@ -31,6 +33,7 @@ def test_both_complete_configs_parse_independently() -> None:
     assert config_30b.quantization.bnb_4bit_use_double_quant is True
     assert config_30b.runtime.runtime_qualified is False
     assert config_30b.vllm.tensor_parallel_size is None
+    assert config_30b.vllm.server_base_url is None
 
 
 def test_complete_configs_have_same_independent_top_level_shape() -> None:
@@ -73,7 +76,7 @@ def test_shared_training_contract_is_fixed(path: Path) -> None:
     assert config.grpo.generation_batch_size == 4
     assert config.grpo.max_steps == 1
     assert config.vllm.use_vllm is True
-    assert config.vllm.enable_sleep_mode is True
+    assert config.vllm.enable_sleep_mode is (config.vllm.mode == "colocate")
 
 
 def test_extra_fields_are_rejected() -> None:

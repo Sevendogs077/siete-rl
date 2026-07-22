@@ -35,7 +35,7 @@ def test_preflight_is_read_only_and_reports_complete_stage_modules(tmp_path: Pat
     report = preflight(config, project_root)
 
     assert report["status"] == "preflight_passed"
-    assert report["vllm_tensor_parallel_size"] == 1
+    assert report["vllm_tensor_parallel_size"] is None
     assert "models.py" not in report["missing_domain_modules"]
     assert "swegym.py" not in report["missing_domain_modules"]
     assert "prompts.py" not in report["missing_domain_modules"]
@@ -126,10 +126,11 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     assert grpo_config.generation_batch_size == 4
     assert grpo_config.steps_per_generation == 4
     assert grpo_config.model_init_kwargs == {"dtype": "bfloat16"}
-    assert grpo_config.vllm_mode == "colocate"
+    assert grpo_config.vllm_mode == "server"
+    assert grpo_config.vllm_server_base_url == "http://127.0.0.1:8000"
     assert grpo_config.vllm_model_impl == "vllm"
     assert grpo_config.vllm_max_model_length == 32768
-    assert grpo_config.vllm_enable_sleep_mode is True
+    assert grpo_config.vllm_enable_sleep_mode is False
     assert grpo_config.max_tool_calling_iterations == 20
     assert grpo_config.loss_type == "dapo"
     assert grpo_config.router_aux_loss_coef == 0.0

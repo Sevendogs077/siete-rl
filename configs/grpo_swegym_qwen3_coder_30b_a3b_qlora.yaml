@@ -106,6 +106,7 @@ vllm:
   model_impl: vllm
   enable_sleep_mode: true
   tensor_parallel_size: null
+  server_base_url: null
   gpu_memory_utilization: 0.3
   max_model_length: 32768
 

@@ -11,7 +11,12 @@ def test_only_planned_launcher_exists() -> None:
     scripts = sorted(path.name for path in (PROJECT_ROOT / "scripts").iterdir())
     assert scripts == ["grpo.sh"]
     launcher = (PROJECT_ROOT / "scripts/grpo.sh").read_text(encoding="utf-8")
-    assert 'exec .venv/bin/swe-agent grpo --config "$1"' in launcher
+    assert ".venv/bin/trl vllm-serve" in launcher
+    assert 'CUDA_VISIBLE_DEVICES="$server_gpu"' in launcher
+    assert 'CUDA_VISIBLE_DEVICES="$trainer_gpu"' in launcher
+    assert '.venv/bin/swe-agent grpo --config "$1"' in launcher
+    assert "accelerate launch" not in launcher
+    assert "--use_fsdp" not in launcher
 
 
 def test_console_script_targets_cli_main() -> None:

@@ -192,6 +192,7 @@ def build_grpo_config(
         log_completions=grpo.log_completions,
         use_vllm=vllm.use_vllm,
         vllm_mode=vllm.mode,
+        vllm_server_base_url=vllm.server_base_url,
         vllm_model_impl=vllm.model_impl,
         vllm_enable_sleep_mode=vllm.enable_sleep_mode,
         vllm_tensor_parallel_size=vllm.tensor_parallel_size or 1,
@@ -284,6 +285,7 @@ def _run_once(
     recorder = RunRecorder(
         config=config,
         seed=seed,
+        run_id=os.environ.get("SWE_AGENT_RUN_ID"),
         code_commit=commit,
         code_dirty=dirty,
         model_revision=_model_revision(Path(config.model.model_path)),

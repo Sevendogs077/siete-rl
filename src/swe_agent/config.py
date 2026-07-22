@@ -135,10 +135,11 @@ class GRPOConfigValues(StrictConfig):
 
 class VLLMConfig(StrictConfig):
     use_vllm: Literal[True]
-    mode: Literal["colocate"]
+    mode: Literal["colocate", "server"]
     model_impl: Literal["vllm"]
-    enable_sleep_mode: Literal[True]
+    enable_sleep_mode: bool
     tensor_parallel_size: Literal[1] | None
+    server_base_url: str | None
     gpu_memory_utilization: Literal[0.3]
     max_model_length: Literal[32768]
 
@@ -209,9 +210,14 @@ class ProjectConfig(StrictConfig):
         if self.runtime.runtime_qualified:
             if self.model.training_mode != "lora":
                 raise ValueError("only the first-stage LoRA profile may be runtime-qualified")
-            if self.vllm.tensor_parallel_size != 1:
-                raise ValueError("first-stage vLLM runtime requires tensor parallel size 1")
-        elif self.vllm.tensor_parallel_size is not None:
+            if (
+                self.vllm.mode != "server"
+                or self.vllm.tensor_parallel_size is not None
+                or self.vllm.server_base_url != "http://127.0.0.1:8000"
+                or self.vllm.enable_sleep_mode
+            ):
+                raise ValueError("first-stage runtime requires a separate local vLLM server")
+        elif self.vllm.tensor_parallel_size is not None or self.vllm.server_base_url is not None:
             raise ValueError("an unqualified runtime must not activate GPU topology")
         return self
 

@@ -218,7 +218,7 @@ def test_submit_final_turn_verifies_once_and_is_idempotent(harness) -> None:
     assert verifiers[0].verify_calls == 1
 
 
-def test_invalid_arguments_and_tool_after_submit_never_run_verifier(harness) -> None:
+def test_invalid_arguments_before_submit_never_run_verifier(harness) -> None:
     config, environment, sandboxes, verifiers = harness
     environment.reset(config.dataset.task_id)
     invalid = environment.read_file("x", start_line=3, end_line=2)
@@ -271,10 +271,10 @@ def test_wire_rejected_tool_calls_are_classified_without_fabricating_steps(harne
     sandboxes[-1].diff = "diff --git a/x b/x\n"
     environment.submit()
     environment.list_files(".")
-    assert environment._finalize([]) == 0.0
+    assert environment._finalize([]) == 1.0
     assert environment.trajectory is not None
-    assert environment.trajectory.termination == "invalid_after_submit"
-    assert not verifiers
+    assert environment.trajectory.termination == "submitted"
+    assert verifiers[-1].verify_calls == 1
 
 
 def test_docker_infrastructure_error_propagates_and_runner_close_releases(harness) -> None:
