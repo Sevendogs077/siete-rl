@@ -12,9 +12,13 @@ def test_only_planned_launcher_exists() -> None:
     assert scripts == ["grpo.sh"]
     launcher = (PROJECT_ROOT / "scripts/grpo.sh").read_text(encoding="utf-8")
     assert ".venv/bin/trl vllm-serve" in launcher
+    assert "setsid env CUDA_VISIBLE_DEVICES=\"$server_gpu\"" in launcher
     assert 'CUDA_VISIBLE_DEVICES="$server_gpu"' in launcher
     assert 'CUDA_VISIBLE_DEVICES="$trainer_gpu"' in launcher
-    assert '.venv/bin/swe-agent grpo --config "$1"' in launcher
+    assert 'curl --fail --silent --show-error "$server_url/health"' in launcher
+    assert 'kill -TERM -- "-$server_pid"' in launcher
+    assert 'label=swe-agent.run_id=$SWE_AGENT_RUN_ID' in launcher
+    assert '.venv/bin/swe-agent grpo --config "$config_path"' in launcher
     assert "accelerate launch" not in launcher
     assert "--use_fsdp" not in launcher
 

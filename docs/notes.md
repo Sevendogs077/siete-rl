@@ -6,4 +6,16 @@
 
 ---
 
-qwen 2.5 coder 7B 一直输出 json 格式的 tool call，修改一下原本 TRL 的 parser，使其能够解析 json
+## 0721
+
+qwen 2.5 coder 7B 一直输出 json 格式的 tool call，修改一下原本 TRL 的 parser，使其能够解析 json`
+
+已解决，**估计**该模型后训练对齐时采用 json 作为 tool call 标准模式，采用三段式，首先解析标准 tool call，失败则解析 fenced json 或 json。
+
+## 0722
+
+已将 colocate 模式改为 server 模式，默认卡 0 作为 vLLM server，卡 1 作为 GRPO trainer，简单直接
+
+目前训练日志未统一，且只有 trainer 启动后才会创建 `outputs/<run-id>`，因此部分日志如 vLLM log 未计入，难以排查 bug
+
+训练打印输出可能是 TRL 标准输出，但可以考虑自定义（做完闭环）
