@@ -281,7 +281,7 @@ class SWEEnvironment:
         elif self._loop_exit is not None:
             termination = self._loop_exit
         else:
-            termination = "model_stopped"
+            raise RuntimeError("environment finalized without a terminal event or loop exit")
         self._trajectory = Trajectory(
             task_id=self._sample.task.task_id,
             environment_id=self._sample.environment.environment_id,

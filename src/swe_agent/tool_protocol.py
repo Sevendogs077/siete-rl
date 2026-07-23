@@ -1,4 +1,4 @@
-"""严格兼容 Qwen 官方、完整 fenced JSON 与完整 bare JSON 工具调用。"""
+"""严格接受完整 Qwen tool call、bare JSON 或 fenced JSON 工具调用。"""
 
 from __future__ import annotations
 
@@ -15,21 +15,23 @@ _INSTALLED_ATTR = "_swe_agent_compatible_tool_call_parser_installed"
 _ORIGINAL_ATTR = "_swe_agent_original_parse_response"
 
 
-def parse_compatible_tool_call(visible_text: str) -> dict[str, Any] | None:
-    """严格解析完整 fenced/bare JSON；普通内容返回 ``None``。"""
+def parse_compatible_tool_call(visible_text: str) -> dict[str, Any]:
+    """严格解析完整 fenced/bare JSON；其他任意输出均为协议错误。"""
 
     if not isinstance(visible_text, str):
         raise TypeError("visible assistant content must be a string")
     text = visible_text.strip()
     if not text:
-        return None
+        raise ToolCallParseError("assistant response must contain one complete tool call")
 
     if text.startswith("```"):
         payload = _parse_fenced_object(text)
         return _standard_message(payload)
 
     if not text.startswith("{"):
-        return None
+        raise ToolCallParseError(
+            "assistant response must be one complete Qwen tool call, JSON object, or fenced JSON block"
+        )
     payload = _load_strict_object(text)
     return _standard_message(payload)
 
@@ -62,29 +64,21 @@ def install_compatible_tool_call_parser(tokenizer: Any) -> Any:
             official = None
 
         visible_text = _decode_response(self, response, skip_special_tokens=True)
-        if isinstance(official, dict) and official.get("tool_calls"):
-            _validate_official_message(official)
-            _validate_official_envelope(visible_text)
-            normalized_official = dict(official)
-            normalized_official["content"] = ""
-            return normalized_official
-
-        visible_text = (
-            official.get("content")
-            if isinstance(official, dict) and isinstance(official.get("content"), str)
-            else visible_text
-        )
-        outer_text = visible_text.lstrip()
-        if outer_text.startswith("<tool_call>") or outer_text.startswith("</tool_call>"):
-            raise ToolCallParseError("malformed official Qwen tool call")
-
-        compatible = parse_compatible_tool_call(visible_text)
-        if compatible is not None:
-            return compatible
-
-        if isinstance(official, dict):
-            return official
-        return {"role": "assistant", "content": visible_text}
+        try:
+            if isinstance(official, dict) and official.get("tool_calls"):
+                _validate_official_message(official)
+                _validate_official_envelope(visible_text)
+                normalized_official = dict(official)
+                normalized_official["content"] = ""
+                return normalized_official
+            compatible = parse_compatible_tool_call(visible_text)
+        except ToolCallParseError as exc:
+            return {
+                "role": "assistant",
+                "content": visible_text,
+                "parse_error": str(exc),
+            }
+        return compatible
 
     compatible_parse_response.__name__ = "parse_response"
     compatible_parse_response.__qualname__ = type(tokenizer).__name__ + ".parse_response"
@@ -125,8 +119,8 @@ def _parse_fenced_object(text: str) -> dict[str, Any]:
     lines = text.splitlines()
     if len(lines) < 3:
         raise ToolCallParseError("assistant response is not one complete fenced block")
-    if lines[0] not in {"```", "```json"}:
-        raise ToolCallParseError("fenced tool call language must be json or empty")
+    if lines[0] != "```json":
+        raise ToolCallParseError("fenced tool call language must be json")
     if lines[-1] != "```":
         raise ToolCallParseError("assistant response is not one complete fenced block")
     return _load_strict_object("\n".join(lines[1:-1]))

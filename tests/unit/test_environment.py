@@ -195,11 +195,12 @@ def test_multiple_calls_record_contiguous_steps_and_policy_failure(harness) -> N
     )
     environment.list_files(".")
     environment.read_file("one.py")
+    environment._record_loop_exit("format_exhausted")
     reward = environment._finalize([{"role": "assistant", "content": "done"}])
     assert reward == 0.0
     assert environment.trajectory is not None
     assert [step.index for step in environment.trajectory.steps] == [0, 1]
-    assert environment.trajectory.termination == "model_stopped"
+    assert environment.trajectory.termination == "format_exhausted"
     assert not verifiers
 
 
@@ -223,9 +224,10 @@ def test_invalid_arguments_do_not_lock_termination(harness) -> None:
     environment.reset(config.dataset.task_id)
     invalid = environment.read_file("x", start_line=3, end_line=2)
     assert "end_line" in invalid
+    environment._record_loop_exit("format_exhausted")
     assert environment._finalize([]) == 0.0
     assert environment.trajectory is not None
-    assert environment.trajectory.termination == "model_stopped"
+    assert environment.trajectory.termination == "format_exhausted"
     assert not verifiers
 
 
@@ -245,9 +247,12 @@ def test_finalize_uses_terminal_event_or_loop_exit(harness) -> None:
             ],
         }
     ]
+    with pytest.raises(RuntimeError, match="without a terminal event or loop exit"):
+        environment._finalize(unknown)
+    environment._record_loop_exit("format_exhausted")
     assert environment._finalize(unknown) == 0.0
     assert environment.trajectory is not None
-    assert environment.trajectory.termination == "model_stopped"
+    assert environment.trajectory.termination == "format_exhausted"
     assert environment.trajectory.steps == []
     assert not verifiers
 
@@ -306,6 +311,7 @@ def test_binary_reward_is_position_aligned_and_strict(harness) -> None:
     second.reset(config.dataset.task_id)
     first_sandboxes[0].diff = "diff --git a/x b/x\n"
     first.submit()
+    second._record_loop_exit("format_exhausted")
     rewards = binary_reward(
         completions=[
             [{"role": "assistant", "content": "final"}],

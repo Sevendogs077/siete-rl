@@ -66,6 +66,8 @@ def test_shared_training_contract_is_fixed(path: Path) -> None:
     assert config.chat.max_prompt_length == 8192
     assert config.generation.max_completion_length == 22528
     assert config.generation.context_safety_margin == 2048
+    assert config.generation.max_tool_calling_iterations == 40
+    assert config.generation.max_consecutive_format_errors == 5
     assert (
         config.chat.max_prompt_length
         + config.generation.max_completion_length

@@ -1,18 +1,21 @@
 """GRPOTrainer 子类：环境信号终止 + 循环结束归因。
 
 `_tool_call_loop` 镜像 `trl==1.8.0` 的 `GRPOTrainer._tool_call_loop`，
-仅在四处插入 swe_agent 逻辑（以 `# >>> swe_agent` 标记）：
+仅在若干处插入 swe_agent 逻辑（以 `# >>> swe_agent` 标记）：
 
-1. 循环开始前为从未发出 tool call 的样本归因 ``model_stopped``；
-2. 每轮工具执行后轮询 ``environment.terminated``，被终止样本按 TRL 自身的
-   overlong 回滚模式撤出循环（completion 结束于触发终止的 assistant 调用，
-   终止观察不进入训练序列）；
-3. overlong 撤出与生成后无 tool call 的样本分别归因
-   ``context_overlong`` / ``model_stopped``；
-4. 循环出口为迭代耗尽的样本归因 ``iteration_cap``，并把全部归因写回环境。
+1. 所有未产生 ``tool_calls`` 的输出均规范为 ``parse_error``，并以哨兵
+   tool call 留在循环内；唯一例外是被预算截断为空的生成（长度耗尽而
+   非格式错误），直接归因 ``context_overlong`` 退出，不进格式恢复；
+2. 哨兵样本跳过工具执行，注入 ``format_error`` 反馈消息（token 经既有
+   suffix 机制 mask=0），命中配置的连续格式错误上限则退出；
+3. 每轮工具执行后轮询 ``environment.terminated`` 与熔断计数，命中样本按
+   TRL 自身的 overlong 回滚模式撤出循环；格式上限样本保留其最后一条
+   assistant 输出以便记录；
+4. overlong 撤出归因 ``context_overlong``，真实 tool call 重置连续计数；
+5. 循环出口为迭代耗尽的样本归因 ``iteration_cap``，并把全部归因写回环境。
 
 TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
-人工同步本方法。
+人工同步本方法（镜像一致性由测试守护）。
 """
 
 from __future__ import annotations
@@ -25,18 +28,54 @@ from trl.chat_template_utils import parse_response
 from swe_agent.models import LoopExit
 
 
+_PARSE_ERROR_SENTINEL = "swe_agent_parse_error"
+"""哨兵 tool call：parse_error 样本留在循环内接受格式反馈，不进入真实工具执行。"""
+
+_FORMAT_FEEDBACK_TEMPLATE = (
+    "error: the previous assistant message was not one complete valid tool call ({reason}). "
+    "Respond with exactly one complete Qwen <tool_call>, JSON object, or fenced JSON block; "
+    "do not add prose before or after it."
+)
+
+
 class SWEGRPOTrainer(GRPOTrainer):
     """在官方 GRPOTrainer 上加入环境信号终止；其余行为与 TRL 完全一致。"""
+
+    def __init__(self, *args, max_consecutive_format_errors: int, **kwargs) -> None:
+        if max_consecutive_format_errors < 1:
+            raise ValueError("max_consecutive_format_errors must be positive")
+        self.max_consecutive_format_errors = max_consecutive_format_errors
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _tool_calls_or_parse_error(completion):
+        """严格工具回合中，没有完整调用的任意输出都必须进入格式恢复。"""
+
+        tool_calls = completion.get("tool_calls")
+        if tool_calls:
+            return tool_calls
+        completion.setdefault("role", "assistant")
+        completion.setdefault("content", "")
+        completion.setdefault(
+            "parse_error",
+            "assistant response did not contain one complete valid tool call",
+        )
+        return [_PARSE_ERROR_SENTINEL]
 
     def _tool_call_loop(self, prompts, prompt_ids, completion_ids, completions, logprobs, images, multimodal_fields):
         # Tool execution loop: execute tools, then regenerate completions with tool results appended to the prompt
         tool_calls = [completion[0].get("tool_calls") for completion in completions]
+        # >>> swe_agent: 所有无 tool call 输出都进入格式恢复
+        format_error_counts = [0] * len(completions)
+        tool_calls = [
+            self._tool_calls_or_parse_error(completion[0])
+            for calls, completion in zip(tool_calls, completions, strict=True)
+        ]
+        # <<< swe_agent
         idxs_with_tool = [idx for idx, tool_call in enumerate(tool_calls) if tool_call]
         tool_calls = [tool_calls[idx] for idx in idxs_with_tool]
-        # >>> swe_agent: 从未发出 tool call 的样本直接归因 model_stopped
-        loop_exit_reasons: dict[int, LoopExit] = {
-            idx: "model_stopped" for idx in range(len(completions)) if idx not in idxs_with_tool
-        }
+        # >>> swe_agent: 仅由项目终止语义写回循环退出原因
+        loop_exit_reasons: dict[int, LoopExit] = {}
         # <<< swe_agent
         tool_mask = [[1] * len(ids) for ids in completion_ids]  # 0 for tool result tokens, 1 elsewhere
         # Collect images from multimodal tool responses for the forward pass
@@ -61,6 +100,20 @@ class SWEGRPOTrainer(GRPOTrainer):
                 async_tool_dict = self._async_tool_dicts[idx_with_tool]
                 # Append the last assistant message (which triggered tool_calls) to the prompt
                 prompt_completion_tool.append(completions[idx_with_tool][-1])
+                # >>> swe_agent: 哨兵样本跳过工具执行，注入格式反馈消息（mask=0 由 suffix 机制保证）
+                if tool_call_list == [_PARSE_ERROR_SENTINEL]:
+                    format_error_counts[idx_with_tool] += 1
+                    if format_error_counts[idx_with_tool] < self.max_consecutive_format_errors:
+                        reason = completions[idx_with_tool][-1].get("parse_error", "unknown parse error")
+                        feedback = {
+                            "role": "tool",
+                            "name": "format_error",
+                            "content": _FORMAT_FEEDBACK_TEMPLATE.format(reason=reason),
+                        }
+                        prompt_completion_tool.append(feedback)
+                        completions[idx_with_tool].append(feedback)
+                    continue
+                # <<< swe_agent
                 async_coros = []
                 tool_call_results = []
                 for tool_call in tool_call_list:
@@ -116,24 +169,37 @@ class SWEGRPOTrainer(GRPOTrainer):
                     prompt_completion_tool.append(tool_message)
                     completions[idx_with_tool].append(tool_message)
 
-            # >>> swe_agent: 轮询环境终止信号，被终止样本按 overlong 同款回滚撤出循环
+            # >>> swe_agent: 轮询环境终止信号与格式上限；上限样本保留最终无效输出以供记录
             if self.environments:
                 terminated_flags = [
                     bool(getattr(self.environments[idx_with_tool], "terminated", False))
                     for idx_with_tool in idxs_with_tool
                 ]
-                if any(terminated_flags):
-                    for idx in range(len(idxs_with_tool)):
+            else:
+                terminated_flags = [False] * len(idxs_with_tool)
+            breaker_flags = [
+                format_error_counts[idx_with_tool] >= self.max_consecutive_format_errors
+                for idx_with_tool in idxs_with_tool
+            ]
+            exit_flags = [
+                terminated or breaker
+                for terminated, breaker in zip(terminated_flags, breaker_flags, strict=True)
+            ]
+            if any(exit_flags):
+                for idx in range(len(idxs_with_tool)):
+                    if exit_flags[idx]:
+                        idx_with_tool = idxs_with_tool[idx]
                         if terminated_flags[idx]:
-                            idx_with_tool = idxs_with_tool[idx]
                             del completions[idx_with_tool][completions_len_before[idx] :]
                             del tool_images[idx_with_tool][tool_images_len_before[idx] :]
                             del prompts[idx_with_tool][prompts_len_before[idx] :]
-                    idxs_with_tool = [
-                        idx for idx, flag in zip(idxs_with_tool, terminated_flags, strict=True) if not flag
-                    ]
-                    if not idxs_with_tool:
-                        break
+                        elif breaker_flags[idx]:
+                            loop_exit_reasons[idx_with_tool] = "format_exhausted"
+                idxs_with_tool = [
+                    idx for idx, flag in zip(idxs_with_tool, exit_flags, strict=True) if not flag
+                ]
+                if not idxs_with_tool:
+                    break
             # <<< swe_agent
 
             # Build token IDs by concatenation: prompt + completion + tool_suffix.
@@ -262,10 +328,18 @@ class SWEGRPOTrainer(GRPOTrainer):
 
             # Check for further tool calls
             tool_calls = [completion.get("tool_calls") for completion in post_tool_completions]
-            # >>> swe_agent: 本轮生成后不再有 tool call 的样本归因 model_stopped
-            for idx, tool_call in zip(idxs_with_tool, tool_calls, strict=True):
-                if not tool_call:
-                    loop_exit_reasons[idx] = "model_stopped"
+            # >>> swe_agent: 空生成归因 context_overlong；其余无 tool call 输出进入格式恢复
+            tool_calls = []
+            for idx, completion in zip(idxs_with_tool, post_tool_completions, strict=True):
+                if not completion:
+                    # 生成被预算截断为空：长度耗尽而非格式错误，不进格式恢复
+                    loop_exit_reasons[idx] = "context_overlong"
+                    tool_calls.append(None)
+                    continue
+                calls = self._tool_calls_or_parse_error(completion)
+                if calls != [_PARSE_ERROR_SENTINEL]:
+                    format_error_counts[idx] = 0
+                tool_calls.append(calls)
             # <<< swe_agent
             idxs_with_tool = [idx for idx, tool_call in zip(idxs_with_tool, tool_calls, strict=True) if tool_call]
             tool_calls = [tool_call for tool_call in tool_calls if tool_call]

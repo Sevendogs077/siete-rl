@@ -11,14 +11,12 @@ def test_only_planned_launcher_exists() -> None:
     scripts = sorted(path.name for path in (PROJECT_ROOT / "scripts").iterdir())
     assert scripts == ["grpo.sh"]
     launcher = (PROJECT_ROOT / "scripts/grpo.sh").read_text(encoding="utf-8")
-    assert ".venv/bin/trl vllm-serve" in launcher
-    assert "setsid env CUDA_VISIBLE_DEVICES=\"$server_gpu\"" in launcher
-    assert 'CUDA_VISIBLE_DEVICES="$server_gpu"' in launcher
-    assert 'CUDA_VISIBLE_DEVICES="$trainer_gpu"' in launcher
-    assert 'curl --fail --silent --show-error "$server_url/health"' in launcher
-    assert 'kill -TERM -- "-$server_pid"' in launcher
-    assert 'label=swe_agent.run_id=$SWE_AGENT_RUN_ID' in launcher
-    assert '.venv/bin/swe_agent grpo --config "$config_path"' in launcher
+    assert 'exec .venv/bin/swe_agent grpo --config "$config_path"' in launcher
+    # vLLM server 生命周期、GPU 拆分与容器清扫均已内嵌 swe_agent.launcher
+    assert "vllm-serve" not in launcher
+    assert "setsid" not in launcher
+    assert "docker rm" not in launcher
+    assert "SWE_AGENT_RUN_ID" not in launcher
     assert "accelerate launch" not in launcher
     assert "--use_fsdp" not in launcher
 

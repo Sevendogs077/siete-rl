@@ -169,12 +169,14 @@ def test_formal_tokenizer_allows_delimiters_inside_compatible_arguments(
     )
 
 
-def test_formal_tokenizer_preserves_ordinary_mentions_of_protocol_markers(tokenizer) -> None:
+def test_formal_tokenizer_marks_ordinary_content_as_parse_error(tokenizer) -> None:
     response = "The documentation mentions <tool_call> and </tool_call> markers."
 
     parsed = tokenizer.parse_response(response, prefix="")
 
-    assert parsed == {"role": "assistant", "content": response}
+    assert parsed["role"] == "assistant"
+    assert parsed["content"] == response
+    assert parsed["parse_error"]
 
 
 def test_formal_tokenizer_preserves_official_batch_interface(tokenizer) -> None:
@@ -217,12 +219,15 @@ def test_formal_tokenizer_delegates_batch_parse_errors(tokenizer) -> None:
         ),
     ],
 )
-def test_malformed_official_markers_never_enter_json_fallback(tokenizer, response: str) -> None:
-    with pytest.raises(ToolCallParseError):
-        tokenizer.parse_response(response, prefix="")
+def test_malformed_official_markers_return_parse_error(tokenizer, response: str) -> None:
+    parsed = tokenizer.parse_response(response, prefix="")
+    assert parsed["role"] == "assistant"
+    assert parsed["content"] == response
+    assert "tool_calls" not in parsed
+    assert parsed["parse_error"]
 
 
-def test_trl_outer_parser_preserves_malformed_official_as_content(tokenizer, actual_tools) -> None:
+def test_trl_outer_parser_preserves_malformed_official_as_parse_error(tokenizer, actual_tools) -> None:
     prompt = [{"role": "user", "content": "Inspect the repository."}]
     prefix = tokenizer.apply_chat_template(
         prompt,
@@ -239,6 +244,7 @@ def test_trl_outer_parser_preserves_malformed_official_as_content(tokenizer, act
     assert parsed["role"] == "assistant"
     assert "tool_calls" not in parsed
     assert "<tool_call>" in parsed["content"]
+    assert parsed["parse_error"]
 
 
 @pytest.mark.parametrize(
@@ -273,6 +279,34 @@ def test_trl_parser_normalizes_compatible_completion_ids(
             },
         }
     ]
+
+
+def test_trl_parser_marks_trailing_extra_brace_as_parse_error(tokenizer) -> None:
+    parsed = tokenizer.parse_response(
+        '```json\n{"name":"read_file","arguments":{"path":"README.md"}}}\n```',
+        prefix="",
+    )
+    assert "tool_calls" not in parsed
+    assert parsed["parse_error"]
+
+
+def test_trl_outer_parser_passes_parse_error_marker_through(tokenizer, actual_tools) -> None:
+    prompt = [{"role": "user", "content": "Inspect the repository."}]
+    prefix = tokenizer.apply_chat_template(
+        prompt,
+        tools=actual_tools,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=False,
+    )
+    malformed = '```json\n{"name":"read_file","arguments":}\n```'
+    completion_ids = tokenizer(malformed + tokenizer.eos_token, add_special_tokens=False)[
+        "input_ids"
+    ]
+    parsed = parse_response(tokenizer, completion_ids, prefix=prefix)
+    assert parsed["role"] == "assistant"
+    assert "tool_calls" not in parsed
+    assert parsed["parse_error"]
 
 
 def test_compatible_message_rerenders_as_qwen_history_with_tool_result(tokenizer, actual_tools) -> None:

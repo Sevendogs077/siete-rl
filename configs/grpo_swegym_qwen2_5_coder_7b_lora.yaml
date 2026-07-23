@@ -56,7 +56,8 @@ chat:
 generation:
   max_completion_length: 22528
   context_safety_margin: 2048
-  max_tool_calling_iterations: 20
+  max_tool_calling_iterations: 40
+  max_consecutive_format_errors: 5
   temperature: 1.0
   top_p: 1.0
   top_k: 0

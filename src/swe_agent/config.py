@@ -87,7 +87,8 @@ class ChatConfig(StrictConfig):
 class GenerationConfig(StrictConfig):
     max_completion_length: Literal[22528]
     context_safety_margin: Literal[2048]
-    max_tool_calling_iterations: Literal[20]
+    max_tool_calling_iterations: int = Field(ge=1)
+    max_consecutive_format_errors: int = Field(ge=1)
     temperature: Literal[1.0]
     top_p: Literal[1.0]
     top_k: Literal[0]

@@ -15,6 +15,7 @@ from swe_agent.docker import (
     DockerSandbox,
     build_create_command,
     inspect_image,
+    sweep_run_containers,
 )
 from swe_agent.swegym import load_qualified_instance
 
@@ -212,3 +213,46 @@ def test_image_identity_mismatch_fails_before_create(domain) -> None:
     with pytest.raises(ContainerCreateError, match="image ID"):
         inspect_image(client, environment)
     assert len(client.calls) == 1
+
+
+def test_sweep_removes_only_labeled_containers() -> None:
+    client = FakeClient(
+        [
+            result([], stdout=f"{'a' * 64}\n{'b' * 64}\n"),
+            result([]),
+            result([]),
+        ]
+    )
+
+    removed = sweep_run_containers(client, "run-1")
+
+    assert removed == ["a" * 64, "b" * 64]
+    assert client.calls[0][0] == [
+        "docker",
+        "ps",
+        "-aq",
+        "--filter",
+        "label=swe_agent.run_id=run-1",
+    ]
+    assert client.calls[1][0] == ["docker", "rm", "-f", "a" * 64]
+    assert client.calls[2][0] == ["docker", "rm", "-f", "b" * 64]
+
+
+def test_sweep_tolerates_empty_and_missing_but_fails_on_errors() -> None:
+    empty = FakeClient([result([], stdout="")])
+    assert sweep_run_containers(empty, "run-1") == []
+
+    missing = FakeClient(
+        [result([], stdout="a" * 64), result([], exit_code=1, stderr="No such container")]
+    )
+    assert sweep_run_containers(missing, "run-1") == []
+
+    listing_failed = FakeClient([result([], exit_code=1, stderr="daemon down")])
+    with pytest.raises(ContainerCleanupError, match="failed to list"):
+        sweep_run_containers(listing_failed, "run-1")
+
+    remove_failed = FakeClient(
+        [result([], stdout="a" * 64), result([], exit_code=1, stderr="permission denied")]
+    )
+    with pytest.raises(ContainerCleanupError, match="failed to remove"):
+        sweep_run_containers(remove_failed, "run-1")

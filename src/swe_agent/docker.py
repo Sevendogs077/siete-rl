@@ -327,6 +327,29 @@ def inspect_image(client: DockerClient, environment: Environment) -> dict[str, o
     }
 
 
+def sweep_run_containers(client: DockerClient, run_id: str) -> list[str]:
+    """按 run label 兜底清扫孤儿容器；返回实际删除的容器 ID 列表。"""
+
+    listed = client.run(
+        ["docker", "ps", "-aq", "--filter", f"label=swe_agent.run_id={run_id}"],
+        timeout_sec=30,
+    )
+    if listed.exit_code != 0 or listed.timed_out:
+        raise ContainerCleanupError(_failure("failed to list run containers", listed))
+    removed: list[str] = []
+    for line in listed.stdout.splitlines():
+        container_id = line.strip()
+        if not container_id:
+            continue
+        result = client.run(["docker", "rm", "-f", container_id], timeout_sec=30)
+        if result.exit_code != 0 or result.timed_out:
+            if _is_missing_container(result):
+                continue
+            raise ContainerCleanupError(_failure("failed to remove container", result))
+        removed.append(container_id)
+    return removed
+
+
 def _parse_container_id(stdout: str) -> str | None:
     candidate = stdout.strip().splitlines()[0] if stdout.strip() else ""
     return candidate if re.fullmatch(r"[0-9a-f]{12,64}", candidate) else None

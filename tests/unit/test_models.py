@@ -92,7 +92,7 @@ def test_action_step_and_trajectory_have_no_wire_or_probability_fields(
         task_id=task.task_id,
         environment_id=environment.environment_id,
         steps=steps,
-        termination="model_stopped",
+        termination="format_exhausted",
     )
     dumped = trajectory.model_dump(mode="json")
     assert dumped["steps"][0]["action"] == {

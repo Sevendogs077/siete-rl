@@ -408,7 +408,7 @@ TRL 1.8.0 environment 没有 `done`、`terminate` 或 tool result 携带 termina
 2. 提示要求模型下一 turn 只输出最终文本、不要再调用工具；
 3. submitted 后任何 public tool 调用返回策略错误并把 episode 标为 unresolved；不得修改 repo；
 4. 下一 assistant 无 tool call，TRL 原生停止；reward finalizer 检查 exactly-one successful submit；
-5. `max_tool_calling_iterations=20`、`max_prompt_length=8192`、`max_completion_length=22528`和`context_safety_margin=2048`显式固定，满足`8192+22528+2048=32768`。prompt上限必须用目标tokenizer对最终chat-template渲染结果实际计数，包含system/user边界、tools schema和所有special tokens；completion上限由assistant输出、动态tool-result及其消息边界共同消费。资格与正式入口使用同一计数函数，prompt超过8192即停止并缩短prompt文案，不动态放大context/completion或占用2048安全余量。
+5. `max_tool_calling_iterations=40`、`max_consecutive_format_errors=5`、`max_prompt_length=8192`、`max_completion_length=22528`和`context_safety_margin=2048`显式配置，满足`8192+22528+2048=32768`。prompt上限必须用目标tokenizer对最终chat-template渲染结果实际计数，包含system/user边界、tools schema和所有special tokens；completion上限由assistant输出、动态tool-result及其消息边界共同消费。资格与正式入口使用同一计数函数，prompt超过8192即停止并缩短prompt文案，不动态放大context/completion或占用2048安全余量。
 
 这会多生成一个 assistant final turn，和旧协议不同，但不改变 SWE 核心目标。[建议] 若模型频繁 submit 后继续 tool call，它是可学习的策略失败，不应靠 grammar 或 TRL patch 隐藏。
 
@@ -954,7 +954,7 @@ configs/
 | quantization | disabled；`load_in_4bit=false`且不传`BitsAndBytesConfig` | 配置测试必须拒绝“文件名LoRA但实际启用4-bit” |
 | LoRA | r16/alpha32/dropout0；target固定`q_proj,k_proj,v_proj,o_proj` | 启动前要求四类target全部精确存在且只有预期LoRA参数可训练；不使用`all-linear`或自动扩展 |
 | GRPO | binary reward、DAPO、beta0、`num_generations=4`、`num_iterations=1` | group固定4；reward分布和更新数值只如实观察 |
-| generation | temp1/top-p1/top-k0；`max_tool_calling_iterations=20`；`max_completion_length=22528`；margin 2048 | 禁用grammar约束；动态工具输出与消息边界计入总completion预算，安全余量不可被运行时借用 |
+| generation | temp1/top-p1/top-k0；`max_tool_calling_iterations=40`、`max_consecutive_format_errors=5`；`max_completion_length=22528`；margin 2048 | 禁用grammar约束；动态工具输出与消息边界计入总completion预算，安全余量不可被运行时借用 |
 | generation backend | colocate vLLM、TP1、sleep true、`use_vllm=true` | 以非量化BF16推理并验证PEFT merge/full sync；任一gate失败停止，配置保持不变 |
 | Trainer | 单GPU、第一阶段验收run使用`max_steps=1`、batch/accumulation均为1、checkpoint每step保存且最多保留2个 | 不引入FSDP/DeepSpeed；一个run只构造一次Trainer/vLLM并执行一次基于在线group的GRPO optimizer step；不保证非零parameter update |
 
@@ -1253,7 +1253,7 @@ run_id: null                 # 第一阶段固定由入口按UTC-Z+4位随机码
 | output layout unit | run-id、拒绝覆盖、batch/group层级、原子run记录、checkpoint路径 | 唯一`outputs/<run-id>`；目录名满足UTC-Z+4hex；`batch.json/group.json`关联顺序/rewards/consumed steps且均支持interrupted；无扁平索引；Trainer checkpoint原样在根下；resume才复用目录 |
 | run record unit | 单写者、原子replace、生命周期/训练/cleanup正交 | 多active env只提交事件不直接写文件；run/batch/group的running/completed/failed/interrupted映射正确；`native_policy_path_reached`与`trainer_group_consumed`并列记录；正常policy未达标允许`lifecycle=completed/failure=null/system_closed_loop=failed`；cleanup以pending/completed/failed和nullable clean_release区分未完成；primary failure不被cleanup覆盖；container/process/runtime handle硬释放事实准确，进程内CUDA数值仅作诊断 |
 | dependency qualification | lock、wheel source、基础import、Torch/vLLM CUDA extension | 按A–D以退出码/终端分层判断；bitsandbytes wheel解析/安装失败会阻断唯一环境，wheel已安装仍不等于BNB可import或4-bit可用；7B gate不执行BNB CUDA/4-bit探针；失败测试证明冻结后failure handler不会改写`pyproject.toml/uv.lock/configs/*.yaml`；大型层默认skip，只由获一次实施授权的Agent显式运行；默认不落长期目录 |
-| config unit | 两份完整YAML、无继承、模型路径、context、tools、group/batch/save | 两份均为`num_generations=4`、`max_tool_calling_iterations=20`、`max_prompt_length=8192`、`max_completion_length=22528`、`context_safety_margin=2048`、第一阶段验收run的`max_steps=1`、batch/accumulation均1、每step保存且`save_total_limit=2`；测试用真实tokenizer计最终模板并断言三者之和≤32768；7B另固定单个run seed、`use_vllm=true`、TP1、sleep true、memory utilization 0.3，且不存在run循环或跨run汇总字段；7B `load_in_4bit=false/quantization_config=None`，30B NF4+BF16 compute+double quant且`use_vllm=true/runtime_qualified=false`；配置完整不等于资格通过 |
+| config unit | 两份完整YAML、无继承、模型路径、context、tools、group/batch/save | 两份均为`num_generations=4`、`max_tool_calling_iterations=40`、`max_consecutive_format_errors=5`、`max_prompt_length=8192`、`max_completion_length=22528`、`context_safety_margin=2048`、第一阶段验收run的`max_steps=1`、batch/accumulation均1、每step保存且`save_total_limit=2`；测试用真实tokenizer计最终模板并断言三者之和≤32768；7B另固定单个run seed、`use_vllm=true`、TP1、sleep true、memory utilization 0.3，且不存在run循环或跨run汇总字段；7B `load_in_4bit=false/quantization_config=None`，30B NF4+BF16 compute+double quant且`use_vllm=true/runtime_qualified=false`；配置完整不等于资格通过 |
 | 7B LoRA qualification | BF16 base、无quant config、LoRA trainable set、forward/backward、save/reload | r16/alpha32/dropout0；target精确为`q_proj,k_proj,v_proj,o_proj`且全部存在；base frozen；仅预期LoRA参数可训练；非零tiny grad；不要求BNB import、Params4bit或4-bit load；真实模型/GPU测试默认skip，由一次实施授权后的阶段2显式运行 |
 | 30B QLoRA static contract | 完整YAML、BNB字段、Qwen3架构声明、PEFT target、`runtime_qualified=false` | 第一阶段只做解析、交叉字段校验和CLI拒绝真实启动；不加载30B、不验证Params4bit/forward/backward/vLLM/TP拓扑，也不以7B证据替代未来30B资格 |
 | 7B vLLM qualification | 固定vLLM colocate/TP1/sleep/wake/sync/cache | 以受控adapter权重验证BF16+PEFT同步机制且不要求BNB realization；该资格与正式run是否发生非零parameter update分离；`use_vllm=true`、memory utilization 0.3保持不变；注入每类gate失败时都停止、记录且配置hash不变；默认skip且不得由普通pytest触发 |

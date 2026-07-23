@@ -68,17 +68,21 @@ def test_entry_executes_exactly_one_run(
     }
 
     monkeypatch.setattr("swe_agent.train._require_single_visible_gpu", lambda: 3)
+    monkeypatch.setattr("swe_agent.launcher.split_visible_gpus", lambda config: "0")
 
-    def fake_run_once(*, config, project_root, seed, physical_device):
+    def fake_run_once(*, config, project_root, seed, physical_device, server_gpu):
         del config, project_root
         seeds.append(seed)
         devices.append(physical_device)
+        server_gpus.append(server_gpu)
         return outcome
 
+    server_gpus: list[str] = []
     monkeypatch.setattr("swe_agent.train._run_once", fake_run_once)
     result = run(CONFIG_7B)
     assert seeds == [20260714]
     assert devices == [3]
+    assert server_gpus == ["0"]
     assert result == outcome
 
 
@@ -131,7 +135,7 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     assert grpo_config.vllm_model_impl == "vllm"
     assert grpo_config.vllm_max_model_length == 32768
     assert grpo_config.vllm_enable_sleep_mode is False
-    assert grpo_config.max_tool_calling_iterations == 20
+    assert grpo_config.max_tool_calling_iterations == 40
     assert grpo_config.loss_type == "dapo"
     assert grpo_config.router_aux_loss_coef == 0.0
     assert grpo_config.shuffle_dataset is True

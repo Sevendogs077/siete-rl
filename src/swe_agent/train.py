@@ -51,6 +51,7 @@ REQUIRED_DOMAIN_MODULES = (
     "rewards.py",
     "recording.py",
     "trainer.py",
+    "launcher.py",
 )
 
 
@@ -225,6 +226,7 @@ def build_trainer(
         reward_funcs=reward_func,
         peft_config=build_peft_config(config),
         quantization_config=build_quantization_config(config),
+        max_consecutive_format_errors=config.generation.max_consecutive_format_errors,
     )
 
 
@@ -258,12 +260,17 @@ def run(config_path: str | Path) -> dict[str, Any]:
             f"拒绝启动真实训练；缺少: {missing}"
         )
 
+    from swe_agent.launcher import split_visible_gpus
+
+    os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
+    server_gpu = split_visible_gpus(config)
     physical_device = _require_single_visible_gpu()
     report = _run_once(
         config=config,
         project_root=project_root,
         seed=config.runtime.base_seed,
         physical_device=physical_device,
+        server_gpu=server_gpu,
     )
     if report["lifecycle"] == "interrupted":
         raise TrainingInterrupted(int(report["interrupted_signum"]), report)
@@ -271,12 +278,18 @@ def run(config_path: str | Path) -> dict[str, Any]:
 
 
 def _run_once(
-    *, config: ProjectConfig, project_root: Path, seed: int, physical_device: int
+    *,
+    config: ProjectConfig,
+    project_root: Path,
+    seed: int,
+    physical_device: int,
+    server_gpu: str | None,
 ) -> dict[str, Any]:
     """创建并终结唯一 output_dir；所有项目 JSON 只由本函数驱动。"""
 
-    from swe_agent.docker import DockerSandbox, SubprocessDockerClient
+    from swe_agent.docker import DockerSandbox, SubprocessDockerClient, sweep_run_containers
     from swe_agent.environment import SWEEnvironment
+    from swe_agent.launcher import VLLMServer, build_server_command
     from swe_agent.recording import RunRecorder
     from swe_agent.rewards import binary_reward
     from swe_agent.swegym import build_training_dataset, load_task_context
@@ -295,6 +308,8 @@ def _run_once(
 
     trainer: Any | None = None
     environments: list[SWEEnvironment] = []
+    docker_client: SubprocessDockerClient | None = None
+    vllm_server: VLLMServer | None = None
     gpu_baseline: dict[str, int] | None = None
     child_process_baseline = _snapshot_child_processes()
     run_processes: dict[int, dict[str, Any]] = {}
@@ -306,6 +321,18 @@ def _run_once(
     interrupted_signum: int | None = None
 
     try:
+        if server_gpu is not None:
+            stage = "vllm_server"
+            if config.vllm.server_base_url is None:
+                raise RuntimeError("vllm server mode requires vllm.server_base_url")
+            vllm_server = VLLMServer(
+                build_server_command(config),
+                server_gpu=server_gpu,
+                base_url=config.vllm.server_base_url,
+                log_path=recorder.output_dir / "vllm.log",
+            )
+            vllm_server.start()
+            recorder.log(f"vLLM server ready pid={vllm_server.pid}")
         gpu_baseline = _gpu_baseline(physical_device)
         stage = "load_task"
         task_context = load_task_context(config, project_root)
@@ -426,6 +453,14 @@ def _run_once(
     finally:
         run_processes.update(_new_child_processes(child_process_baseline))
         cleanup_errors, environment_handles = _close_environments(environments, recorder)
+        server_handle = vllm_server.close() if vllm_server is not None else None
+        if docker_client is not None:
+            try:
+                swept = sweep_run_containers(docker_client, recorder.run_id)
+                if swept:
+                    recorder.log(f"swept orphan containers: {', '.join(swept)}")
+            except BaseException as sweep_error:
+                cleanup_errors.append(sweep_error)
         trainer_to_release, trainer = trainer, None
         trainer_refs = _trainer_weakrefs(trainer_to_release)
         trainer_errors, trainer_handles = _release_trainer(trainer_to_release, recorder)
@@ -437,7 +472,13 @@ def _run_once(
         cleanup_errors.extend(process_errors)
         gpu_diagnostic = _finalize_gpu_diagnostic(physical_device, gpu_baseline)
         recorder.set_processes(processes)
-        recorder.set_runtime_handles([*environment_handles, *trainer_handles])
+        recorder.set_runtime_handles(
+            [
+                *environment_handles,
+                *([server_handle] if server_handle is not None else []),
+                *trainer_handles,
+            ]
+        )
         recorder.set_gpu_diagnostics([gpu_diagnostic])
         recorder.finalize_cleanup()
         if recorder.run["cleanup"]["state"] == "failed" and not cleanup_errors:

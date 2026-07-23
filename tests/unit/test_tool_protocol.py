@@ -30,7 +30,6 @@ STANDARD_READ_FILE = {
     "text",
     [
         '```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```',
-        '```\n{"name":"read_file","arguments":{"path":"README.md"}}\n```',
         '  \n```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```\n ',
         '{"name":"read_file","arguments":{"path":"README.md"}}',
         ' \n {"name":"read_file","arguments":{"path":"README.md"}} \n ',
@@ -56,8 +55,9 @@ def test_compatible_formats_are_normalized(text: str) -> None:
         ),
     ],
 )
-def test_non_whole_response_examples_remain_ordinary_content(text: str) -> None:
-    assert parse_compatible_tool_call(text) is None
+def test_non_whole_response_examples_are_rejected(text: str) -> None:
+    with pytest.raises(ToolCallParseError):
+        parse_compatible_tool_call(text)
 
 
 @pytest.mark.parametrize(
@@ -71,6 +71,7 @@ def test_non_whole_response_examples_remain_ordinary_content(text: str) -> None:
             '```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```\n'
             '```json\n{"name":"submit","arguments":{}}\n```'
         ),
+        '```\n{"name":"read_file","arguments":{}}\n```',
         '```json\n{"name":"read_file","arguments":{}}',
         '```python\n{"name":"read_file","arguments":{}}\n```',
         "```json\n[]\n```",
@@ -139,6 +140,19 @@ def test_compatible_json_allows_protocol_delimiters_inside_arguments(wrapped: bo
     assert parsed["tool_calls"][0]["function"]["arguments"]["content"].startswith("Example:")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"name":"read_file","arguments":{"path":"README.md"}}}',
+        '{"name":"read_file","arguments":{"path":"README.md"}}}}  ',
+        '```json\n{"name":"read_file","arguments":{"path":"README.md"}}}\n```',
+    ],
+)
+def test_trailing_extra_braces_are_rejected(text: str) -> None:
+    with pytest.raises(ToolCallParseError):
+        parse_compatible_tool_call(text)
+
+
 class FixtureTokenizer:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, Any, Any]] = []
@@ -195,3 +209,35 @@ def test_batch_is_delegated_without_single_response_decoding() -> None:
 
     assert parsed == {"role": "assistant", "content": str(responses)}
     assert tokenizer.calls == [(responses, None, ["", ""])]
+
+
+def test_malformed_compatible_attempt_returns_parse_error_marker() -> None:
+    tokenizer = install_compatible_tool_call_parser(FixtureTokenizer())
+    text = '```json\n{"name":"read_file","arguments":}\n```'
+
+    parsed = tokenizer.parse_response(text)
+
+    assert parsed["role"] == "assistant"
+    assert parsed["content"] == text
+    assert "tool_calls" not in parsed
+    assert parsed["parse_error"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I will inspect the repository.",
+        'I will inspect first.\n```json\n{"name":"read_file","arguments":{}}\n```',
+        '<tool_call>\n{"name":"read_file","arguments":{}',
+        "",
+    ],
+)
+def test_any_non_complete_tool_call_returns_parse_error_marker(text: str) -> None:
+    tokenizer = install_compatible_tool_call_parser(FixtureTokenizer())
+
+    parsed = tokenizer.parse_response(text)
+
+    assert parsed["role"] == "assistant"
+    assert parsed["content"] == text
+    assert "tool_calls" not in parsed
+    assert parsed["parse_error"]

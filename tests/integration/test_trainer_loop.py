@@ -27,9 +27,15 @@ class FakeEnvironment:
         self.loop_exit = reason
 
 
-def bare_trainer(*, max_iterations: int = 5, max_completion_length: int = 64) -> SWEGRPOTrainer:
+def bare_trainer(
+    *,
+    max_iterations: int = 5,
+    max_completion_length: int = 64,
+    max_consecutive_format_errors: int = 5,
+) -> SWEGRPOTrainer:
     trainer = object.__new__(SWEGRPOTrainer)
     trainer.max_tool_calling_iterations = max_iterations
+    trainer.max_consecutive_format_errors = max_consecutive_format_errors
     trainer.max_completion_length = max_completion_length
     trainer.use_vllm = False
     trainer.vllm_mode = "colocate"
@@ -74,11 +80,16 @@ def test_mixed_batch_terminates_submitted_and_continues_others(monkeypatch) -> N
     trainer.environments = [env_a, env_b]
     trainer._sync_tool_dicts = [
         {"submit": lambda: setattr(env_a, "terminated", True) or "submitted"},
-        {"inspect": lambda path: f"contents:{path}"},
+        {
+            "inspect": lambda path: f"contents:{path}",
+            "submit": lambda: setattr(env_b, "terminated", True) or "submitted",
+        },
     ]
     trainer._async_tool_dicts = [{}, {}]
     trainer._generate_single_turn = lambda prompt_ids, *args: ([[91]] * len(prompt_ids), None)
-    monkeypatch.setattr("swe_agent.trainer.parse_response", final_text)
+    monkeypatch.setattr(
+        "swe_agent.trainer.parse_response", lambda *args, **kwargs: assistant_tool_call("submit", {})
+    )
 
     completions = [
         [assistant_tool_call("submit", {})],
@@ -103,13 +114,14 @@ def test_mixed_batch_terminates_submitted_and_continues_others(monkeypatch) -> N
     assert tool_mask[0] == [1]
     assert env_a.terminated is True
     assert env_a.loop_exit is None  # 终态由环境自己的 TerminalEvent 表达
-    # 未终止样本：正常收到 observation 并继续生成，结束后归因 model_stopped
+    # 第二个样本：正常收到 observation，随后 submit 终止。
     assert [message["role"] for message in returned[1]] == ["assistant", "tool", "assistant"]
     assert returned[1][1]["content"] == "contents:a.py"
-    assert returned[1][-1]["content"] == "final"
+    assert returned[1][-1] == assistant_tool_call("submit", {})
     assert completion_ids[1] == [2, 90, 91]
     assert tool_mask[1] == [1, 0, 1]
-    assert env_b.loop_exit == "model_stopped"
+    assert env_b.terminated is True
+    assert env_b.loop_exit is None
 
 
 def test_all_samples_terminated_breaks_before_regeneration(monkeypatch) -> None:
@@ -149,9 +161,9 @@ def test_iteration_cap_is_attributed(monkeypatch) -> None:
     assert env.loop_exit == "iteration_cap"
 
 
-def test_sample_without_tool_call_is_model_stopped() -> None:
+def test_sample_without_tool_call_is_promoted_to_format_exhausted() -> None:
     env = FakeEnvironment()
-    trainer = bare_trainer()
+    trainer = bare_trainer(max_consecutive_format_errors=1)
     trainer.environments = [env]
     trainer._sync_tool_dicts = [{}]
     trainer._async_tool_dicts = [{}]
@@ -161,10 +173,10 @@ def test_sample_without_tool_call_is_model_stopped() -> None:
     )
 
     assert call_count == 0
-    assert returned == [[{"role": "assistant", "content": "no tools today"}]]
+    assert returned[0][0]["parse_error"]
     assert completion_ids == [[2]]
     assert tool_mask == [[1]]
-    assert env.loop_exit == "model_stopped"
+    assert env.loop_exit == "format_exhausted"
 
 
 def test_overlong_sample_is_rolled_back_and_attributed() -> None:
@@ -183,14 +195,40 @@ def test_overlong_sample_is_rolled_back_and_attributed() -> None:
     assert env.loop_exit == "context_overlong"
 
 
-def test_loop_without_environments_matches_stock_behavior(monkeypatch) -> None:
+def test_empty_generation_is_context_overlong_not_format_recovery(monkeypatch) -> None:
+    env = FakeEnvironment()
     trainer = bare_trainer()
+    trainer.environments = [env]
+    trainer._sync_tool_dicts = [{"inspect": lambda path: "contents"}]
+    trainer._async_tool_dicts = [{}]
+    # 生成被预算截断为空：ids 为空列表
+    trainer._generate_single_turn = lambda prompt_ids, *args: ([[]] * len(prompt_ids), None)
+    parse_calls: list[object] = []
+    monkeypatch.setattr(
+        "swe_agent.trainer.parse_response",
+        lambda *a, **k: parse_calls.append(a) or final_text(),
+    )
+
+    tool_mask, returned, completion_ids, _, _, _, _ = run_loop(
+        trainer, [[assistant_tool_call("inspect", {"path": "x.py"})]]
+    )
+
+    assert parse_calls == []  # 空生成不进入解析，也不注入格式反馈
+    assert [message["role"] for message in returned[0]] == ["assistant", "tool"]
+    assert not any(message.get("name") == "format_error" for message in returned[0])
+    assert completion_ids[0] == [2, 90]
+    assert tool_mask[0] == [1, 0]
+    assert env.loop_exit == "context_overlong"
+
+
+def test_loop_without_environments_keeps_valid_tool_behavior(monkeypatch) -> None:
+    trainer = bare_trainer(max_iterations=1)
     trainer.environments = None
     calls: list[str] = []
     trainer._sync_tool_dicts = [{"inspect": lambda path: calls.append(path) or "contents"}]
     trainer._async_tool_dicts = [{}]
     trainer._generate_single_turn = lambda prompt_ids, *args: ([[91]] * len(prompt_ids), None)
-    monkeypatch.setattr("swe_agent.trainer.parse_response", final_text)
+    monkeypatch.setattr("swe_agent.trainer.parse_response", looping_tool_call)
 
     tool_mask, returned, completion_ids, _, _, _, _ = run_loop(
         trainer, [[assistant_tool_call("inspect", {"path": "a.py"})]]
@@ -198,9 +236,81 @@ def test_loop_without_environments_matches_stock_behavior(monkeypatch) -> None:
 
     assert calls == ["a.py"]
     assert returned[0][1]["content"] == "contents"
-    assert returned[0][-1]["content"] == "final"
+    assert returned[0][-1] == looping_tool_call()
     assert completion_ids[0] == [2, 90, 91]
     assert tool_mask[0] == [1, 0, 1]
+
+
+def test_parse_error_sample_gets_feedback_and_recovers(monkeypatch) -> None:
+    env = FakeEnvironment()
+    trainer = bare_trainer()
+    trainer.environments = [env]
+    calls: list[str] = []
+    trainer._sync_tool_dicts = [
+        {
+            "inspect": lambda path: calls.append(path) or "contents",
+            "submit": lambda: setattr(env, "terminated", True) or "submitted",
+        }
+    ]
+    trainer._async_tool_dicts = [{}]
+    trainer._generate_single_turn = lambda prompt_ids, *args: ([[91]] * len(prompt_ids), None)
+    responses = iter(
+        [assistant_tool_call("inspect", {"path": "x.py"}), assistant_tool_call("submit", {})]
+    )
+    monkeypatch.setattr("swe_agent.trainer.parse_response", lambda *a, **k: next(responses))
+
+    broken = {"role": "assistant", "content": "```json\n{bad", "parse_error": "bad json"}
+    tool_mask, returned, completion_ids, _, _, _, _ = run_loop(trainer, [[broken]])
+
+    roles = [message["role"] for message in returned[0]]
+    assert roles == ["assistant", "tool", "assistant", "tool", "assistant"]
+    feedback = returned[0][1]
+    assert feedback["name"] == "format_error"
+    assert "bad json" in feedback["content"]
+    assert "Respond with exactly one complete Qwen" in feedback["content"]
+    assert calls == ["x.py"]
+    assert returned[0][-1] == assistant_tool_call("submit", {})
+    assert completion_ids[0] == [2, 90, 91, 90, 91]
+    assert tool_mask[0] == [1, 0, 1, 0, 1]
+    assert env.terminated is True
+    assert env.loop_exit is None
+
+
+def test_consecutive_parse_errors_end_at_configured_format_limit(monkeypatch) -> None:
+    env = FakeEnvironment()
+    trainer = bare_trainer(max_consecutive_format_errors=5)
+    trainer.environments = [env]
+    trainer._sync_tool_dicts = [{}]
+    trainer._async_tool_dicts = [{}]
+    generations = 0
+
+    def counting_generation(prompt_ids, *args):
+        nonlocal generations
+        generations += 1
+        return [[91]] * len(prompt_ids), None
+
+    trainer._generate_single_turn = counting_generation
+    monkeypatch.setattr(
+        "swe_agent.trainer.parse_response",
+        lambda *a, **k: {
+            "role": "assistant",
+            "content": "```json\n{bad",
+            "parse_error": "bad json",
+        },
+    )
+
+    broken = {"role": "assistant", "content": "```json\n{bad", "parse_error": "bad json"}
+    tool_mask, returned, completion_ids, _, _, _, _ = run_loop(trainer, [[broken]])
+
+    assert generations == 4
+    feedback_messages = [
+        message for message in returned[0] if message.get("name") == "format_error"
+    ]
+    assert len(feedback_messages) == 4
+    assert completion_ids[0] == [2, 90, 91, 90, 91, 90, 91, 90, 91]
+    assert tool_mask[0] == [1, 0, 1, 0, 1, 0, 1, 0, 1]
+    assert returned[0][-1]["parse_error"] == "bad json"
+    assert env.loop_exit == "format_exhausted"
 
 
 def test_tool_call_loop_mirrors_trl_source() -> None:

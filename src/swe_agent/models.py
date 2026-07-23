@@ -9,13 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Termination = Literal[
     "submitted",
-    "model_stopped",
     "iteration_cap",
     "context_overlong",
+    "format_exhausted",
     "infra_error",
 ]
 
-LoopExit = Literal["model_stopped", "iteration_cap", "context_overlong"]
+LoopExit = Literal["iteration_cap", "context_overlong", "format_exhausted"]
 
 
 class StrictModel(BaseModel):
