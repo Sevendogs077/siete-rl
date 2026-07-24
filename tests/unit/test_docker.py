@@ -12,6 +12,7 @@ from swe_agent.docker import (
     CommandResult,
     ContainerCleanupError,
     ContainerCreateError,
+    ContainerExecError,
     DockerSandbox,
     build_create_command,
     inspect_image,
@@ -213,6 +214,37 @@ def test_image_identity_mismatch_fails_before_create(domain) -> None:
     with pytest.raises(ContainerCreateError, match="image ID"):
         inspect_image(client, environment)
     assert len(client.calls) == 1
+
+
+def test_get_diff_registers_untracked_files_before_diff(domain) -> None:
+    task, environment = domain
+    client = FakeClient(
+        [
+            result([], stdout=""),
+            result([], stdout="diff --git a/new.py b/new.py\n"),
+        ]
+    )
+    sandbox = make_sandbox(client, task, environment)
+    sandbox.container_id = CONTAINER_ID
+    sandbox.started = True
+
+    diff = sandbox.get_diff()
+
+    assert diff == "diff --git a/new.py b/new.py\n"
+    assert client.calls[0][0][:4] == ["docker", "exec", "-i", CONTAINER_ID]
+    assert "add" in client.calls[0][0] and "-N" in client.calls[0][0]
+    assert "diff" in client.calls[1][0]
+
+
+def test_get_diff_fails_when_untracked_registration_fails(domain) -> None:
+    task, environment = domain
+    client = FakeClient([result([], exit_code=1, stderr="index lock")])
+    sandbox = make_sandbox(client, task, environment)
+    sandbox.container_id = CONTAINER_ID
+    sandbox.started = True
+
+    with pytest.raises(ContainerExecError, match="failed to register untracked"):
+        sandbox.get_diff()
 
 
 def test_sweep_removes_only_labeled_containers() -> None:

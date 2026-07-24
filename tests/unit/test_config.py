@@ -31,9 +31,11 @@ def test_both_complete_configs_parse_independently() -> None:
     assert config_30b.quantization.load_in_4bit is True
     assert config_30b.quantization.bnb_4bit_quant_type == "nf4"
     assert config_30b.quantization.bnb_4bit_use_double_quant is True
-    assert config_30b.runtime.runtime_qualified is False
+    assert config_30b.runtime.runtime_qualified is True
+    assert config_30b.vllm.mode == "server"
     assert config_30b.vllm.tensor_parallel_size is None
-    assert config_30b.vllm.server_base_url is None
+    assert config_30b.vllm.server_base_url == "http://127.0.0.1:8000"
+    assert config_30b.vllm.gpu_memory_utilization == 0.95
 
 
 def test_complete_configs_have_same_independent_top_level_shape() -> None:
@@ -58,25 +60,32 @@ def test_complete_configs_have_same_independent_top_level_shape() -> None:
 
 @pytest.mark.parametrize("path", [CONFIG_7B, CONFIG_30B])
 def test_shared_training_contract_is_fixed(path: Path) -> None:
+    """只锁与调参值无关的结构不变量；具体数值（步数、组大小、学习率等）不属于契约。"""
+
     config, _, _ = load_config(path)
     assert config.peft.target_modules == LORA_TARGET_MODULES
-    assert config.peft.rank == 16
-    assert config.peft.alpha == 32
-    assert config.peft.dropout == 0.0
-    assert config.chat.max_prompt_length == 8192
-    assert config.generation.max_completion_length == 22528
-    assert config.generation.context_safety_margin == 2048
-    assert config.generation.max_tool_calling_iterations == 40
-    assert config.generation.max_consecutive_format_errors == 5
+    # 上下文预算方程：prompt + completion + margin 必须恰好顶满模型上下文
     assert (
         config.chat.max_prompt_length
         + config.generation.max_completion_length
         + config.generation.context_safety_margin
         == config.model.context_length
     )
-    assert config.grpo.num_generations == 4
-    assert config.grpo.generation_batch_size == 4
-    assert config.grpo.max_steps == 1
+    # GRPO 组约束：generation batch 必须整除出完整的组；
+    # 且单任务数据集（1 行）下，RepeatSampler 每 batch 的 unique prompt 数不能超过 1，
+    # 否则采样器产出 0 条、训练 0 步空转
+    assert config.grpo.num_generations >= 2
+    assert config.grpo.generation_batch_size % config.grpo.num_generations == 0
+    assert config.grpo.generation_batch_size // config.grpo.num_generations <= 1
+    # TRL 节拍对齐：generation_batch_size == pdbs × steps_per_generation（缺省取 accum）
+    steps_per_generation = (
+        config.grpo.steps_per_generation or config.grpo.gradient_accumulation_steps
+    )
+    assert (
+        config.grpo.generation_batch_size
+        == config.grpo.per_device_train_batch_size * steps_per_generation
+    )
+    assert config.grpo.max_steps >= 1
     assert config.vllm.use_vllm is True
     assert config.vllm.enable_sleep_mode is (config.vllm.mode == "colocate")
 
@@ -99,4 +108,88 @@ def test_lora_cannot_enable_quantization() -> None:
         "bnb_4bit_use_double_quant": True,
     }
     with pytest.raises(ValidationError, match="LoRA mode"):
+        ProjectConfig.model_validate(payload)
+
+
+def test_steering_parameters_accept_theoretical_boundaries() -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["model"]["context_length"] = 32768
+    payload["peft"].update(rank=1, alpha=1, dropout=1.0)
+    payload["chat"].update(max_prompt_length=1, max_observation_chars=1)
+    payload["generation"].update(
+        max_completion_length=1,
+        context_safety_margin=0,
+        max_tool_calling_iterations=1,
+        max_consecutive_format_errors=1,
+        temperature=0.1,
+        top_p=1.0,
+        top_k=0,
+        repetition_penalty=0.1,
+        structured_outputs_regex=r"\{.*\}",
+    )
+    payload["grpo"].update(
+        num_generations=2,
+        num_iterations=1,
+        epsilon=0.0,
+        epsilon_high=0.0,
+        delta=0.0,
+        beta=0.0,
+        mask_truncated_completions=True,
+        router_aux_loss_coef=0.0,
+        shuffle_dataset=False,
+        vllm_importance_sampling_correction=False,
+        vllm_importance_sampling_clip_max=1.0,
+        vllm_importance_sampling_clip_min=0.0,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=1,
+        generation_batch_size=2,
+        steps_per_generation=1,
+        max_steps=1,
+        learning_rate=0.0,
+        weight_decay=0.0,
+        max_grad_norm=0.0,
+        gradient_checkpointing=False,
+        bf16=False,
+        logging_steps=1,
+        save_steps=1,
+        save_total_limit=1,
+        log_completions=True,
+    )
+    payload["vllm"].update(gpu_memory_utilization=1.0, max_model_length=32768)
+
+    validated = ProjectConfig.model_validate(payload)
+
+    assert validated.peft.rank == 1
+    assert validated.peft.dropout == 1.0
+    assert validated.vllm.gpu_memory_utilization == 1.0
+    assert validated.grpo.steps_per_generation == 1
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("peft", "rank", 0),
+        ("peft", "dropout", -0.1),
+        ("peft", "dropout", 1.1),
+        ("chat", "max_prompt_length", 0),
+        ("generation", "max_completion_length", 0),
+        ("generation", "temperature", 0.0),
+        ("generation", "top_p", 0.0),
+        ("generation", "top_p", 1.1),
+        ("grpo", "num_generations", 1),
+        ("grpo", "learning_rate", -1.0),
+        ("vllm", "gpu_memory_utilization", 0.0),
+        ("vllm", "gpu_memory_utilization", 1.1),
+        ("vllm", "max_model_length", 0),
+    ],
+)
+def test_steering_parameters_reject_out_of_range_values(
+    section: str, field: str, value: object
+) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload[section][field] = value
+
+    with pytest.raises(ValidationError):
         ProjectConfig.model_validate(payload)

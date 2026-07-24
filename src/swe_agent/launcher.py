@@ -130,6 +130,7 @@ class VLLMServer:
         self._log_handle = self._log_path.open("ab")
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = self._server_gpu
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         for key in ("NO_PROXY", "no_proxy"):
             existing = env.get(key)
             env[key] = f"{existing},127.0.0.1,localhost" if existing else "127.0.0.1,localhost"

@@ -54,7 +54,7 @@ class ModelConfig(StrictConfig):
     model_path: str = Field(min_length=1)
     tokenizer_path: str = Field(min_length=1)
     architecture: Literal["Qwen2ForCausalLM", "Qwen3MoeForCausalLM"]
-    context_length: Literal[32768]
+    context_length: int = Field(ge=1)
     trust_remote_code: bool
     dtype: Literal["bfloat16"]
     training_mode: Literal["lora", "qlora"]
@@ -69,9 +69,9 @@ class QuantizationConfig(StrictConfig):
 
 class PeftConfig(StrictConfig):
     task_type: Literal["CAUSAL_LM"]
-    rank: Literal[16]
-    alpha: Literal[32]
-    dropout: Literal[0.0]
+    rank: int = Field(ge=1)
+    alpha: int = Field(gt=0)
+    dropout: float = Field(ge=0.0, le=1.0)
     bias: Literal["none"]
     target_modules: tuple[str, ...]
     modules_to_save: None
@@ -80,56 +80,56 @@ class PeftConfig(StrictConfig):
 class ChatConfig(StrictConfig):
     native_tool_calling: Literal[True]
     add_response_schema: Literal[True]
-    max_prompt_length: Literal[8192]
-    max_observation_chars: int = Field(ge=256)
+    max_prompt_length: int = Field(ge=1)
+    max_observation_chars: int = Field(ge=1)
 
 
 class GenerationConfig(StrictConfig):
-    max_completion_length: Literal[22528]
-    context_safety_margin: Literal[2048]
+    max_completion_length: int = Field(ge=1)
+    context_safety_margin: int = Field(ge=0)
     max_tool_calling_iterations: int = Field(ge=1)
     max_consecutive_format_errors: int = Field(ge=1)
-    temperature: Literal[1.0]
-    top_p: Literal[1.0]
-    top_k: Literal[0]
-    repetition_penalty: Literal[1.0]
-    structured_outputs_regex: None
+    temperature: float = Field(gt=0.0)
+    top_p: float = Field(gt=0.0, le=1.0)
+    top_k: int = Field(ge=0)
+    repetition_penalty: float = Field(gt=0.0)
+    structured_outputs_regex: str | None
 
 
 class GRPOConfigValues(StrictConfig):
     reward_type: Literal["binary_verifier"]
-    num_generations: Literal[4]
-    num_iterations: Literal[1]
+    num_generations: int = Field(ge=2)
+    num_iterations: int = Field(ge=1)
     loss_type: Literal["dapo"]
     scale_rewards: Literal["group"]
     multi_objective_aggregation: Literal["sum_then_normalize"]
-    epsilon: Literal[0.2]
-    epsilon_high: None
-    delta: None
-    beta: Literal[0.0]
+    epsilon: float = Field(ge=0.0)
+    epsilon_high: float | None = Field(ge=0.0)
+    delta: float | None = Field(ge=0.0)
+    beta: float = Field(ge=0.0)
     importance_sampling_level: Literal["token"]
-    mask_truncated_completions: Literal[False]
-    router_aux_loss_coef: Literal[0.0]
-    shuffle_dataset: Literal[True]
-    vllm_importance_sampling_correction: Literal[True]
+    mask_truncated_completions: bool
+    router_aux_loss_coef: float = Field(ge=0.0)
+    shuffle_dataset: bool
+    vllm_importance_sampling_correction: bool
     vllm_importance_sampling_mode: Literal["sequence_mask"]
-    vllm_importance_sampling_clip_max: Literal[3.0]
-    vllm_importance_sampling_clip_min: None
-    per_device_train_batch_size: Literal[1]
-    gradient_accumulation_steps: Literal[1]
-    generation_batch_size: Literal[4]
-    steps_per_generation: None
-    max_steps: Literal[1]
-    learning_rate: Literal[0.000001]
-    weight_decay: Literal[0.0]
-    max_grad_norm: Literal[1.0]
-    gradient_checkpointing: Literal[True]
-    bf16: Literal[True]
-    logging_steps: Literal[1]
+    vllm_importance_sampling_clip_max: float = Field(gt=0.0)
+    vllm_importance_sampling_clip_min: float | None = Field(ge=0.0)
+    per_device_train_batch_size: int = Field(ge=1)
+    gradient_accumulation_steps: int = Field(ge=1)
+    generation_batch_size: int = Field(ge=1)
+    steps_per_generation: int | None = Field(ge=1)
+    max_steps: int = Field(ge=1)
+    learning_rate: float = Field(ge=0.0)
+    weight_decay: float = Field(ge=0.0)
+    max_grad_norm: float = Field(ge=0.0)
+    gradient_checkpointing: bool
+    bf16: bool
+    logging_steps: int = Field(ge=1)
     save_strategy: Literal["steps"]
-    save_steps: Literal[1]
-    save_total_limit: Literal[2]
-    log_completions: Literal[False]
+    save_steps: int = Field(ge=1)
+    save_total_limit: int = Field(ge=1)
+    log_completions: bool
     report_to: tuple[str, ...]
 
 
@@ -140,8 +140,8 @@ class VLLMConfig(StrictConfig):
     enable_sleep_mode: bool
     tensor_parallel_size: Literal[1] | None
     server_base_url: str | None
-    gpu_memory_utilization: Literal[0.3]
-    max_model_length: Literal[32768]
+    gpu_memory_utilization: float = Field(gt=0.0, le=1.0)
+    max_model_length: int = Field(ge=1)
 
 
 class RuntimeConfig(StrictConfig):
@@ -204,19 +204,37 @@ class ProjectConfig(StrictConfig):
         )
         if total_context > self.model.context_length:
             raise ValueError("prompt, completion and safety margin exceed model context")
+        if self.vllm.max_model_length > self.model.context_length:
+            raise ValueError("vLLM max model length exceeds model context")
+        if (
+            self.chat.max_prompt_length + self.generation.max_completion_length
+            > self.vllm.max_model_length
+        ):
+            raise ValueError("prompt and completion exceed vLLM max model length")
         if self.grpo.generation_batch_size % self.grpo.num_generations != 0:
             raise ValueError("generation_batch_size must be divisible by num_generations")
+        if (
+            self.grpo.epsilon_high is not None
+            and self.grpo.epsilon_high < self.grpo.epsilon
+        ):
+            raise ValueError("epsilon_high must be greater than or equal to epsilon")
+        if (
+            self.grpo.vllm_importance_sampling_clip_min is not None
+            and self.grpo.vllm_importance_sampling_clip_min
+            > self.grpo.vllm_importance_sampling_clip_max
+        ):
+            raise ValueError(
+                "vLLM importance-sampling clip min must not exceed clip max"
+            )
 
         if self.runtime.runtime_qualified:
-            if self.model.training_mode != "lora":
-                raise ValueError("only the first-stage LoRA profile may be runtime-qualified")
             if (
                 self.vllm.mode != "server"
                 or self.vllm.tensor_parallel_size is not None
                 or self.vllm.server_base_url != "http://127.0.0.1:8000"
                 or self.vllm.enable_sleep_mode
             ):
-                raise ValueError("first-stage runtime requires a separate local vLLM server")
+                raise ValueError("qualified runtime requires a separate local vLLM server")
         elif self.vllm.tensor_parallel_size is not None or self.vllm.server_base_url is not None:
             raise ValueError("an unqualified runtime must not activate GPU topology")
         return self

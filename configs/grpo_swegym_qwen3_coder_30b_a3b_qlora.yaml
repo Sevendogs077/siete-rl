@@ -84,7 +84,7 @@ grpo:
   vllm_importance_sampling_clip_max: 3.0
   vllm_importance_sampling_clip_min: null
   per_device_train_batch_size: 1
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 4
   generation_batch_size: 4
   steps_per_generation: null
   max_steps: 1
@@ -102,16 +102,16 @@ grpo:
 
 vllm:
   use_vllm: true
-  mode: colocate
+  mode: server
   model_impl: vllm
-  enable_sleep_mode: true
+  enable_sleep_mode: false
   tensor_parallel_size: null
-  server_base_url: null
-  gpu_memory_utilization: 0.3
+  server_base_url: http://127.0.0.1:8000
+  gpu_memory_utilization: 0.95
   max_model_length: 32768
 
 runtime:
-  runtime_qualified: false
+  runtime_qualified: true
   process_count: 1
   base_seed: 20260714
 

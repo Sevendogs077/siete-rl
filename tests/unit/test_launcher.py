@@ -99,6 +99,7 @@ def test_server_start_and_clean_close(monkeypatch, tmp_path) -> None:
 
     assert spawned["env"]["CUDA_VISIBLE_DEVICES"] == "0"
     assert "127.0.0.1" in spawned["env"]["NO_PROXY"]
+    assert spawned["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
     assert spawned["start_new_session"] is True
     assert (tmp_path / "vllm.log").exists()
     assert signals == [(4321, signal.SIGTERM)]

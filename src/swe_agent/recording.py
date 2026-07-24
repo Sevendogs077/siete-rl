@@ -76,6 +76,8 @@ class RunRecorder:
         self._group_dir: Path | None = None
         self.batch: dict[str, Any] | None = None
         self.group: dict[str, Any] | None = None
+        self._all_rewards: list[int] = []
+        self._degenerate_groups = 0
 
         started_at = _utc_now()
         self.run: dict[str, Any] = {
@@ -151,27 +153,33 @@ class RunRecorder:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def prepare_first_group(self, prompt: object) -> list[Path]:
-        if self.batch is not None or self.group is not None:
-            raise RuntimeError("first-stage run may allocate only one batch and one group")
-        self._batch_dir = self.rollouts_root / "batch-0000"
+    def begin_group(self, prompt: object, rollout_count: int) -> list[Path]:
+        """开始一个新的 generation batch（单 group）；上一个 batch 随之完成。"""
+
+        if rollout_count < 1:
+            raise ValueError("group requires at least one rollout")
+        if self.group is not None and self.group["state"] != "completed":
+            raise RuntimeError("previous group must complete before beginning the next")
+        if self.batch is not None and self.batch["state"] == "running":
+            self._finalize_batch(consumed_by=[self.batch["batch_index"] + 1])
+        batch_index = 0 if self.batch is None else self.batch["batch_index"] + 1
+        self._batch_dir = self.rollouts_root / f"batch-{batch_index:04d}"
         self._group_dir = self._batch_dir / "group-0000"
         self._group_dir.mkdir(parents=True, exist_ok=False)
         rollout_dirs = []
-        for index in range(4):
+        for index in range(rollout_count):
             path = self._group_dir / f"{index:04d}"
             path.mkdir(exist_ok=False)
             rollout_dirs.append(path)
-        started_at = _utc_now()
         self.batch = {
             "schema_version": "1",
-            "batch_index": 0,
-            "batch_id": "batch-0000",
+            "batch_index": batch_index,
+            "batch_id": f"batch-{batch_index:04d}",
             "state": "running",
             "task_id": self.config.dataset.task_id,
             "generation_backend": "vllm",
-            "global_step_at_generation": 0,
-            "started_at": started_at,
+            "global_step_at_generation": batch_index,
+            "started_at": _utc_now(),
             "finished_at": None,
             "groups": ["group-0000"],
             "consumed_by_global_steps": [],
@@ -183,7 +191,7 @@ class RunRecorder:
             "state": "running",
             "task_id": self.config.dataset.task_id,
             "prompt_sha256": _payload_sha256(prompt),
-            "rollout_dirs": [f"{index:04d}" for index in range(4)],
+            "rollout_dirs": [f"{index:04d}" for index in range(rollout_count)],
             "episode_ids": [],
             "rewards": [],
             "reward_mean": None,
@@ -224,8 +232,11 @@ class RunRecorder:
         rewards: list[float],
         verifications: list[Verification | None],
     ) -> None:
-        if self.group is None or len(episode_ids) != 4 or len(rewards) != 4 or len(verifications) != 4:
-            raise ValueError("completed first-stage group requires exactly four aligned rollouts")
+        if self.group is None:
+            raise ValueError("no active group to complete")
+        expected = len(self.group["rollout_dirs"])
+        if len(episode_ids) != expected or len(rewards) != expected or len(verifications) != expected:
+            raise ValueError("completed group requires aligned rollouts")
         integer_rewards = []
         for reward in rewards:
             if reward not in (0, 0.0, 1, 1.0):
@@ -234,7 +245,7 @@ class RunRecorder:
         resolved = sum(v is not None and v.result == "resolved" for v in verifications)
         unresolved = sum(v is not None and v.result == "unresolved" for v in verifications)
         reward_mean = fmean(integer_rewards)
-        reward_std = pstdev(integer_rewards)
+        reward_std = pstdev(integer_rewards) if len(integer_rewards) > 1 else 0.0
         self.group.update(
             {
                 "state": "completed",
@@ -246,21 +257,22 @@ class RunRecorder:
                 "verification_counts": {
                     "resolved": resolved,
                     "unresolved": unresolved,
-                    "not_run": 4 - resolved - unresolved,
+                    "not_run": expected - resolved - unresolved,
                 },
             }
         )
-        self.run["training"].update(
-            {
-                "groups_generated": 1,
-                "rollouts_generated": 4,
-                "reward_mean": reward_mean,
-                "reward_std": reward_std,
-                "frac_reward_zero_std": 1.0 if math.isclose(reward_std, 0.0) else 0.0,
-            }
+        training = self.run["training"]
+        training["groups_generated"] += 1
+        training["rollouts_generated"] += expected
+        self._all_rewards.extend(integer_rewards)
+        training["reward_mean"] = fmean(self._all_rewards)
+        training["reward_std"] = (
+            pstdev(self._all_rewards) if len(self._all_rewards) > 1 else 0.0
         )
-        self.run["training"]["observations"]["reward_degenerate"] = math.isclose(
-            reward_std, 0.0
+        self._degenerate_groups += int(math.isclose(reward_std, 0.0))
+        training["frac_reward_zero_std"] = self._degenerate_groups / training["groups_generated"]
+        self.run["training"]["observations"]["reward_degenerate"] = (
+            self._degenerate_groups == training["groups_generated"]
         )
         self._write_group()
         self.flush_run()
@@ -268,19 +280,23 @@ class RunRecorder:
     def complete_batch(self, global_step: int) -> None:
         if self.batch is None or self.group is None or self.group["state"] != "completed":
             raise RuntimeError("group must complete before its batch can be consumed")
-        if global_step != 1:
-            raise ValueError("first-stage public Trainer global_step must equal one")
-        finished_at = _utc_now()
+        if global_step < 1:
+            raise ValueError("public Trainer global_step must be positive")
+        self._finalize_batch(consumed_by=[global_step])
+        self.run["training"]["global_step"] = global_step
+        self.flush_run()
+
+    def _finalize_batch(self, *, consumed_by: list[int]) -> None:
+        if self.batch is None:
+            raise RuntimeError("no active batch to finalize")
         self.batch.update(
             {
                 "state": "completed",
-                "finished_at": finished_at,
-                "consumed_by_global_steps": [global_step],
+                "finished_at": _utc_now(),
+                "consumed_by_global_steps": list(consumed_by),
             }
         )
-        self.run["training"]["global_step"] = global_step
         self._write_batch()
-        self.flush_run()
 
     def update_training(self, **values: Any) -> None:
         unknown = set(values) - set(self.run["training"])
@@ -412,8 +428,9 @@ class RunRecorder:
             self._write_batch()
 
     def _rollout_dir(self, index: int) -> Path:
-        if self._group_dir is None or index not in range(4):
-            raise ValueError("first-stage rollout index must be between zero and three")
+        expected = 0 if self.group is None else len(self.group["rollout_dirs"])
+        if self._group_dir is None or index not in range(expected):
+            raise ValueError(f"rollout index must be between zero and {expected - 1}")
         return self._group_dir / f"{index:04d}"
 
     def _write_batch(self) -> None:

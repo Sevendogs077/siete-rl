@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import time
@@ -263,6 +264,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     from swe_agent.launcher import split_visible_gpus
 
     os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     server_gpu = split_visible_gpus(config)
     physical_device = _require_single_visible_gpu()
     report = _run_once(
@@ -339,7 +341,6 @@ def _run_once(
         sample, _ = task_context[config.dataset.task_id]
         dataset = build_training_dataset(sample)
         prompt = dataset[0]["prompt"]
-        recorder.prepare_first_group(prompt)
 
         docker_client = SubprocessDockerClient()
 
@@ -395,8 +396,10 @@ def _run_once(
         stage = "train"
         train_output = trainer.train()
         global_step = int(trainer.state.global_step)
-        if global_step != 1:
-            raise RuntimeError(f"expected trainer.state.global_step=1, got {global_step}")
+        if global_step != config.grpo.max_steps:
+            raise RuntimeError(
+                f"expected trainer.state.global_step={config.grpo.max_steps}, got {global_step}"
+            )
         recorder.complete_batch(global_step)
         trainer_group_consumed = True
         post_step_adapter = _adapter_state(trainer.model)
@@ -412,8 +415,10 @@ def _run_once(
             for path in recorder.output_dir.glob("checkpoint-*")
             if path.is_dir()
         )
-        if checkpoints != ["checkpoint-1"]:
-            raise RuntimeError(f"expected exactly checkpoint-1, got {checkpoints}")
+        if not checkpoints or any(
+            re.fullmatch(r"checkpoint-\d+", name) is None for name in checkpoints
+        ):
+            raise RuntimeError(f"expected checkpoint-<step> directories, got {checkpoints}")
         metrics = _training_metrics(trainer, train_output)
         recorder.update_training(
             loss=metrics["loss"],
@@ -539,19 +544,15 @@ def _run_once(
 
 
 def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]]):
-    recorded = False
-
     def reward(
         prompts: list[object],
         completions: list[object],
         environments: list[Any],
         **kwargs: Any,
     ) -> list[float]:
-        nonlocal recorded
-        if recorded:
-            raise RecordingRuntimeError("first-stage group reward was invoked more than once")
-        if not (len(prompts) == len(completions) == len(environments) == 4):
-            raise RecordingRuntimeError("first-stage reward requires four aligned rollouts")
+        if not (len(prompts) == len(completions) == len(environments)) or not completions:
+            raise RecordingRuntimeError("reward requires aligned non-empty rollouts")
+        recorder.begin_group(prompts[0], len(completions))
         rewards: list[float] = []
         try:
             rewards = reward_adapter(completions=completions, environments=environments, **kwargs)
@@ -570,7 +571,6 @@ def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]])
                 rewards=rewards,
                 verifications=[environment.verification for environment in environments],
             )
-            recorded = True
             return rewards
         except RecordingRuntimeError:
             raise
@@ -656,6 +656,9 @@ def _finalize_gpu_diagnostic(
     baseline_reserved = baseline["reserved"] if baseline else None
     if note is None and baseline is None:
         note = "run GPU baseline was unavailable"
+    alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+    if note is None and alloc_conf:
+        note = f"PYTORCH_CUDA_ALLOC_CONF={alloc_conf}"
     return {
         "device": str(physical_device),
         "owner_pid": baseline["owner_pid"] if baseline else os.getpid(),

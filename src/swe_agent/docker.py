@@ -200,6 +200,11 @@ class DockerSandbox:
         )
 
     def get_diff(self) -> str:
+        intent = self.exec(
+            ["git", "-C", self.environment.workdir, "add", "-N", "--", "."]
+        )
+        if intent.exit_code != 0 or intent.timed_out:
+            raise ContainerExecError(_failure("failed to register untracked files", intent))
         result = self.exec(
             ["git", "-C", self.environment.workdir, "diff", "--binary", "--no-ext-diff"]
         )

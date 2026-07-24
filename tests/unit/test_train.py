@@ -107,9 +107,13 @@ def test_single_visible_gpu_rejects_missing_or_non_single_selection(
         _require_single_visible_gpu()
 
 
-def test_unqualified_30b_entry_is_rejected_before_model_loading() -> None:
-    with pytest.raises(RuntimeNotQualifiedError, match="runtime_qualified=false"):
-        run(CONFIG_30B)
+def test_30b_entry_uses_separate_vllm_server() -> None:
+    config, _, _ = load_config(CONFIG_30B)
+
+    assert config.runtime.runtime_qualified is True
+    assert config.vllm.mode == "server"
+    assert config.vllm.server_base_url == "http://127.0.0.1:8000"
+    assert config.vllm.gpu_memory_utilization == 0.95
 
 
 def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> None:
@@ -122,20 +126,20 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
         use_cpu=True,
     )
 
-    assert peft_config.r == 16
-    assert peft_config.lora_alpha == 32
-    assert set(peft_config.target_modules) == {"q_proj", "k_proj", "v_proj", "o_proj"}
+    assert peft_config.r == config.peft.rank
+    assert peft_config.lora_alpha == config.peft.alpha
+    assert set(peft_config.target_modules) == set(config.peft.target_modules)
     assert build_quantization_config(config) is None
-    assert grpo_config.num_generations == 4
-    assert grpo_config.generation_batch_size == 4
-    assert grpo_config.steps_per_generation == 4
+    assert grpo_config.num_generations == config.grpo.num_generations
+    assert grpo_config.generation_batch_size == config.grpo.generation_batch_size
+    assert grpo_config.steps_per_generation == config.grpo.gradient_accumulation_steps
     assert grpo_config.model_init_kwargs == {"dtype": "bfloat16"}
     assert grpo_config.vllm_mode == "server"
     assert grpo_config.vllm_server_base_url == "http://127.0.0.1:8000"
     assert grpo_config.vllm_model_impl == "vllm"
     assert grpo_config.vllm_max_model_length == 32768
     assert grpo_config.vllm_enable_sleep_mode is False
-    assert grpo_config.max_tool_calling_iterations == 40
+    assert grpo_config.max_tool_calling_iterations == config.generation.max_tool_calling_iterations
     assert grpo_config.loss_type == "dapo"
     assert grpo_config.router_aux_loss_coef == 0.0
     assert grpo_config.shuffle_dataset is True
@@ -145,8 +149,12 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
     class FakeRecorder:
         def __init__(self) -> None:
             self.rollouts = []
+            self.begun = []
             self.group = None
             self.events = []
+
+        def begin_group(self, prompt, rollout_count):
+            self.begun.append((prompt, rollout_count))
 
         def write_rollout(self, index, **values):
             self.rollouts.append((index, values))
@@ -187,8 +195,9 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
     assert recorder.rollouts[2][1]["messages"] == prompts[2] + completions[2]
     assert recorder.group["episode_ids"] == [f"episode-{index}" for index in range(4)]
     assert recorder.events == [{"index": index} for index in range(4)]
-    with pytest.raises(Exception, match="more than once"):
-        reward(prompts=prompts, completions=completions, environments=environments)
+    # 多步训练：reward 可被多次调用，每次开始一个新 group
+    reward(prompts=prompts, completions=completions, environments=environments)
+    assert recorder.begun == [(prompts[0], 4), (prompts[0], 4)]
 
 
 def test_native_policy_path_requires_executed_edit_submit_patch_verifier_and_reward() -> None:
