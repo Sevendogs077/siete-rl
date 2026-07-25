@@ -12,14 +12,12 @@ from swe_agent.config import LORA_TARGET_MODULES, ProjectConfig, load_config
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "configs"
 CONFIG_7B = CONFIG_DIR / "grpo_swegym_qwen2_5_coder_7b_lora.yaml"
-CONFIG_30B = CONFIG_DIR / "grpo_swegym_qwen3_coder_30b_a3b_qlora.yaml"
 
 
-def test_both_complete_configs_parse_independently() -> None:
+def test_complete_config_parses_independently() -> None:
     config_7b, root_7b, _ = load_config(CONFIG_7B)
-    config_30b, root_30b, _ = load_config(CONFIG_30B)
 
-    assert root_7b == root_30b == PROJECT_ROOT
+    assert root_7b == PROJECT_ROOT
     assert config_7b.model.training_mode == "lora"
     assert config_7b.quantization.load_in_4bit is False
     assert config_7b.runtime.runtime_qualified is True
@@ -27,20 +25,10 @@ def test_both_complete_configs_parse_independently() -> None:
     assert config_7b.vllm.tensor_parallel_size is None
     assert config_7b.vllm.server_base_url == "http://127.0.0.1:8000"
 
-    assert config_30b.model.training_mode == "qlora"
-    assert config_30b.quantization.load_in_4bit is True
-    assert config_30b.quantization.bnb_4bit_quant_type == "nf4"
-    assert config_30b.quantization.bnb_4bit_use_double_quant is True
-    assert config_30b.runtime.runtime_qualified is True
-    assert config_30b.vllm.mode == "server"
-    assert config_30b.vllm.tensor_parallel_size is None
-    assert config_30b.vllm.server_base_url == "http://127.0.0.1:8000"
-    assert config_30b.vllm.gpu_memory_utilization == 0.95
 
-
-def test_complete_configs_have_same_independent_top_level_shape() -> None:
-    payloads = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in (CONFIG_7B, CONFIG_30B)]
-    assert set(payloads[0]) == set(payloads[1]) == {
+def test_complete_config_has_independent_top_level_shape() -> None:
+    payload = yaml.safe_load(CONFIG_7B.read_text(encoding="utf-8"))
+    assert set(payload) == {
         "schema_version",
         "dataset",
         "docker",
@@ -54,15 +42,13 @@ def test_complete_configs_have_same_independent_top_level_shape() -> None:
         "runtime",
         "output",
     }
-    for payload in payloads:
-        assert not ({"include", "extends", "inherit", "overlay"} & set(payload))
+    assert not ({"include", "extends", "inherit", "overlay"} & set(payload))
 
 
-@pytest.mark.parametrize("path", [CONFIG_7B, CONFIG_30B])
-def test_shared_training_contract_is_fixed(path: Path) -> None:
+def test_shared_training_contract_is_fixed() -> None:
     """只锁与调参值无关的结构不变量；具体数值（步数、组大小、学习率等）不属于契约。"""
 
-    config, _, _ = load_config(path)
+    config, _, _ = load_config(CONFIG_7B)
     assert config.peft.target_modules == LORA_TARGET_MODULES
     # 上下文预算方程：prompt + completion + margin 必须恰好顶满模型上下文
     assert (

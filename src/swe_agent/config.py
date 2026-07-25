@@ -65,7 +65,7 @@ class PeftConfig(StrictConfig):
     rank: int = Field(ge=1)
     alpha: int = Field(gt=0)
     dropout: float = Field(ge=0.0, le=1.0)
-    bias: Literal["none"]
+    bias: Literal["none", "all", "lora_only"]
     target_modules: tuple[str, ...]
     modules_to_save: None
 
@@ -93,19 +93,19 @@ class GRPOConfigValues(StrictConfig):
     reward_type: Literal["binary_verifier"]
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
-    loss_type: Literal["dapo"]
-    scale_rewards: Literal["group"]
-    multi_objective_aggregation: Literal["sum_then_normalize"]
+    loss_type: Literal["grpo", "dapo", "bnpo", "dr_grpo"]
+    scale_rewards: Literal["group", "batch", "none"]
+    multi_objective_aggregation: Literal["sum_then_normalize", "normalize_then_sum"]
     epsilon: float = Field(ge=0.0)
     epsilon_high: float | None = Field(ge=0.0)
     delta: float | None = Field(ge=0.0)
     beta: float = Field(ge=0.0)
-    importance_sampling_level: Literal["token"]
+    importance_sampling_level: Literal["token", "sequence", "sequence_token"]
     mask_truncated_completions: bool
     router_aux_loss_coef: float = Field(ge=0.0)
     shuffle_dataset: bool
     vllm_importance_sampling_correction: bool
-    vllm_importance_sampling_mode: Literal["sequence_mask"]
+    vllm_importance_sampling_mode: Literal["sequence_mask", "sequence", "token"]
     vllm_importance_sampling_clip_max: float = Field(gt=0.0)
     vllm_importance_sampling_clip_min: float | None = Field(ge=0.0)
     per_device_train_batch_size: int = Field(ge=1)
@@ -119,7 +119,7 @@ class GRPOConfigValues(StrictConfig):
     gradient_checkpointing: bool
     bf16: bool
     logging_steps: int = Field(ge=1)
-    save_strategy: Literal["steps"]
+    save_strategy: Literal["steps", "epoch", "no"]
     save_steps: int = Field(ge=1)
     save_total_limit: int = Field(ge=1)
     log_completions: bool
@@ -131,7 +131,7 @@ class VLLMConfig(StrictConfig):
     mode: Literal["colocate", "server"]
     model_impl: Literal["vllm"]
     enable_sleep_mode: bool
-    tensor_parallel_size: Literal[1] | None
+    tensor_parallel_size: int | None = Field(ge=1)
     server_base_url: str | None
     gpu_memory_utilization: float = Field(gt=0.0, le=1.0)
     max_model_length: int = Field(ge=1)
@@ -139,14 +139,14 @@ class VLLMConfig(StrictConfig):
 
 class RuntimeConfig(StrictConfig):
     runtime_qualified: bool
-    process_count: Literal[1]
+    process_count: int = Field(ge=1)
     base_seed: int = Field(ge=0)
 
 
 class OutputConfig(StrictConfig):
     output_root: str = Field(min_length=1)
     run_id: str | None
-    train_log: Literal["train.log"]
+    train_log: str = Field(min_length=1)
 
 
 class ProjectConfig(StrictConfig):

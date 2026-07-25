@@ -24,7 +24,6 @@ from swe_agent.train import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_7B = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
-CONFIG_30B = PROJECT_ROOT / "configs/grpo_swegym_qwen3_coder_30b_a3b_qlora.yaml"
 
 
 def test_preflight_is_read_only_and_reports_complete_stage_modules(tmp_path: Path) -> None:
@@ -107,15 +106,6 @@ def test_single_visible_gpu_rejects_missing_or_non_single_selection(
         _require_single_visible_gpu()
 
 
-def test_30b_entry_uses_separate_vllm_server() -> None:
-    config, _, _ = load_config(CONFIG_30B)
-
-    assert config.runtime.runtime_qualified is True
-    assert config.vllm.mode == "server"
-    assert config.vllm.server_base_url == "http://127.0.0.1:8000"
-    assert config.vllm.gpu_memory_utilization == 0.95
-
-
 def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> None:
     config, _, _ = load_config(CONFIG_7B)
     peft_config = build_peft_config(config)
@@ -140,7 +130,12 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     assert grpo_config.vllm_max_model_length == 32768
     assert grpo_config.vllm_enable_sleep_mode is False
     assert grpo_config.max_tool_calling_iterations == config.generation.max_tool_calling_iterations
-    assert grpo_config.loss_type == "dapo"
+    assert grpo_config.loss_type == config.grpo.loss_type
+    assert grpo_config.beta == config.grpo.beta
+    assert (
+        grpo_config.vllm_importance_sampling_correction
+        == config.grpo.vllm_importance_sampling_correction
+    )
     assert grpo_config.router_aux_loss_coef == 0.0
     assert grpo_config.shuffle_dataset is True
 

@@ -1,5 +1,4 @@
 schema_version: 1
-
 dataset:
   task_id: getmoto__moto-7023
   official_path: data/swegym/SWE-Gym__SWE-Gym/bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb/data/train-00000-of-00001.parquet
@@ -7,7 +6,6 @@ dataset:
   subset_path: data/swegym/SumanthRH__SWE-Gym-Subset/3f22e68f673027edbaebe3424e4c20ae580563fd/data/train-00000-of-00001.parquet
   subset_revision: 3f22e68f673027edbaebe3424e4c20ae580563fd
   assets_dir: assets/swegym/getmoto__moto-7023
-
 docker:
   image: docker.io/xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest
   expected_image_id: sha256:8ce447e420f0511fe21b50bc5406b937411b4d829829e82b9b9c1619eeace9de
@@ -21,7 +19,6 @@ docker:
   pids_limit: 512
   exec_timeout_sec: 300
   verifier_timeout_sec: 3600
-
 model:
   provenance_id: Qwen/Qwen2.5-Coder-7B-Instruct
   model_path: /home/2025user/zyp/.cache/modelscope/hub/Qwen/Qwen2.5-Coder-7B-Instruct
@@ -31,28 +28,28 @@ model:
   trust_remote_code: true
   dtype: bfloat16
   training_mode: lora
-
 quantization:
   load_in_4bit: false
   bnb_4bit_quant_type: null
   bnb_4bit_compute_dtype: null
   bnb_4bit_use_double_quant: null
-
 peft:
   task_type: CAUSAL_LM
   rank: 16
   alpha: 32
   dropout: 0.0
   bias: none
-  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
   modules_to_save: null
-
 chat:
   native_tool_calling: true
   add_response_schema: true
   max_prompt_length: 8192
   max_observation_chars: 12000
-
 generation:
   max_completion_length: 16384
   context_safety_margin: 8192
@@ -63,18 +60,17 @@ generation:
   top_k: 0
   repetition_penalty: 1.0
   structured_outputs_regex: null
-
 grpo:
   reward_type: binary_verifier
   num_generations: 4
   num_iterations: 1
-  loss_type: dapo
+  loss_type: grpo
   scale_rewards: group
   multi_objective_aggregation: sum_then_normalize
   epsilon: 0.2
   epsilon_high: null
   delta: null
-  beta: 0.0
+  beta: 0.04
   importance_sampling_level: token
   mask_truncated_completions: false
   router_aux_loss_coef: 0.0
@@ -87,19 +83,18 @@ grpo:
   gradient_accumulation_steps: 4
   generation_batch_size: 4
   steps_per_generation: null
-  max_steps: 4
-  learning_rate: 0.000001
+  max_steps: 24
+  learning_rate: 1.0e-06
   weight_decay: 0.0
   max_grad_norm: 1.0
   gradient_checkpointing: true
   bf16: true
   logging_steps: 1
   save_strategy: steps
-  save_steps: 2
-  save_total_limit: 2
+  save_steps: 8
+  save_total_limit: 3
   log_completions: false
   report_to: []
-
 vllm:
   use_vllm: true
   mode: server
@@ -107,14 +102,12 @@ vllm:
   enable_sleep_mode: false
   tensor_parallel_size: null
   server_base_url: http://127.0.0.1:8000
-  gpu_memory_utilization: 0.3
+  gpu_memory_utilization: 0.25
   max_model_length: 32768
-
 runtime:
   runtime_qualified: true
   process_count: 1
   base_seed: 20260714
-
 output:
   output_root: outputs
   run_id: null
