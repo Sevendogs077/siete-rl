@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import gc
 import hashlib
 import json
@@ -343,6 +344,8 @@ def _run_once(
         prompt = dataset[0]["prompt"]
 
         docker_client = SubprocessDockerClient()
+        # atexit 兜底：即使 finally 被 KeyboardInterrupt 截断，孤儿容器也会在进程退出时被清扫
+        atexit.register(_sweep_orphans_at_exit, docker_client, recorder.run_id)
 
         def sandbox_factory(sample_arg, episode_id: str, scope: str):
             return DockerSandbox(
@@ -456,36 +459,62 @@ def _run_once(
         }
         recorder.log(traceback.format_exc())
     finally:
+        oom_suspected = failure is not None and "out of memory" in failure["message"].lower()
+
+        def _guarded(label: str, fn: Callable[[], Any]) -> Any:
+            """每个清理阶段独立兜底：一个阶段失败或被 KeyboardInterrupt 截断不波及其余阶段。"""
+
+            try:
+                return fn()
+            except BaseException as phase_error:  # noqa: BLE001 - 清理路径必须继续
+                cleanup_errors.append(phase_error)
+                recorder.log(f"cleanup phase {label} aborted: {type(phase_error).__name__}: {phase_error}")
+                return None
+
         run_processes.update(_new_child_processes(child_process_baseline))
         cleanup_errors, environment_handles = _close_environments(environments, recorder)
-        server_handle = vllm_server.close() if vllm_server is not None else None
+        server_handle = _guarded("vllm_server.close", lambda: vllm_server.close() if vllm_server is not None else None)
         if docker_client is not None:
-            try:
-                swept = sweep_run_containers(docker_client, recorder.run_id)
-                if swept:
-                    recorder.log(f"swept orphan containers: {', '.join(swept)}")
-            except BaseException as sweep_error:
-                cleanup_errors.append(sweep_error)
+            swept = _guarded(
+                "sweep_run_containers",
+                lambda: sweep_run_containers(docker_client, recorder.run_id),
+            )
+            if swept:
+                recorder.log(f"swept orphan containers: {', '.join(swept)}")
         trainer_to_release, trainer = trainer, None
         trainer_refs = _trainer_weakrefs(trainer_to_release)
-        trainer_errors, trainer_handles = _release_trainer(trainer_to_release, recorder)
+        trainer_errors, trainer_handles = _guarded(
+            "release_trainer", lambda: _release_trainer(trainer_to_release, recorder)
+        ) or ([], [])
         cleanup_errors.extend(trainer_errors)
         trainer_to_release = None
         gc.collect()
-        _log_live_trainer_cuda_references(trainer_refs, recorder)
+        _guarded(
+            "log_live_trainer_refs",
+            lambda: _log_live_trainer_cuda_references(trainer_refs, recorder),
+        )
         processes, process_errors = _finalize_run_processes(run_processes)
         cleanup_errors.extend(process_errors)
-        gpu_diagnostic = _finalize_gpu_diagnostic(physical_device, gpu_baseline)
-        recorder.set_processes(processes)
-        recorder.set_runtime_handles(
-            [
-                *environment_handles,
-                *([server_handle] if server_handle is not None else []),
-                *trainer_handles,
-            ]
+        gpu_diagnostic = _guarded(
+            "gpu_diagnostic",
+            lambda: _finalize_gpu_diagnostic(
+                physical_device, gpu_baseline, skip_cache_sync=oom_suspected
+            ),
         )
-        recorder.set_gpu_diagnostics([gpu_diagnostic])
-        recorder.finalize_cleanup()
+        _guarded("set_processes", lambda: recorder.set_processes(processes))
+        _guarded(
+            "set_runtime_handles",
+            lambda: recorder.set_runtime_handles(
+                [
+                    *environment_handles,
+                    *([server_handle] if server_handle is not None else []),
+                    *trainer_handles,
+                ]
+            ),
+        )
+        if gpu_diagnostic is not None:
+            _guarded("set_gpu_diagnostics", lambda: recorder.set_gpu_diagnostics([gpu_diagnostic]))
+        _guarded("finalize_cleanup", recorder.finalize_cleanup)
         if recorder.run["cleanup"]["state"] == "failed" and not cleanup_errors:
             cleanup_errors.append(RuntimeError("one or more run-owned resources remain"))
         if cleanup_errors:
@@ -634,9 +663,13 @@ def _gpu_baseline(physical_device: int) -> dict[str, int]:
 
 
 def _finalize_gpu_diagnostic(
-    physical_device: int, baseline: dict[str, int] | None
+    physical_device: int, baseline: dict[str, int] | None, *, skip_cache_sync: bool = False
 ) -> dict[str, Any]:
-    """记录主进程退出前的 allocator 观察；该结果不是资源释放门禁。"""
+    """记录主进程退出前的 allocator 观察；该结果不是资源释放门禁。
+
+    skip_cache_sync：OOM 之后 CUDA 上下文可能长时间阻塞，跳过 empty_cache/synchronize，
+    只做不阻塞的内存读数（OOM 是清理挂起的主要来源）。
+    """
 
     allocated_after: int | None = None
     reserved_after: int | None = None
@@ -646,8 +679,9 @@ def _finalize_gpu_diagnostic(
 
         gc.collect()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            if not skip_cache_sync:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             allocated_after = int(torch.cuda.memory_allocated(0))
             reserved_after = int(torch.cuda.memory_reserved(0))
     except BaseException as exc:
@@ -856,6 +890,24 @@ def _release_trainer(
     gc.collect()
     _log_vllm_model_residual(vllm_model_ref, recorder)
     return errors, handles
+
+
+def _sweep_orphans_at_exit(docker_client: Any, run_id: str) -> None:
+    """atexit 兜底清扫：finally 被 KeyboardInterrupt 截断时，孤儿容器仍有最后一次清理机会。
+
+    幂等（sweep 对空列表是 no-op）；任何失败都只打印，不干扰进程退出。
+    """
+
+    import sys
+
+    from swe_agent.docker import sweep_run_containers
+
+    try:
+        swept = sweep_run_containers(docker_client, run_id)
+        if swept:
+            print(f"atexit: swept orphan containers: {', '.join(swept)}", file=sys.stderr)
+    except BaseException as exc:  # noqa: BLE001 - atexit 必须静默
+        print(f"atexit: orphan sweep failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def _cleanup_operation(

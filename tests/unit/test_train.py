@@ -14,6 +14,7 @@ from swe_agent.train import (
     _recording_reward,
     _release_trainer,
     _require_single_visible_gpu,
+    _sweep_orphans_at_exit,
     build_grpo_config,
     build_peft_config,
     build_quantization_config,
@@ -361,3 +362,37 @@ def test_locked_vllm_engine_detach_removes_executor_object_chain() -> None:
     assert core_client.engine_core is None
     assert llm_engine.model_executor is None
     assert llm_engine.engine_core is None
+
+
+def test_atexit_sweep_removes_orphans_and_stays_quiet(capsys: pytest.CaptureFixture) -> None:
+    from swe_agent.docker import CommandResult
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(self, argv, **kwargs):
+            argv = list(argv)
+            self.calls.append(argv)
+            stdout = "aa\n" if argv[1] == "ps" else ""
+            return CommandResult(
+                argv=argv, exit_code=0, stdout=stdout, stderr="", duration_sec=0.01
+            )
+
+    client = FakeClient()
+    _sweep_orphans_at_exit(client, "run-x")
+
+    assert client.calls[0][:3] == ["docker", "ps", "-aq"]
+    assert "label=swe_agent.run_id=run-x" in client.calls[0]
+    assert client.calls[1] == ["docker", "rm", "-f", "aa"]
+    assert "swept orphan containers: aa" in capsys.readouterr().err
+
+
+def test_atexit_sweep_swallows_failures(capsys: pytest.CaptureFixture) -> None:
+    class BadClient:
+        def run(self, argv, **kwargs):
+            raise RuntimeError("daemon down")
+
+    _sweep_orphans_at_exit(BadClient(), "run-x")  # 必须不抛出
+
+    assert "orphan sweep failed" in capsys.readouterr().err

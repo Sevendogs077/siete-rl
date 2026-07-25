@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -36,7 +37,13 @@ class SignalBoundary:
     def _handle(self, signum: int, frame: object) -> None:
         del frame
         if self._triggered:
-            return
+            print(
+                "\n第二次中断：强制退出（不保证清理完成）。"
+                "孤儿容器请用 docker ps -aq --filter label=swe_agent.run_id=<run_id> 检查并 docker rm -f",
+                file=sys.stderr,
+                flush=True,
+            )
+            os._exit(128 + signum)
         self._triggered = True
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
