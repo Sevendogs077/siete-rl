@@ -1,4 +1,9 @@
-"""固定 SWE-Gym 实例、锁定数据和私有 evaluator 的 fail-closed loader。"""
+"""SWE-Gym 任务加载器：从锁定数据集与资产构造公开 Sample 和私有 Evaluation。
+
+设计边界：本模块只负责"加载"——深度一致性校验（跨表字段一致、资产哈希、
+镜像指纹、离线化正确性）集中在 `swe_agent.qualify`，由 scripts/qualify.sh
+单次运行，不在训练启动路径上把守。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from typing import Any, Mapping
 
 from datasets import Dataset
 
-from swe_agent.config import FIXED_IMAGE, FIXED_IMAGE_ID, FIXED_TASK_ID, ProjectConfig
+from swe_agent.config import ProjectConfig
 from swe_agent.models import Environment, Evaluation, Sample, Task
 from swe_agent.prompts import build_prompt
 
@@ -37,82 +42,41 @@ python -m pip check
 
 
 class SWEGymContractError(RuntimeError):
-    """数据、资产或固定任务身份不满足实施合同。"""
+    """数据、资产或任务身份不满足加载要求。"""
 
 
 TaskContext = Mapping[str, tuple[Sample, Evaluation]]
 
 
 def load_qualified_instance(config: ProjectConfig, project_root: Path) -> tuple[Sample, Evaluation]:
-    """资格化两份锁定数据与资产，只返回公开 Sample 和精简私有 Evaluation。"""
+    """加载一个任务；只保留加载所必需的完整性检查。"""
 
-    if config.dataset.task_id != FIXED_TASK_ID:
-        raise SWEGymContractError(f"only {FIXED_TASK_ID} is allowed")
-    if config.dataset.official_revision != OFFICIAL_REVISION:
-        raise SWEGymContractError("official dataset revision does not match the qualified revision")
-    if config.dataset.subset_revision != SUBSET_REVISION:
-        raise SWEGymContractError("subset dataset revision does not match the qualified revision")
+    task_id = config.dataset.task_id
+    official_path = _resolve(project_root, config.dataset.official_path)
+    subset_path = _resolve(project_root, config.dataset.subset_path)
+    assets_dir = _resolve(project_root, config.dataset.assets_dir)
 
-    official_path = Path(config.dataset.official_path)
-    subset_path = Path(config.dataset.subset_path)
-    assets_dir = Path(config.dataset.assets_dir)
-    expected_official = (
-        project_root
-        / "data/swegym/SWE-Gym__SWE-Gym"
-        / OFFICIAL_REVISION
-        / "data/train-00000-of-00001.parquet"
-    )
-    expected_subset = (
-        project_root
-        / "data/swegym/SumanthRH__SWE-Gym-Subset"
-        / SUBSET_REVISION
-        / "data/train-00000-of-00001.parquet"
-    )
-    expected_assets = project_root / "assets/swegym" / FIXED_TASK_ID
-    if official_path != expected_official or subset_path != expected_subset or assets_dir != expected_assets:
-        raise SWEGymContractError("dataset and asset paths must use the project-owned qualified locations")
-
-    manifest = _read_object(assets_dir / "manifest.json")
-    _validate_manifest(manifest, config, official_path, subset_path, assets_dir)
-    official = _read_exact_row(official_path, FIXED_TASK_ID)
-    subset = _read_exact_row(subset_path, FIXED_TASK_ID)
-    for field in COMPARE_FIELDS:
-        if _normalize(official.get(field)) != _normalize(subset.get(field)):
-            raise SWEGymContractError(f"dataset fields do not match: {field}")
-
-    selected = _read_object(assets_dir / "selected_instance.json")
-    for field in ("instance_id", *COMPARE_FIELDS):
-        expected = FIXED_TASK_ID if field == "instance_id" else official.get(field)
-        if _normalize(selected.get(field)) != _normalize(expected):
-            raise SWEGymContractError(f"selected_instance field mismatch: {field}")
+    official = _read_exact_row(official_path, task_id)
+    subset = _read_exact_row(subset_path, task_id)
     eval_script = subset.get("eval_script")
     if not isinstance(eval_script, str) or not eval_script.strip():
         raise SWEGymContractError("derived dataset is missing eval_script")
-    if selected.get("eval_script") != eval_script:
-        raise SWEGymContractError("selected eval_script does not match the subset row")
-    if selected.get("image_name") != config.docker.image:
-        raise SWEGymContractError("selected image does not match configuration")
 
-    original = (assets_dir / "eval_script.sh").read_text(encoding="utf-8")
-    offline = (assets_dir / "eval_script.offline.sh").read_text(encoding="utf-8")
-    gold = (assets_dir / "gold.patch").read_text(encoding="utf-8")
-    test_patch = (assets_dir / "test.patch").read_text(encoding="utf-8")
-    if original != eval_script:
-        raise SWEGymContractError("eval_script.sh does not match the dataset")
-    if transform_eval_script_offline(original) != offline:
-        raise SWEGymContractError("offline evaluator is not the single allowed make init replacement")
-    if gold != official.get("patch") or test_patch != official.get("test_patch"):
-        raise SWEGymContractError("qualified patch assets do not match the official row")
+    offline_path = assets_dir / "eval_script.offline.sh"
+    try:
+        offline = offline_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SWEGymContractError(f"missing offline evaluator asset: {offline_path}") from exc
 
     task = Task(
-        task_id=FIXED_TASK_ID,
+        task_id=task_id,
         repo_name=str(official["repo"]),
         base_commit=str(official["base_commit"]),
         problem_statement=str(official["problem_statement"]),
     )
     environment = Environment(
-        environment_id=f"swegym:{FIXED_TASK_ID}",
-        task_id=FIXED_TASK_ID,
+        environment_id=f"swegym:{task_id}",
+        task_id=task_id,
         image_name=config.docker.image,
         expected_image_id=config.docker.expected_image_id,
         expected_registry_digest=config.docker.expected_registry_digest,
@@ -153,49 +117,9 @@ def transform_eval_script_offline(script: str) -> str:
     return "".join(lines)
 
 
-def _validate_manifest(
-    manifest: dict[str, Any],
-    config: ProjectConfig,
-    official_path: Path,
-    subset_path: Path,
-    assets_dir: Path,
-) -> None:
-    expected_identity = {
-        "schema_version": "1",
-        "task_id": FIXED_TASK_ID,
-        "repo_name": "getmoto/moto",
-        "base_commit": "447710c6a68e7d5ea7ad6d7df93c663de32ac7f1",
-        "image_name": FIXED_IMAGE,
-        "expected_image_id": FIXED_IMAGE_ID,
-    }
-    for field, expected in expected_identity.items():
-        if manifest.get(field) != expected:
-            raise SWEGymContractError(f"manifest identity mismatch: {field}")
-    if config.docker.image != manifest["image_name"] or config.docker.expected_image_id != manifest["expected_image_id"]:
-        raise SWEGymContractError("manifest image identity does not match configuration")
-
-    files = manifest.get("files")
-    datasets = manifest.get("datasets")
-    if not isinstance(files, dict) or set(files) != {
-        "selected_instance.json",
-        "eval_script.sh",
-        "eval_script.offline.sh",
-        "gold.patch",
-        "test.patch",
-    }:
-        raise SWEGymContractError("manifest asset file set is invalid")
-    for filename, expected_hash in files.items():
-        _require_sha256(assets_dir / filename, expected_hash)
-    if not isinstance(datasets, dict) or set(datasets) != {"official", "subset"}:
-        raise SWEGymContractError("manifest dataset set is invalid")
-    for name, path, revision in (
-        ("official", official_path, OFFICIAL_REVISION),
-        ("subset", subset_path, SUBSET_REVISION),
-    ):
-        entry = datasets.get(name)
-        if not isinstance(entry, dict) or entry.get("revision") != revision:
-            raise SWEGymContractError(f"manifest dataset revision mismatch: {name}")
-        _require_sha256(path, entry.get("sha256"))
+def _resolve(project_root: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else project_root / path
 
 
 def _read_exact_row(path: Path, instance_id: str) -> dict[str, Any]:

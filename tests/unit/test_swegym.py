@@ -69,32 +69,6 @@ def test_dataset_and_prompt_contain_only_public_fields(loaded) -> None:
     assert "Qwen XML" not in public_payload
 
 
-def test_revision_and_cross_table_mismatch_fail_closed(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
-    config, project_root, _, _ = loaded
-    wrong_revision = config.model_copy(
-        update={
-            "dataset": config.dataset.model_copy(update={"official_revision": "0" * 40})
-        }
-    )
-    with pytest.raises(SWEGymContractError, match="official dataset revision"):
-        load_qualified_instance(wrong_revision, project_root)
-
-    original = swegym._read_exact_row
-    calls = 0
-
-    def mismatched(path: Path, instance_id: str):
-        nonlocal calls
-        calls += 1
-        row = dict(original(path, instance_id))
-        if calls == 2:
-            row["base_commit"] = "0" * 40
-        return row
-
-    monkeypatch.setattr(swegym, "_read_exact_row", mismatched)
-    with pytest.raises(SWEGymContractError, match="base_commit"):
-        load_qualified_instance(config, project_root)
-
-
 def test_exactly_one_parquet_row_is_required(tmp_path: Path) -> None:
     path = tmp_path / "rows.parquet"
     pq.write_table(

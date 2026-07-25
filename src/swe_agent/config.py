@@ -9,9 +9,6 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-FIXED_TASK_ID = "getmoto__moto-7023"
-FIXED_IMAGE = "docker.io/xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest"
-FIXED_IMAGE_ID = "sha256:8ce447e420f0511fe21b50bc5406b937411b4d829829e82b9b9c1619eeace9de"
 LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 
@@ -22,7 +19,7 @@ class StrictConfig(BaseModel):
 
 
 class DatasetConfig(StrictConfig):
-    task_id: Literal["getmoto__moto-7023"]
+    task_id: str = Field(min_length=1)
     official_path: str
     official_revision: str = Field(min_length=40, max_length=40)
     subset_path: str
@@ -31,12 +28,8 @@ class DatasetConfig(StrictConfig):
 
 
 class DockerConfig(StrictConfig):
-    image: Literal[
-        "docker.io/xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest"
-    ]
-    expected_image_id: Literal[
-        "sha256:8ce447e420f0511fe21b50bc5406b937411b4d829829e82b9b9c1619eeace9de"
-    ]
+    image: str = Field(min_length=1)
+    expected_image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     expected_registry_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     platform: Literal["linux/amd64"]
     pull_policy: Literal["never"]

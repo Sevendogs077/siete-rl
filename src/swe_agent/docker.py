@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -12,6 +13,10 @@ from typing import Literal, Protocol, Sequence
 from uuid import uuid4
 
 from swe_agent.models import Environment, Task
+
+
+DEFAULT_DOCKER_HOST = "unix:///run/docker-swegym/docker.sock"
+"""项目唯一 Docker daemon：专用 docker-swegym；与共享 daemon 完全撇清。"""
 
 
 class DockerRuntimeError(RuntimeError):
@@ -51,7 +56,23 @@ class DockerClient(Protocol):
 
 
 class SubprocessDockerClient:
-    """唯一真实 CLI 边界；本类没有 pull/build/load/rmi/prune 操作。"""
+    """唯一真实 CLI 边界；本类没有 pull/build/load/rmi/prune 操作。
+
+    每次调用都显式钉死 DOCKER_HOST 到专用 docker-swegym daemon，
+    不继承也不回落到共享 daemon；可用 SWE_AGENT_DOCKER_HOST 覆盖（调试用）。
+    """
+
+    def __init__(self, docker_host: str | None = None) -> None:
+        self.docker_host = (
+            docker_host or os.environ.get("SWE_AGENT_DOCKER_HOST") or DEFAULT_DOCKER_HOST
+        )
+        if self.docker_host.startswith("unix://"):
+            socket_path = self.docker_host.removeprefix("unix://")
+            if not os.path.exists(socket_path):
+                raise DockerRuntimeError(
+                    f"docker socket does not exist: {socket_path} "
+                    "(专用 docker-swegym daemon 未运行；拒绝回落到共享 daemon)"
+                )
 
     def run(
         self,
@@ -61,6 +82,8 @@ class SubprocessDockerClient:
         timeout_sec: int,
     ) -> CommandResult:
         command = list(argv)
+        env = dict(os.environ)
+        env["DOCKER_HOST"] = self.docker_host
         started = time.monotonic()
         try:
             completed = subprocess.run(
@@ -70,6 +93,7 @@ class SubprocessDockerClient:
                 capture_output=True,
                 timeout=timeout_sec,
                 check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
             return CommandResult(

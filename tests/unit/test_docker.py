@@ -13,7 +13,9 @@ from swe_agent.docker import (
     ContainerCleanupError,
     ContainerCreateError,
     ContainerExecError,
+    DockerRuntimeError,
     DockerSandbox,
+    SubprocessDockerClient,
     build_create_command,
     inspect_image,
     sweep_run_containers,
@@ -245,6 +247,32 @@ def test_get_diff_fails_when_untracked_registration_fails(domain) -> None:
 
     with pytest.raises(ContainerExecError, match="failed to register untracked"):
         sandbox.get_diff()
+
+
+def test_subprocess_client_pins_dedicated_docker_host(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return FakeCompleted()
+
+    monkeypatch.setattr("swe_agent.docker.subprocess.run", fake_run)
+    client = SubprocessDockerClient()
+    outcome = client.run(["docker", "ps"], timeout_sec=5)
+
+    assert outcome.exit_code == 0
+    assert captured["env"]["DOCKER_HOST"] == "unix:///run/docker-swegym/docker.sock"
+
+
+def test_subprocess_client_refuses_missing_socket(monkeypatch) -> None:
+    monkeypatch.setenv("SWE_AGENT_DOCKER_HOST", "unix:///nonexistent/docker.sock")
+    with pytest.raises(DockerRuntimeError, match="docker socket does not exist"):
+        SubprocessDockerClient()
 
 
 def test_sweep_removes_only_labeled_containers() -> None:
