@@ -58,13 +58,14 @@ def test_entry_executes_exactly_one_run(
     devices: list[int] = []
     outcome = {
         "run_id": "run-0",
-        "lifecycle": "completed",
-        "native_policy_path_reached": False,
-        "trainer_group_consumed": True,
-        "system_closed_loop": "failed",
+        "status": "completed",
         "failure": None,
-        "final_model_ref": "adapter_model.safetensors",
-        "cleanup": {"state": "completed", "clean_release": True, "residuals": []},
+        "artifacts": {"final_model": "adapter_model.safetensors"},
+        "cleanup": {
+            "status": "completed",
+            "clean_release": True,
+            "residual_count": 0,
+        },
         "interrupted_signum": None,
     }
 

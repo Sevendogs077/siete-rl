@@ -43,7 +43,9 @@ def trajectory(termination: str = "submitted") -> Trajectory:
             "steps": [
                 Step(
                     index=0,
-                    action=Action(tool_name="read_file", arguments={"path": "README.md"}),
+                    action=Action(
+                        tool_name="read_file", arguments={"path": "README.md"}
+                    ),
                     observation=Observation(text="1: hello", exit_code=0),
                 )
             ],
@@ -54,6 +56,14 @@ def trajectory(termination: str = "submitted") -> Trajectory:
 
 def load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def metric_rows(path: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
 
 
 def test_run_id_and_initial_files_have_exact_contract(tmp_path: Path) -> None:
@@ -73,79 +83,82 @@ def test_run_id_and_initial_files_have_exact_contract(tmp_path: Path) -> None:
     assert {path.name for path in recorder.output_dir.iterdir()} == {
         "config.yaml",
         "run.json",
+        "cleanup.json",
+        "metrics.jsonl",
         "train.log",
     }
-    assert yaml.safe_load((recorder.output_dir / "config.yaml").read_text()) == config.model_dump(
-        mode="json"
-    )
+    assert yaml.safe_load(
+        (recorder.output_dir / "config.yaml").read_text()
+    ) == config.model_dump(mode="json")
 
     run = load_json(recorder.output_dir / "run.json")
-    assert set(run) == {
-        "schema_version",
-        "identity",
-        "provenance",
-        "lifecycle",
+    assert list(run) == [
+        "run_id",
+        "status",
         "failure",
-        "training",
+        "results",
+        "train",
+        "artifacts",
+        "time",
+        "config",
         "cleanup",
-    }
-    assert set(run["identity"]) == {"run_id", "output_dir", "config_file"}
-    assert set(run["provenance"]) == {
-        "started_at",
-        "finished_at",
-        "code_commit",
-        "code_dirty",
-        "dependency_versions",
-        "model_path",
-        "resolved_model_path",
-        "model_revision",
-        "generation_backend",
-        "official_dataset_revision",
-        "subset_dataset_revision",
-        "image_platform",
-        "seed",
-    }
-    assert run["lifecycle"] == {"state": "running"}
+        "provenance",
+    ]
+    assert run["run_id"] == "fixed-run"
+    assert run["status"] == "running"
     assert run["failure"] is None
-    assert run["training"] == {
-        "system_closed_loop": "pending",
-        "native_policy_path_reached": None,
-        "trainer_group_consumed": None,
-        "global_step": 0,
-        "groups_generated": 0,
-        "rollouts_generated": 0,
-        "reward_mean": None,
-        "reward_std": None,
+    assert run["results"] == {
+        "reward": {
+            "successes": 0,
+            "attempts": 0,
+            "mean": None,
+            "last_group_mean": None,
+            "ema": None,
+            "degenerate_groups": 0,
+            "nondegenerate_groups": 0,
+            "nondegenerate_rate": None,
+        },
+        "evaluation": None,
+    }
+    assert run["train"]["steps_completed"] == 0
+    assert run["train"]["steps_target"] == config.grpo.max_steps
+    assert run["train"]["last_metrics"] == {
         "loss": None,
         "grad_norm": None,
-        "frac_reward_zero_std": None,
+        "kl": None,
+        "entropy": None,
+        "importance_sampling_ratio_mean": None,
+    }
+    assert run["artifacts"] == {
+        "config": "config.yaml",
+        "metrics": "metrics.jsonl",
+        "plot": None,
+        "plot_status": "pending",
+        "train_log": "train.log",
+        "vllm_log": "vllm.log",
         "checkpoints": [],
-        "final_model_ref": None,
-        "observations": {
-            "reward_degenerate": None,
-            "nonzero_advantage_observed": None,
-            "nonzero_gradient_observed": None,
-            "nonzero_parameter_update_observed": None,
-            "all_sequences_masked_by_is": None,
-        },
+        "final_model": None,
+        "cleanup_details": "cleanup.json",
     }
     assert run["cleanup"] == {
-        "state": "pending",
+        "status": "pending",
         "clean_release": None,
-        "residuals": [],
-        "containers": [],
-        "processes": [],
-        "runtime_handles": [],
-        "gpu_diagnostics": [],
+        "residual_count": 0,
     }
+    assert "schema_version" not in run
+    assert "training" not in run
+    assert "execution" not in run
+    assert "training_config" not in run
     with pytest.raises(FileExistsError):
         RunRecorder(config=config, seed=123)
 
 
-def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
+def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     recorder = RunRecorder(config=configured_for(tmp_path), seed=7, run_id="run-a")
     prompt = [{"role": "user", "content": "repair it"}]
-    rollout_dirs = recorder.begin_group(prompt, 4, task_id="getmoto__moto-7023")
+    rollout_dirs = recorder.begin_group(
+        prompt, 4, task_id="getmoto__moto-7023"
+    )
     assert [path.name for path in rollout_dirs] == ["0000", "0001", "0002", "0003"]
     with pytest.raises(RuntimeError, match="previous group must complete"):
         recorder.begin_group(prompt, 4, task_id="getmoto__moto-7023")
@@ -154,39 +167,11 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
     group_path = recorder.output_dir / "rollouts/batch-0000/group-0000/group.json"
     batch = load_json(batch_path)
     group = load_json(group_path)
-    assert set(batch) == {
-        "schema_version",
-        "batch_index",
-        "batch_id",
-        "state",
-        "task_id",
-        "generation_backend",
-        "global_step_at_generation",
-        "started_at",
-        "finished_at",
-        "groups",
-        "consumed_by_global_steps",
-    }
+    assert "schema_version" not in batch
+    assert "schema_version" not in group
     assert batch["state"] == "running"
     assert batch["task_id"] == "getmoto__moto-7023"
     assert batch["global_step_at_generation"] == 0
-    assert batch["groups"] == ["group-0000"]
-    assert batch["consumed_by_global_steps"] == []
-    assert set(group) == {
-        "schema_version",
-        "group_index",
-        "group_id",
-        "state",
-        "task_id",
-        "prompt_sha256",
-        "rollout_dirs",
-        "episode_ids",
-        "rewards",
-        "reward_mean",
-        "reward_std",
-        "degenerate",
-        "verification_counts",
-    }
     assert group["task_id"] == "getmoto__moto-7023"
 
     messages = prompt + [{"role": "assistant", "content": "done"}]
@@ -198,11 +183,16 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
         patch="diff --git a/x b/x\n",
         verification=first_verification,
     )
-    first = rollout_dirs[0]
-    assert load_json(first / "messages.json") == messages
-    assert load_json(first / "trajectory.json") == trajectory().model_dump(mode="json")
-    assert (first / "final_patch.diff").read_text() == "diff --git a/x b/x\n"
-    assert load_json(first / "verifier.json") == first_verification.model_dump(mode="json")
+    assert load_json(rollout_dirs[0] / "messages.json") == messages
+    assert load_json(rollout_dirs[0] / "trajectory.json") == trajectory().model_dump(
+        mode="json"
+    )
+    assert (rollout_dirs[0] / "final_patch.diff").read_text() == (
+        "diff --git a/x b/x\n"
+    )
+    assert load_json(
+        rollout_dirs[0] / "verifier.json"
+    ) == first_verification.model_dump(mode="json")
 
     recorder.write_rollout(
         1,
@@ -216,55 +206,123 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
         "trajectory.json",
     }
 
-    checks = [first_verification, verification("unresolved"), None, None]
     recorder.complete_group(
         episode_ids=["e0", "e1", "e2", "e3"],
         rewards=[1.0, 0.0, 0.0, 0.0],
-        verifications=checks,
+        verifications=[first_verification, verification("unresolved"), None, None],
     )
     completed_group = load_json(group_path)
     assert completed_group["state"] == "completed"
-    assert completed_group["episode_ids"] == ["e0", "e1", "e2", "e3"]
     assert completed_group["rewards"] == [1, 0, 0, 0]
     assert completed_group["reward_mean"] == 0.25
+    assert completed_group["reward_std"] == pytest.approx(0.4330127019)
     assert completed_group["degenerate"] is False
-    assert load_json(recorder.output_dir / "run.json")["training"]["observations"][
-        "reward_degenerate"
-    ] is False
     assert completed_group["verification_counts"] == {
         "resolved": 1,
         "unresolved": 1,
         "not_run": 2,
     }
+
+    run = load_json(recorder.output_dir / "run.json")
+    assert run["results"]["reward"] == {
+        "successes": 1,
+        "attempts": 4,
+        "mean": 0.25,
+        "last_group_mean": 0.25,
+        "ema": 0.25,
+        "degenerate_groups": 0,
+        "nondegenerate_groups": 1,
+        "nondegenerate_rate": 1.0,
+    }
+    assert run["train"]["groups_generated"] == 1
+    assert run["train"]["rollouts_generated"] == 4
+
+    assert recorder.record_metrics(
+        step=1,
+        logs={
+            "loss": 0.4,
+            "grad_norm": 1.25,
+            "kl": 0.02,
+            "entropy": 0.8,
+            "sampling/importance_sampling_ratio/mean": 1.01,
+            "sampling/importance_sampling_ratio/max": 1.2,
+            "num_tokens": 4096,
+        },
+    )
+    assert not recorder.record_metrics(step=1, logs={"loss": 999})
+    rows = metric_rows(recorder.metrics_path)
+    assert len(rows) == 1
+    assert rows[0]["step"] == 1
+    assert rows[0]["rollouts_cumulative"] == 4
+    assert rows[0]["reward_mean_group"] == 0.25
+    assert rows[0]["train_pass_rate_cumulative"] == 0.25
+    assert rows[0]["group_degenerate"] is False
+    assert rows[0]["importance_sampling_ratio_mean"] == 1.01
+    run = load_json(recorder.output_dir / "run.json")
+    assert run["train"]["tokens_generated"] == 4096
+    assert run["train"]["last_metrics"] == {
+        "loss": 0.4,
+        "grad_norm": 1.25,
+        "kl": 0.02,
+        "entropy": 0.8,
+        "importance_sampling_ratio_mean": 1.01,
+    }
+
     recorder.complete_batch(1)
     completed_batch = load_json(batch_path)
     assert completed_batch["state"] == "completed"
     assert completed_batch["finished_at"] is not None
     assert completed_batch["consumed_by_global_steps"] == [1]
-    assert load_json(recorder.output_dir / "run.json")["training"]["global_step"] == 1
+    assert load_json(recorder.output_dir / "run.json")["train"][
+        "steps_completed"
+    ] == 1
 
 
-def test_native_policy_path_observation_is_monotonic(tmp_path: Path) -> None:
-    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="native-path-run")
+def test_native_policy_path_is_internal_only(tmp_path: Path) -> None:
+    recorder = RunRecorder(
+        config=configured_for(tmp_path), seed=1, run_id="native-path-run"
+    )
 
     recorder.observe_native_policy_path(False)
     recorder.observe_native_policy_path(True)
     recorder.observe_native_policy_path(False)
 
-    assert recorder.run["training"]["native_policy_path_reached"] is True
-    assert load_json(recorder.output_dir / "run.json")["training"][
-        "native_policy_path_reached"
-    ] is True
+    assert recorder.native_policy_path_reached is True
+    serialized = json.dumps(load_json(recorder.output_dir / "run.json"))
+    assert "native_policy_path" not in serialized
+
+
+def test_sync_trainer_state_keeps_partial_progress_and_checkpoints(
+    tmp_path: Path,
+) -> None:
+    recorder = RunRecorder(
+        config=configured_for(tmp_path), seed=1, run_id="partial-run"
+    )
+    (recorder.output_dir / "checkpoint-8").mkdir()
+    recorder.sync_trainer_state(
+        global_step=8,
+        log_history=[
+            {
+                "step": 8,
+                "loss": 0.7,
+                "grad_norm": 2.0,
+                "sampling/importance_sampling_ratio/mean": 0.98,
+            }
+        ],
+    )
+
+    run = load_json(recorder.output_dir / "run.json")
+    assert run["train"]["steps_completed"] == 8
+    assert run["train"]["last_metrics"]["loss"] == 0.7
+    assert run["artifacts"]["checkpoints"] == ["checkpoint-8"]
+    assert metric_rows(recorder.metrics_path)[0]["step"] == 8
 
 
 def test_failure_and_interruption_finish_active_indexes(tmp_path: Path) -> None:
-    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="failed-run")
-    recorder.begin_group("prompt", 4, task_id="getmoto__moto-7023")
-    recorder.update_training(
-        system_closed_loop="failed",
-        native_policy_path_reached=False,
-        trainer_group_consumed=False,
+    recorder = RunRecorder(
+        config=configured_for(tmp_path), seed=1, run_id="failed-run"
     )
+    recorder.begin_group("prompt", 4, task_id="getmoto__moto-7023")
     recorder.fail(
         category="docker",
         primary_type="DockerRuntimeError",
@@ -272,10 +330,16 @@ def test_failure_and_interruption_finish_active_indexes(tmp_path: Path) -> None:
         stage="generation",
     )
     run = load_json(recorder.output_dir / "run.json")
-    assert run["lifecycle"]["state"] == "failed"
-    assert run["failure"]["category"] == "docker"
-    assert run["failure"]["traceback_log_ref"] == "train.log"
-    assert run["provenance"]["finished_at"] is not None
+    assert run["status"] == "failed"
+    assert run["failure"] == {
+        "category": "docker",
+        "type": "DockerRuntimeError",
+        "message": "daemon unavailable",
+        "stage": "generation",
+        "log": "train.log",
+    }
+    assert run["time"]["finished_at"] is not None
+    assert run["time"]["duration_seconds"] is not None
     assert load_json(recorder._batch_dir / "batch.json")["state"] == "failed"
     assert load_json(recorder._group_dir / "group.json")["state"] == "failed"
 
@@ -291,12 +355,14 @@ def test_failure_and_interruption_finish_active_indexes(tmp_path: Path) -> None:
         interrupted=True,
     )
     run = load_json(interrupted.output_dir / "run.json")
-    assert run["lifecycle"]["state"] == "interrupted"
+    assert run["status"] == "interrupted"
     assert run["failure"]["category"] == "interrupted"
 
 
-def test_cleanup_history_residuals_and_completion_gate(tmp_path: Path) -> None:
-    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="cleanup-run")
+def test_cleanup_details_are_separate_and_completion_is_gated(tmp_path: Path) -> None:
+    recorder = RunRecorder(
+        config=configured_for(tmp_path), seed=1, run_id="cleanup-run"
+    )
     failed_operation = {
         "sequence": 1,
         "at": "2026-07-20T00:00:00Z",
@@ -326,50 +392,39 @@ def test_cleanup_history_residuals_and_completion_gate(tmp_path: Path) -> None:
     )
     recorder.set_processes([])
     recorder.set_runtime_handles([])
-    recorder.set_gpu_diagnostics(
-        [
-            {
-                "device": "2",
-                "owner_pid": 123,
-                "allocated_bytes_before": 0,
-                "reserved_bytes_before": 0,
-                "allocated_bytes_after": 0,
-                "reserved_bytes_after": 0,
-                "baseline_allocated_bytes": 0,
-                "baseline_reserved_bytes": 0,
-                "observed_at": "2026-07-20T00:00:02Z",
-                "diagnostic_only": True,
-                "note": "allocator remains above baseline",
-            }
-        ]
-    )
+    recorder.set_gpu_diagnostics([{"device": "2", "diagnostic_only": True}])
     recorder.finalize_cleanup()
-    cleanup = load_json(recorder.output_dir / "run.json")["cleanup"]
-    assert cleanup["state"] == "completed"
-    assert cleanup["clean_release"] is True
-    assert cleanup["residuals"] == []
-    assert cleanup["containers"][0]["final_state"] == "removed"
-    assert [item["result"] for item in cleanup["containers"][0]["operations"]] == [
-        "failed",
-        "success",
-    ]
-    recorder.complete()
-    assert load_json(recorder.output_dir / "run.json")["lifecycle"]["state"] == "completed"
 
-    residual = RunRecorder(config=configured_for(tmp_path), seed=2, run_id="residual-run")
+    run_cleanup = load_json(recorder.output_dir / "run.json")["cleanup"]
+    details = load_json(recorder.cleanup_path)
+    assert run_cleanup == {
+        "status": "completed",
+        "clean_release": True,
+        "residual_count": 0,
+    }
+    assert details["status"] == "completed"
+    assert details["residuals"] == []
+    assert details["containers"][0]["final_state"] == "removed"
+    assert [
+        item["result"] for item in details["containers"][0]["operations"]
+    ] == ["failed", "success"]
+    recorder.complete()
+    assert load_json(recorder.output_dir / "run.json")["status"] == "completed"
+
+    residual = RunRecorder(
+        config=configured_for(tmp_path), seed=2, run_id="residual-run"
+    )
     residual.merge_cleanup_events(
         [{**common, "operations": [failed_operation], "residual": True}]
     )
     residual.finalize_cleanup()
-    cleanup = load_json(residual.output_dir / "run.json")["cleanup"]
-    assert cleanup["state"] == "failed"
-    assert cleanup["clean_release"] is False
-    assert cleanup["residuals"] == ["a" * 64]
+    run_cleanup = load_json(residual.output_dir / "run.json")["cleanup"]
+    details = load_json(residual.cleanup_path)
+    assert run_cleanup == {
+        "status": "failed",
+        "clean_release": False,
+        "residual_count": 1,
+    }
+    assert details["residuals"] == ["a" * 64]
     with pytest.raises(RuntimeError, match="cannot complete"):
         residual.complete()
-
-
-def test_unknown_training_field_is_rejected(tmp_path: Path) -> None:
-    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="run-b")
-    with pytest.raises(ValueError, match="unknown run training fields"):
-        recorder.update_training(unknown=True)

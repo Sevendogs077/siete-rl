@@ -23,7 +23,7 @@ from swe_agent.models import Trajectory, Verification
 RunState = Literal["running", "completed", "failed", "interrupted"]
 IndexState = Literal["running", "completed", "failed", "interrupted"]
 
-
+REWARD_EMA_ALPHA = 0.2
 DEPENDENCIES = (
     "torch",
     "transformers",
@@ -34,7 +34,25 @@ DEPENDENCIES = (
     "datasets",
     "pyarrow",
     "pydantic",
+    "matplotlib",
 )
+LAST_METRIC_KEYS = {
+    "loss": "loss",
+    "grad_norm": "grad_norm",
+    "kl": "kl",
+    "entropy": "entropy",
+    "importance_sampling_ratio_mean": "sampling/importance_sampling_ratio/mean",
+}
+STEP_METRIC_KEYS = {
+    **LAST_METRIC_KEYS,
+    "importance_sampling_ratio_max": "sampling/importance_sampling_ratio/max",
+    "clip_ratio": "clip_ratio/region_mean",
+    "completion_length_mean": "completions/mean_length",
+    "completion_clipped_ratio": "completions/clipped_ratio",
+    "tool_call_frequency": "tools/call_frequency",
+    "tool_failure_frequency": "tools/failure_frequency",
+    "step_time_seconds": "step_time",
+}
 
 
 def generate_run_id() -> str:
@@ -72,27 +90,99 @@ class RunRecorder:
         self.output_dir.parent.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(exist_ok=False)
         self.rollouts_root = self.output_dir / "rollouts"
+        self.metrics_path = self.output_dir / "metrics.jsonl"
+        self.cleanup_path = self.output_dir / "cleanup.json"
+        self.log_path = self.output_dir / config.output.train_log
         self._batch_dir: Path | None = None
         self._group_dir: Path | None = None
         self.batch: dict[str, Any] | None = None
         self.group: dict[str, Any] | None = None
         self._all_rewards: list[int] = []
         self._degenerate_groups = 0
+        self._reward_ema: float | None = None
+        self._last_recorded_step = 0
+        self._native_policy_path_reached = False
+        self._started_at = datetime.now(UTC)
+        started_at = _format_utc(self._started_at)
 
-        started_at = _utc_now()
+        self.cleanup_details: dict[str, Any] = {
+            "status": "pending",
+            "clean_release": None,
+            "residuals": [],
+            "containers": [],
+            "processes": [],
+            "runtime_handles": [],
+            "gpu_diagnostics": [],
+        }
         self.run: dict[str, Any] = {
-            "schema_version": "1",
-            "identity": {
-                "run_id": self.run_id,
-                "output_dir": self.output_dir.as_posix(),
-                "config_file": "config.yaml",
+            "run_id": self.run_id,
+            "status": "running",
+            "failure": None,
+            "results": {
+                "reward": {
+                    "successes": 0,
+                    "attempts": 0,
+                    "mean": None,
+                    "last_group_mean": None,
+                    "ema": None,
+                    "degenerate_groups": 0,
+                    "nondegenerate_groups": 0,
+                    "nondegenerate_rate": None,
+                },
+                "evaluation": None,
             },
-            "provenance": {
+            "train": {
+                "steps_completed": 0,
+                "steps_target": config.grpo.max_steps,
+                "groups_generated": 0,
+                "rollouts_generated": 0,
+                "tokens_generated": 0,
+                "model_updated": None,
+                "last_metrics": {
+                    "loss": None,
+                    "grad_norm": None,
+                    "kl": None,
+                    "entropy": None,
+                    "importance_sampling_ratio_mean": None,
+                },
+            },
+            "artifacts": {
+                "config": "config.yaml",
+                "metrics": "metrics.jsonl",
+                "plot": None,
+                "plot_status": "pending",
+                "train_log": config.output.train_log,
+                "vllm_log": "vllm.log",
+                "checkpoints": [],
+                "final_model": None,
+                "cleanup_details": "cleanup.json",
+            },
+            "time": {
                 "started_at": started_at,
                 "finished_at": None,
+                "duration_seconds": None,
+            },
+            "config": {
+                "model": config.model.provenance_id,
+                "algorithm": "grpo",
+                "reward": config.grpo.reward_type,
+                "max_steps": config.grpo.max_steps,
+                "num_generations": config.grpo.num_generations,
+                "gradient_accumulation_steps": config.grpo.gradient_accumulation_steps,
+                "learning_rate": config.grpo.learning_rate,
+                "beta": config.grpo.beta,
+                "max_completion_length": config.generation.max_completion_length,
+                "training_mode": config.model.training_mode,
+            },
+            "cleanup": {
+                "status": "pending",
+                "clean_release": None,
+                "residual_count": 0,
+            },
+            "provenance": {
                 "code_commit": code_commit,
                 "code_dirty": code_dirty,
-                "dependency_versions": dependency_versions or installed_dependency_versions(),
+                "seed": seed,
                 "model_path": config.model.model_path,
                 "resolved_model_path": Path(config.model.model_path).resolve().as_posix(),
                 "model_revision": model_revision,
@@ -100,48 +190,20 @@ class RunRecorder:
                 "official_dataset_revision": config.dataset.official_revision,
                 "subset_dataset_revision": config.dataset.subset_revision,
                 "image_platform": config.docker.platform,
-                "seed": seed,
-            },
-            "lifecycle": {"state": "running"},
-            "failure": None,
-            "training": {
-                "system_closed_loop": "pending",
-                "native_policy_path_reached": None,
-                "trainer_group_consumed": None,
-                "global_step": 0,
-                "groups_generated": 0,
-                "rollouts_generated": 0,
-                "reward_mean": None,
-                "reward_std": None,
-                "loss": None,
-                "grad_norm": None,
-                "frac_reward_zero_std": None,
-                "checkpoints": [],
-                "final_model_ref": None,
-                "observations": {
-                    "reward_degenerate": None,
-                    "nonzero_advantage_observed": None,
-                    "nonzero_gradient_observed": None,
-                    "nonzero_parameter_update_observed": None,
-                    "all_sequences_masked_by_is": None,
-                },
-            },
-            "cleanup": {
-                "state": "pending",
-                "clean_release": None,
-                "residuals": [],
-                "containers": [],
-                "processes": [],
-                "runtime_handles": [],
-                "gpu_diagnostics": [],
+                "dependency_versions": dependency_versions or installed_dependency_versions(),
             },
         }
         _atomic_write_yaml(
             self.output_dir / "config.yaml", config.model_dump(mode="json")
         )
         _atomic_write_json(self.output_dir / "run.json", self.run)
-        self.log_path = self.output_dir / config.output.train_log
+        _atomic_write_json(self.cleanup_path, self.cleanup_details)
+        self.metrics_path.touch(exist_ok=False)
         self.log_path.touch(exist_ok=False)
+
+    @property
+    def native_policy_path_reached(self) -> bool:
+        return self._native_policy_path_reached
 
     def log(self, message: str) -> None:
         line = f"{_utc_now()} {message.rstrip()}\n"
@@ -171,7 +233,6 @@ class RunRecorder:
             path.mkdir(exist_ok=False)
             rollout_dirs.append(path)
         self.batch = {
-            "schema_version": "1",
             "batch_index": batch_index,
             "batch_id": f"batch-{batch_index:04d}",
             "state": "running",
@@ -184,7 +245,6 @@ class RunRecorder:
             "consumed_by_global_steps": [],
         }
         self.group = {
-            "schema_version": "1",
             "group_index": 0,
             "group_id": "group-0000",
             "state": "running",
@@ -245,6 +305,7 @@ class RunRecorder:
         unresolved = sum(v is not None and v.result == "unresolved" for v in verifications)
         reward_mean = fmean(integer_rewards)
         reward_std = pstdev(integer_rewards) if len(integer_rewards) > 1 else 0.0
+        degenerate = math.isclose(reward_std, 0.0)
         self.group.update(
             {
                 "state": "completed",
@@ -252,7 +313,7 @@ class RunRecorder:
                 "rewards": integer_rewards,
                 "reward_mean": reward_mean,
                 "reward_std": reward_std,
-                "degenerate": math.isclose(reward_std, 0.0),
+                "degenerate": degenerate,
                 "verification_counts": {
                     "resolved": resolved,
                     "unresolved": unresolved,
@@ -260,20 +321,95 @@ class RunRecorder:
                 },
             }
         )
-        training = self.run["training"]
-        training["groups_generated"] += 1
-        training["rollouts_generated"] += expected
+
+        train = self.run["train"]
+        result = self.run["results"]["reward"]
+        train["groups_generated"] += 1
+        train["rollouts_generated"] += expected
         self._all_rewards.extend(integer_rewards)
-        training["reward_mean"] = fmean(self._all_rewards)
-        training["reward_std"] = (
-            pstdev(self._all_rewards) if len(self._all_rewards) > 1 else 0.0
+        self._degenerate_groups += int(degenerate)
+        self._reward_ema = (
+            reward_mean
+            if self._reward_ema is None
+            else REWARD_EMA_ALPHA * reward_mean
+            + (1.0 - REWARD_EMA_ALPHA) * self._reward_ema
         )
-        self._degenerate_groups += int(math.isclose(reward_std, 0.0))
-        training["frac_reward_zero_std"] = self._degenerate_groups / training["groups_generated"]
-        self.run["training"]["observations"]["reward_degenerate"] = (
-            self._degenerate_groups == training["groups_generated"]
+        nondegenerate_groups = train["groups_generated"] - self._degenerate_groups
+        result.update(
+            {
+                "successes": sum(self._all_rewards),
+                "attempts": len(self._all_rewards),
+                "mean": fmean(self._all_rewards),
+                "last_group_mean": reward_mean,
+                "ema": self._reward_ema,
+                "degenerate_groups": self._degenerate_groups,
+                "nondegenerate_groups": nondegenerate_groups,
+                "nondegenerate_rate": nondegenerate_groups / train["groups_generated"],
+            }
         )
         self._write_group()
+        self.flush_run()
+
+    def record_metrics(self, *, step: int, logs: dict[str, Any]) -> bool:
+        """保存一个新的 optimizer step；重复或倒序 step 不重复写入。"""
+
+        if step < 1 or step <= self._last_recorded_step:
+            return False
+        train = self.run["train"]
+        reward = self.run["results"]["reward"]
+        train["steps_completed"] = max(train["steps_completed"], step)
+        num_tokens = _numeric(logs.get("num_tokens"))
+        if num_tokens is not None:
+            train["tokens_generated"] = int(num_tokens)
+        for target, source in LAST_METRIC_KEYS.items():
+            value = _numeric(logs.get(source))
+            if value is not None:
+                train["last_metrics"][target] = value
+
+        group_reward_mean = None if self.group is None else self.group.get("reward_mean")
+        group_reward_std = None if self.group is None else self.group.get("reward_std")
+        group_degenerate = None if self.group is None else self.group.get("degenerate")
+        row: dict[str, Any] = {
+            "recorded_at": _utc_now(),
+            "step": step,
+            "rollouts_cumulative": train["rollouts_generated"],
+            "groups_cumulative": train["groups_generated"],
+            "train_successes_cumulative": reward["successes"],
+            "train_pass_rate_cumulative": reward["mean"],
+            "reward_mean_group": group_reward_mean,
+            "reward_std_group_population": group_reward_std,
+            "group_degenerate": group_degenerate,
+            "nondegenerate_group_rate_cumulative": reward["nondegenerate_rate"],
+            "reward_mean_ema": reward["ema"],
+        }
+        for target, source in STEP_METRIC_KEYS.items():
+            row[target] = _numeric(logs.get(source))
+        _append_json_line(self.metrics_path, row)
+        self._last_recorded_step = step
+        self.flush_run()
+        return True
+
+    def sync_trainer_state(
+        self, *, global_step: int, log_history: list[dict[str, Any]]
+    ) -> None:
+        """异常退出前同步 Trainer 的真实进度和最后可用日志。"""
+
+        if global_step < 0:
+            raise ValueError("global_step must not be negative")
+        latest_for_step = next(
+            (
+                row
+                for row in reversed(log_history)
+                if int(_numeric(row.get("step")) or 0) == global_step
+            ),
+            None,
+        )
+        if global_step > self._last_recorded_step:
+            self.record_metrics(step=global_step, logs=latest_for_step or {})
+        self.run["train"]["steps_completed"] = max(
+            self.run["train"]["steps_completed"], global_step
+        )
+        self.refresh_checkpoints()
         self.flush_run()
 
     def complete_batch(self, global_step: int) -> None:
@@ -282,7 +418,9 @@ class RunRecorder:
         if global_step < 1:
             raise ValueError("public Trainer global_step must be positive")
         self._finalize_batch(consumed_by=[global_step])
-        self.run["training"]["global_step"] = global_step
+        self.run["train"]["steps_completed"] = max(
+            self.run["train"]["steps_completed"], global_step
+        )
         self.flush_run()
 
     def _finalize_batch(self, *, consumed_by: list[int]) -> None:
@@ -297,34 +435,59 @@ class RunRecorder:
         )
         self._write_batch()
 
-    def update_training(self, **values: Any) -> None:
-        unknown = set(values) - set(self.run["training"])
-        if unknown:
-            raise ValueError("unknown run training fields: " + ", ".join(sorted(unknown)))
-        self.run["training"].update(values)
-        self.flush_run()
-
     def observe_native_policy_path(self, reached: bool) -> None:
-        """累积每个已完成 group 的原生策略闭环观察结果。"""
+        """保留内部诊断，但不把实现概念写入 run.json。"""
 
         if not isinstance(reached, bool):
             raise ValueError("native policy path observation must be a bool")
-        training = self.run["training"]
-        if training["native_policy_path_reached"] is True:
-            return
-        training["native_policy_path_reached"] = reached
+        self._native_policy_path_reached = (
+            self._native_policy_path_reached or reached
+        )
+
+    def set_model_updated(self, updated: bool | None) -> None:
+        self.run["train"]["model_updated"] = updated
         self.flush_run()
 
-    def update_observations(self, **values: bool | None) -> None:
-        observations = self.run["training"]["observations"]
-        unknown = set(values) - set(observations)
-        if unknown:
-            raise ValueError("unknown run observation fields: " + ", ".join(sorted(unknown)))
-        observations.update(values)
+    def refresh_checkpoints(self) -> list[str]:
+        checkpoints = sorted(
+            (
+                path.name
+                for path in self.output_dir.glob("checkpoint-*")
+                if path.is_dir()
+            ),
+            key=lambda name: int(name.removeprefix("checkpoint-"))
+            if name.removeprefix("checkpoint-").isdigit()
+            else math.inf,
+        )
+        self.run["artifacts"]["checkpoints"] = checkpoints
+        return checkpoints
+
+    def set_final_model(self, filename: str) -> None:
+        self.run["artifacts"]["final_model"] = filename
+        self.flush_run()
+
+    def set_plot(self, filename: str) -> None:
+        self.run["artifacts"]["plot"] = filename
+        self.run["artifacts"]["plot_status"] = "generated"
+        self.run["artifacts"].pop("plot_error", None)
+        self.flush_run()
+
+    def set_plot_skipped(self, reason: str) -> None:
+        self.run["artifacts"]["plot"] = None
+        self.run["artifacts"]["plot_status"] = reason
+        self.run["artifacts"].pop("plot_error", None)
+        self.flush_run()
+
+    def set_plot_error(self, error: BaseException) -> None:
+        self.run["artifacts"]["plot"] = None
+        self.run["artifacts"]["plot_status"] = "failed"
+        self.run["artifacts"]["plot_error"] = (
+            f"{type(error).__name__}: {error}"
+        )
         self.flush_run()
 
     def merge_cleanup_events(self, events: list[dict[str, object]]) -> None:
-        containers: list[dict[str, Any]] = self.run["cleanup"]["containers"]
+        containers: list[dict[str, Any]] = self.cleanup_details["containers"]
         for event in events:
             name = event.get("container_name")
             scope = event.get("scope")
@@ -336,7 +499,10 @@ class RunRecorder:
                 or not task_id
             ):
                 raise ValueError("invalid container cleanup event")
-            existing = next((item for item in containers if item["container_name"] == name), None)
+            existing = next(
+                (item for item in containers if item["container_name"] == name),
+                None,
+            )
             if existing is None:
                 existing = {
                     "episode_id": event.get("episode_id"),
@@ -365,29 +531,31 @@ class RunRecorder:
                     if existing["operations"][-1].get("result") == "not_found"
                     else "removed"
                 )
-        self.flush_run()
+        self._write_cleanup()
 
     def set_processes(self, processes: list[dict[str, Any]]) -> None:
-        self.run["cleanup"]["processes"] = processes
-        self.flush_run()
+        self.cleanup_details["processes"] = processes
+        self._write_cleanup()
 
     def set_runtime_handles(self, handles: list[dict[str, Any]]) -> None:
-        self.run["cleanup"]["runtime_handles"] = handles
-        self.flush_run()
+        self.cleanup_details["runtime_handles"] = handles
+        self._write_cleanup()
 
     def set_gpu_diagnostics(self, diagnostics: list[dict[str, Any]]) -> None:
-        self.run["cleanup"]["gpu_diagnostics"] = diagnostics
-        self.flush_run()
+        self.cleanup_details["gpu_diagnostics"] = diagnostics
+        self._write_cleanup()
 
     def finalize_cleanup(self) -> None:
-        cleanup = self.run["cleanup"]
+        cleanup = self.cleanup_details
         resources = (
             cleanup["containers"] + cleanup["processes"] + cleanup["runtime_handles"]
         )
         residuals: list[str] = []
         for container in cleanup["containers"]:
             if container["residual"]:
-                residuals.append(container["container_id"] or container["container_name"])
+                residuals.append(
+                    container["container_id"] or container["container_name"]
+                )
         for process in cleanup["processes"]:
             if process.get("residual") or process.get("final_state") == "residual":
                 residuals.append(str(process.get("pid")))
@@ -395,10 +563,18 @@ class RunRecorder:
             if handle.get("residual") or handle.get("final_state") == "residual":
                 residuals.append(str(handle.get("identifier")))
         cleanup["residuals"] = residuals
-        cleanup["state"] = "failed" if residuals else "completed"
+        cleanup["status"] = "failed" if residuals else "completed"
         cleanup["clean_release"] = not residuals
         if not resources:
             cleanup["clean_release"] = True
+        self.run["cleanup"].update(
+            {
+                "status": cleanup["status"],
+                "clean_release": cleanup["clean_release"],
+                "residual_count": len(residuals),
+            }
+        )
+        self._write_cleanup()
         self.flush_run()
 
     def fail(
@@ -414,24 +590,39 @@ class RunRecorder:
         self._finish_indexes(state)
         self.run["failure"] = {
             "category": "interrupted" if interrupted else category,
-            "primary_type": primary_type,
+            "type": primary_type,
             "message": message,
             "stage": stage,
-            "traceback_log_ref": "train.log",
+            "log": "train.log",
         }
-        self.run["lifecycle"]["state"] = state
-        self.run["provenance"]["finished_at"] = _utc_now()
+        self.run["status"] = state
+        self._finish_time()
         self.flush_run()
 
     def complete(self) -> None:
-        if self.run["cleanup"]["state"] != "completed" or self.run["cleanup"]["residuals"]:
-            raise RuntimeError("run cannot complete before all known resources are released")
-        self.run["lifecycle"]["state"] = "completed"
-        self.run["provenance"]["finished_at"] = _utc_now()
+        if (
+            self.run["cleanup"]["status"] != "completed"
+            or self.run["cleanup"]["residual_count"]
+        ):
+            raise RuntimeError(
+                "run cannot complete before all known resources are released"
+            )
+        self.run["status"] = "completed"
+        self._finish_time()
         self.flush_run()
 
     def flush_run(self) -> None:
         _atomic_write_json(self.output_dir / "run.json", self.run)
+
+    def _write_cleanup(self) -> None:
+        _atomic_write_json(self.cleanup_path, self.cleanup_details)
+
+    def _finish_time(self) -> None:
+        finished_at = datetime.now(UTC)
+        self.run["time"]["finished_at"] = _format_utc(finished_at)
+        self.run["time"]["duration_seconds"] = round(
+            (finished_at - self._started_at).total_seconds(), 3
+        )
 
     def _finish_indexes(self, state: RunState) -> None:
         finished_at = _utc_now()
@@ -446,7 +637,9 @@ class RunRecorder:
     def _rollout_dir(self, index: int) -> Path:
         expected = 0 if self.group is None else len(self.group["rollout_dirs"])
         if self._group_dir is None or index not in range(expected):
-            raise ValueError(f"rollout index must be between zero and {expected - 1}")
+            raise ValueError(
+                f"rollout index must be between zero and {expected - 1}"
+            )
         return self._group_dir / f"{index:04d}"
 
     def _write_batch(self) -> None:
@@ -460,6 +653,30 @@ class RunRecorder:
         _atomic_write_json(self._group_dir / "group.json", self.group)
 
 
+def _numeric(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _append_json_line(path: Path, payload: object) -> None:
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND)
+    try:
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written == 0:
+                raise OSError("failed to append metrics row")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _payload_sha256(payload: object) -> str:
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -467,8 +684,12 @@ def _payload_sha256(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _format_utc(value: datetime) -> str:
+    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return _format_utc(datetime.now(UTC))
 
 
 def _atomic_write_json(path: Path, payload: object) -> None:

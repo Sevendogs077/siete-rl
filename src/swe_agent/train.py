@@ -6,7 +6,6 @@ import atexit
 import gc
 import hashlib
 import json
-import math
 import os
 import re
 import signal
@@ -252,6 +251,42 @@ def build_processing_class(config: ProjectConfig) -> Any:
     return install_compatible_tool_call_parser(tokenizer)
 
 
+def _run_metrics_callback(recorder: Any) -> Any:
+    """把 Trainer 每个 optimizer step 的公开日志写入 metrics.jsonl。"""
+
+    from transformers import TrainerCallback
+
+    class RunMetricsCallback(TrainerCallback):
+        def on_log(
+            self,
+            args: Any,
+            state: Any,
+            control: Any,
+            logs: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            del args, kwargs
+            if logs:
+                recorder.record_metrics(step=int(state.global_step), logs=dict(logs))
+            return control
+
+    return RunMetricsCallback()
+
+
+def _sync_recorder_from_trainer(recorder: Any, trainer: Any | None) -> None:
+    """在释放 Trainer 前保留实际 step、最后日志和已存在 checkpoint。"""
+
+    if trainer is None:
+        return
+    state = getattr(trainer, "state", None)
+    if state is None:
+        return
+    recorder.sync_trainer_state(
+        global_step=int(getattr(state, "global_step", 0)),
+        log_history=list(getattr(state, "log_history", [])),
+    )
+
+
 def run(config_path: str | Path) -> dict[str, Any]:
     """一次 CLI 调用只创建并执行一个 run。"""
 
@@ -278,7 +313,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
         physical_device=physical_device,
         server_gpu=server_gpu,
     )
-    if report["lifecycle"] == "interrupted":
+    if report["status"] == "interrupted":
         raise TrainingInterrupted(int(report["interrupted_signum"]), report)
     return report
 
@@ -321,9 +356,6 @@ def _run_once(
     run_processes: dict[int, dict[str, Any]] = {}
     failure: dict[str, str] | None = None
     stage = "gpu_preflight"
-    trainer_group_consumed = False
-    lora_changed = False
-    metrics: dict[str, float | None] = {}
     interrupted_signum: int | None = None
 
     try:
@@ -389,6 +421,7 @@ def _run_once(
             reward_func=reward_func,
             processing_class=tokenizer,
         )
+        trainer.add_callback(_run_metrics_callback(recorder))
         run_processes.update(_new_child_processes(child_process_baseline))
         # vLLM 的 in-process engine 构造会使用自己的固定 seed；恢复本 run seed。
         from transformers import set_seed
@@ -402,51 +435,28 @@ def _run_once(
         recorder.log("trainer constructed; rollout policy global_step=0")
 
         stage = "train"
-        train_output = trainer.train()
+        trainer.train()
         global_step = int(trainer.state.global_step)
         if global_step != config.grpo.max_steps:
             raise RuntimeError(
                 f"expected trainer.state.global_step={config.grpo.max_steps}, got {global_step}"
             )
         recorder.complete_batch(global_step)
-        trainer_group_consumed = True
         post_step_adapter = _adapter_state(trainer.model)
         lora_changed = _state_digest(pre_step_adapter) != _state_digest(post_step_adapter)
+        recorder.set_model_updated(lora_changed)
 
         stage = "save_model"
         trainer.save_model(recorder.output_dir.as_posix())
         _require_final_model_files(recorder.output_dir)
         if not _verify_saved_adapter(recorder.output_dir, post_step_adapter):
             raise RuntimeError("saved adapter could not be reloaded with identical tensors")
-        checkpoints = sorted(
-            path.name
-            for path in recorder.output_dir.glob("checkpoint-*")
-            if path.is_dir()
-        )
+        checkpoints = recorder.refresh_checkpoints()
         if not checkpoints or any(
             re.fullmatch(r"checkpoint-\d+", name) is None for name in checkpoints
         ):
             raise RuntimeError(f"expected checkpoint-<step> directories, got {checkpoints}")
-        metrics = _training_metrics(trainer, train_output)
-        recorder.update_training(
-            loss=metrics["loss"],
-            grad_norm=metrics["grad_norm"],
-            frac_reward_zero_std=metrics["frac_reward_zero_std"],
-            checkpoints=checkpoints,
-            final_model_ref="adapter_model.safetensors",
-        )
-        recorder.update_observations(
-            nonzero_advantage_observed=(
-                False if recorder.group and recorder.group["degenerate"] else True
-            ),
-            nonzero_gradient_observed=_is_positive_finite(metrics["grad_norm"]),
-            nonzero_parameter_update_observed=lora_changed,
-            all_sequences_masked_by_is=(
-                None
-                if metrics["importance_sampling_ratio_max"] is None
-                else metrics["importance_sampling_ratio_max"] == 0.0
-            ),
-        )
+        recorder.set_final_model("adapter_model.safetensors")
         recorder.log(
             "GRPO optimizer step completed; post-step policy is "
             + ("numerically changed" if lora_changed else "numerically unchanged")
@@ -478,6 +488,13 @@ def _run_once(
 
         run_processes.update(_new_child_processes(child_process_baseline))
         cleanup_errors, environment_handles = _close_environments(environments, recorder)
+        try:
+            _sync_recorder_from_trainer(recorder, trainer)
+        except BaseException as sync_error:
+            recorder.log(
+                "trainer state sync failed: "
+                f"{type(sync_error).__name__}: {sync_error}"
+            )
         server_handle = _guarded("vllm_server.close", lambda: vllm_server.close() if vllm_server is not None else None)
         if docker_client is not None:
             swept = _guarded(
@@ -520,7 +537,7 @@ def _run_once(
         if gpu_diagnostic is not None:
             _guarded("set_gpu_diagnostics", lambda: recorder.set_gpu_diagnostics([gpu_diagnostic]))
         _guarded("finalize_cleanup", recorder.finalize_cleanup)
-        if recorder.run["cleanup"]["state"] == "failed" and not cleanup_errors:
+        if recorder.run["cleanup"]["status"] == "failed" and not cleanup_errors:
             cleanup_errors.append(RuntimeError("one or more run-owned resources remain"))
         if cleanup_errors:
             for cleanup_error in cleanup_errors:
@@ -537,13 +554,6 @@ def _run_once(
                     "interrupted": "False",
                 }
 
-    native_policy_path_reached = recorder.run["training"]["native_policy_path_reached"] is True
-    system_passed = native_policy_path_reached and trainer_group_consumed
-    recorder.update_training(
-        system_closed_loop="passed" if system_passed else "failed",
-        native_policy_path_reached=native_policy_path_reached,
-        trainer_group_consumed=trainer_group_consumed,
-    )
     if failure is not None:
         recorder.fail(
             category=failure["category"],
@@ -554,25 +564,33 @@ def _run_once(
         )
     else:
         recorder.complete()
+
+    try:
+        from swe_agent.reporting import render_training_summary
+
+        plot = render_training_summary(recorder.output_dir, recorder.run)
+        if plot is None:
+            recorder.set_plot_skipped("not_generated_no_steps")
+        else:
+            recorder.set_plot(plot.name)
+    except BaseException as plot_error:
+        recorder.log(
+            f"summary plot failed: {type(plot_error).__name__}: {plot_error}"
+        )
+        recorder.set_plot_error(plot_error)
+
+    reward = recorder.run["results"]["reward"]
     recorder.log(
-        f"run finished lifecycle={recorder.run['lifecycle']['state']} "
-        f"native_policy_path_reached={native_policy_path_reached} "
-        f"trainer_group_consumed={trainer_group_consumed} "
-        f"system_closed_loop={recorder.run['training']['system_closed_loop']}"
+        f"run finished status={recorder.run['status']} "
+        f"steps={recorder.run['train']['steps_completed']} "
+        f"reward_mean={reward['mean']}"
     )
     return {
         "run_id": recorder.run_id,
-        "lifecycle": recorder.run["lifecycle"]["state"],
-        "native_policy_path_reached": native_policy_path_reached,
-        "trainer_group_consumed": trainer_group_consumed,
-        "system_closed_loop": recorder.run["training"]["system_closed_loop"],
+        "status": recorder.run["status"],
         "failure": recorder.run["failure"],
-        "final_model_ref": recorder.run["training"]["final_model_ref"],
-        "cleanup": {
-            "state": recorder.run["cleanup"]["state"],
-            "clean_release": recorder.run["cleanup"]["clean_release"],
-            "residuals": recorder.run["cleanup"]["residuals"],
-        },
+        "artifacts": recorder.run["artifacts"],
+        "cleanup": recorder.run["cleanup"],
         "interrupted_signum": interrupted_signum,
     }
 
@@ -1276,39 +1294,6 @@ def _require_final_model_files(output_dir: Path) -> None:
     ]
     if missing:
         raise RuntimeError("Trainer final model files are missing: " + ", ".join(missing))
-
-
-def _training_metrics(trainer: Any, train_output: Any) -> dict[str, float | None]:
-    history = list(getattr(trainer.state, "log_history", []))
-
-    def latest(key: str) -> float | None:
-        for row in reversed(history):
-            value = row.get(key)
-            if isinstance(value, (int, float)):
-                return float(value)
-        return None
-
-    loss = latest("loss")
-    if loss is None:
-        value = getattr(train_output, "training_loss", None)
-        loss = float(value) if isinstance(value, (int, float)) else None
-    return {
-        "loss": loss,
-        "grad_norm": latest("grad_norm"),
-        "frac_reward_zero_std": latest("frac_reward_zero_std"),
-        "importance_sampling_ratio_mean": latest(
-            "sampling/importance_sampling_ratio/mean"
-        ),
-        "importance_sampling_ratio_max": latest(
-            "sampling/importance_sampling_ratio/max"
-        ),
-    }
-
-
-def _is_positive_finite(value: float | None) -> bool | None:
-    if value is None:
-        return None
-    return math.isfinite(value) and value > 0.0
 
 
 def _native_policy_path_reached(environments: list[Any]) -> bool:

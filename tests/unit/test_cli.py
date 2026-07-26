@@ -15,7 +15,7 @@ def test_cli_forwards_complete_config(monkeypatch: pytest.MonkeyPatch, capsys: p
         "run",
         lambda path: {
             "config": Path(path).as_posix(),
-            "lifecycle": "completed",
+            "status": "completed",
         },
     )
 
@@ -26,9 +26,9 @@ def test_cli_forwards_complete_config(monkeypatch: pytest.MonkeyPatch, capsys: p
 def test_cli_returns_nonzero_for_structured_failed_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(train, "run", lambda path: {"lifecycle": "failed"})
+    monkeypatch.setattr(train, "run", lambda path: {"status": "failed"})
     assert cli.main(["grpo", "--config", "config.yaml"]) == 1
-    assert '"lifecycle": "failed"' in capsys.readouterr().out
+    assert '"status": "failed"' in capsys.readouterr().out
 
 
 def test_cli_grpo_surface_contains_only_one_run_config_input() -> None:
@@ -48,11 +48,11 @@ def test_cli_preserves_sigterm_exit_after_structured_cleanup(
 ) -> None:
     def interrupt(path: Path):
         del path
-        raise train.TrainingInterrupted(15, {"lifecycle": "interrupted"})
+        raise train.TrainingInterrupted(15, {"status": "interrupted"})
 
     monkeypatch.setattr(train, "run", interrupt)
     assert cli.main(["grpo", "--config", "config.yaml"]) == 143
-    assert '"lifecycle": "interrupted"' in capsys.readouterr().out
+    assert '"status": "interrupted"' in capsys.readouterr().out
 
 
 def test_cli_rejects_unqualified_runtime(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

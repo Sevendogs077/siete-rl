@@ -77,10 +77,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 128 + signal.SIGINT
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    lifecycle = report.get("lifecycle")
-    if lifecycle == "failed":
+    status = report.get("status")
+    if status == "failed":
         return 1
-    if lifecycle == "interrupted":
+    if status == "interrupted":
         return 128 + signal.SIGINT
     return 0
 
