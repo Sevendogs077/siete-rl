@@ -75,6 +75,7 @@ class SWEGymVerifier:
             self.cleanup_events.append(
                 {
                     "scope": "verifier",
+                    "task_id": sandbox.environment.task_id,
                     "container_name": sandbox.container_name,
                     "container_id": getattr(sandbox, "acquired_container_id", sandbox.container_id),
                     "operations": sandbox.drain_cleanup_operations(),

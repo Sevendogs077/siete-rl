@@ -6,6 +6,7 @@ import pytest
 
 from swe_agent import qualify
 from swe_agent.config import load_config
+from swe_agent.swegym import select_task_ids
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -21,8 +22,21 @@ def test_qualify_detects_revision_drift() -> None:
     drifted = config.model_copy(
         update={"dataset": config.dataset.model_copy(update={"official_revision": "0" * 40})}
     )
-    results = {check.name: check for check in qualify.check_dataset(drifted, project_root)}
-    assert results["dataset.revisions"].ok is False
+    results = qualify.check_dataset(drifted, project_root)
+    assert results
+    assert all(check.ok is False for check in results if check.name.endswith(".revisions"))
+
+
+def test_qualify_covers_every_selected_task() -> None:
+    config, project_root, _ = load_config(CONFIG_PATH)
+    task_ids = select_task_ids(config, project_root)
+    results = qualify.check_dataset(config, project_root)
+    checked = {
+        check.name.removeprefix("dataset.").removesuffix(".official_row")
+        for check in results
+        if check.name.endswith(".official_row")
+    }
+    assert checked == set(task_ids)
 
 
 def test_qualify_detects_cross_table_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,9 +53,12 @@ def test_qualify_detects_cross_table_mismatch(monkeypatch: pytest.MonkeyPatch) -
         return row
 
     monkeypatch.setattr(qualify, "_read_exact_row", mismatched)
-    results = {check.name: check for check in qualify.check_dataset(config, project_root)}
-    assert results["dataset.cross_table_fields"].ok is False
-    assert "base_commit" in results["dataset.cross_table_fields"].detail
+    results = qualify.check_dataset(config, project_root)
+    mismatched = [
+        check for check in results if check.name.endswith(".cross_table_fields") and not check.ok
+    ]
+    assert len(mismatched) == 1
+    assert "base_commit" in mismatched[0].detail
 
 
 def test_qualify_detects_offline_transform_tampering() -> None:
@@ -53,6 +70,8 @@ def test_qualify_detects_offline_transform_tampering() -> None:
         "transform_eval_script_offline",
         lambda script: original_transform(script) + "\n# tampered\n",
     )
-    results = {check.name: check for check in qualify.check_assets(config, project_root)}
-    assert results["assets.offline_transform"].ok is False
+    results = qualify.check_assets(config, project_root)
+    assert any(
+        check.name.endswith(".offline_transform") and check.ok is False for check in results
+    )
     monkeypatch.undo()

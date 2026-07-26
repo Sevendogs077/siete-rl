@@ -13,9 +13,9 @@
 ## 关键设计决策（先于任务，理解全局）
 
 1. **资产驱动镜像信息**：`docker.image / expected_image_id / expected_registry_digest` 从配置删除，改为从 `assets/swegym/<task_id>/selected_instance.json`（image_name）与 `manifest.json`（expected_image_id、expected_registry_digest）读取。配置只保留共享 docker 旋钮（cpus/memory/pids/平台/网络）。
-2. **任务选择**：`dataset` 段改为 `tasks_dir`（资产根目录）+ `task_ids`（`null`=全部 | 显式列表）+ `max_tasks`（`null` | int，按排序截断，便于小规模试跑）。
+2. **任务选择**：`dataset` 段改为 `tasks_dir`（资产根目录）+ `task_ids`（`null`=未指定 | 显式列表）+ `max_tasks`（`null` | int）。语义：**未指定 `task_ids` 时按 `max_tasks` 截断（`null`=全部）；两者同时指定且数量不一致直接报错**。
 3. **单环境工厂即可多任务**：TRL 非 dict 的 `environment_factory` 下，每个样本 `env.reset(**row)`，row 带 `task_id`；`SWEEnvironment.reset` 已按 `task_id` 查 `TaskContext`——**核心路径不用动 TRL 接线**。
-4. **逐 group 记录 task_id**：TRL reward func 会把 dataset 列作为 kwargs 广播传入，dataset 行里加 `task_id` 列后，`_recording_reward` 可收到 `task_ids: list[str]`，写入 `batch.json/group.json`（每组同 prompt 即同任务）。
+4. **逐 group 记录 task_id（简化版）**：不走 TRL kwargs 广播，直接取 `environment.trajectory.task_id`（env 在 reset 时已定任务身份）；`_recording_reward` 断言同组环境的 task_id 一致后写入 `batch.json/group.json`。
 5. **数据集行数与采样器**：多任务后不变量改为 `generation_batch_size // num_generations <= len(dataset)`；`shuffle_dataset: true` 终于生效。
 6. **镜像 digest**：镜像站回 tag 导致 daemon 内 `RepoDigests` 为空；资产生成器从镜像站 manifest API 抓取 digest 写入 manifest（moto-7212 已验证可行）。`inspect_image` 对空 RepoDigests 本已放行。
 
@@ -25,7 +25,7 @@
 
 | 文件 | 责任 | 动作 |
 |---|---|---|
-| `src/swe_agent/assets_gen.py` | 从 parquet + daemon 生成全部任务资产（新建） | 创建 |
+| `src/swe_agent/asset_generation.py` | 从 parquet + daemon 生成全部任务资产（新建） | 创建 |
 | `scripts/prepare.sh` | 资产预生成入口（在现有拉镜像脚本基础上扩展第二职责或新建 `prepare_assets.sh`，二选一，见 Task 1） | 修改/创建 |
 | `src/swe_agent/config.py` | `dataset` 段重设计、`docker` 段删镜像三字段 | 修改 |
 | `src/swe_agent/swegym.py` | 多任务 TaskContext、按资产构造 Environment | 修改 |
@@ -33,15 +33,15 @@
 | `src/swe_agent/train.py` | dataset 构建多行、prompt 长度校验改逐行、`_recording_reward` 透传 task_id | 修改 |
 | `src/swe_agent/qualify.py` | 检查循环覆盖全部任务 | 修改 |
 | `configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml` | dataset/docker 段新形态 | 修改 |
-| `tests/unit/test_swegym.py`、`test_config.py`、`test_recording.py`、`test_train.py`、`test_qualify.py`、`test_assets_gen.py`（新） | 同步 | 修改/创建 |
+| `tests/unit/test_swegym.py`、`test_config.py`、`test_recording.py`、`test_train.py`、`test_qualify.py`、`test_asset_generation.py`（新） | 同步 | 修改/创建 |
 
 ---
 
 ### Task 1: 资产生成器（100 个任务的 assets 全量生成）
 
 **Files:**
-- Create: `src/swe_agent/assets_gen.py`
-- Create: `tests/unit/test_assets_gen.py`
+- Create: `src/swe_agent/asset_generation.py`
+- Create: `tests/unit/test_asset_generation.py`
 - Modify: `scripts/prepare.sh`（追加资产生成阶段；该脚本已负责拉镜像）
 
 设计：输入 official/subset parquet + 任务清单（subset parquet 全部行），对每个任务产出与 moto-7023 同构的六个文件。幂等（已存在且哈希一致则跳过）。digest 通过镜像站 manifest API 获取（`MIRROR` 环境变量，默认 `docker.1panel.live`）；image_id 从专用 daemon `docker image inspect` 获取（镜像须已由 prepare.sh 拉取，否则报错并列出缺失清单）。
@@ -49,7 +49,7 @@
 - [ ] **Step 1: 写失败测试**
 
 ```python
-# tests/unit/test_assets_gen.py
+# tests/unit/test_asset_generation.py
 from __future__ import annotations
 
 import json
@@ -59,7 +59,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from swe_agent.assets_gen import generate_task_assets
+from swe_agent.asset_generation import generate_task_assets
 
 
 def _rows(instance_id: str) -> list[dict]:
@@ -140,10 +140,10 @@ def test_generate_task_assets_is_idempotent(tmp_path: Path) -> None:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_assets_gen.py -q`
-Expected: FAIL `ModuleNotFoundError: swe_agent.assets_gen`
+Run: `.venv/bin/python -m pytest tests/unit/test_asset_generation.py -q`
+Expected: FAIL `ModuleNotFoundError: swe_agent.asset_generation`
 
-- [ ] **Step 3: 实现 `src/swe_agent/assets_gen.py`**
+- [ ] **Step 3: 实现 `src/swe_agent/asset_generation.py`**
 
 ```python
 """从锁定 parquet 与 daemon 事实生成单个/全部任务资产；深度校验由 qualify 负责。"""
@@ -253,7 +253,7 @@ def fetch_registry_digest(mirror: str, task_id: str) -> str:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_assets_gen.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_asset_generation.py -q`
 Expected: 2 passed
 
 - [ ] **Step 5: prepare.sh 追加资产生成阶段**
@@ -268,7 +268,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from swe_agent.assets_gen import fetch_registry_digest, generate_task_assets, image_tag_for
+from swe_agent.asset_generation import fetch_registry_digest, generate_task_assets, image_tag_for
 from swe_agent.docker import SubprocessDockerClient
 
 parquet = sys.argv[1]
@@ -303,7 +303,7 @@ Expected: 输出 100 行 `assets OK <task_id>`；`ls assets/swegym | wc -l` 为 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/swe_agent/assets_gen.py tests/unit/test_assets_gen.py scripts/prepare.sh
+git add src/swe_agent/asset_generation.py tests/unit/test_asset_generation.py scripts/prepare.sh
 git commit -m "feat: 新增任务资产生成器并接入 prepare 流程"
 ```
 
@@ -506,7 +506,7 @@ git commit -m "feat: TaskContext 支持多任务并按任务资产构造环境"
 
 ---
 
-### Task 4: train.py 集成（多行 dataset、逐行 prompt 校验、reward 透传 task_id）
+### Task 4: train.py 集成（多行 dataset、逐行 prompt 校验、按组记录 task_id）
 
 **Files:**
 - Modify: `src/swe_agent/train.py`
@@ -525,9 +525,9 @@ git commit -m "feat: TaskContext 支持多任务并按任务资产构造环境"
             _validate_rendered_prompt_length(trainer, row["prompt"], config.chat.max_prompt_length)
 ```
 
-删除原 `sample, _ = task_context[config.dataset.task_id]` 与单行 `prompt` 逻辑；`sandbox_factory`/`verifier_factory` 不变（沙箱按 env 自带的 sample 构造，已是逐任务）。
+删除原 `sample, _ = task_context[config.dataset.task_id]` 与单行 `prompt` 逻辑。rollout `sandbox_factory` 已从 `reset` 的当前 sample 构造；为保证 verifier 也绑定同一任务，`VerifierFactory` 改为接收 `(sample, evaluation, episode_id)`，`SWEEnvironment._finalize()` 传入当前 `self._sample`，训练入口用传入的 `sample` 构造 verifier sandbox。
 
-- [ ] **Step 2: recording 记录 per-group task_id**
+- [ ] **Step 2: recording 记录 per-group task_id（从 environment.trajectory 取）**
 
 `recording.py` 的 `begin_group` 增加参数：
 
@@ -540,18 +540,28 @@ git commit -m "feat: TaskContext 支持多任务并按任务资产构造环境"
 
 （schema 字段名沿用现有 `"task_id"`，值从 `self.config.dataset.task_id` 改为参数传入。）
 
-`_recording_reward` 改为从 kwargs 取 TRL 广播的 dataset 列：
+`_recording_reward` 直接从环境取任务身份，不依赖 TRL kwargs 广播：
 
 ```python
-    def reward(prompts, completions, environments, task_id, **kwargs):
-        # TRL 将 dataset 的 task_id 列按 completion 广播为 list[str]
-        task_ids = list(task_id)
-        if len(set(task_ids)) != 1:
-            raise RecordingRuntimeError(f"group mixes tasks: {sorted(set(task_ids))}")
-        recorder.begin_group(prompts[0], len(completions), task_id=task_ids[0])
+    def reward(prompts, completions, environments, **kwargs):
+        task_ids = {
+            environment.trajectory.task_id
+            for environment in environments
+            if environment.trajectory is not None
+        }
+        if len(task_ids) > 1:
+            raise RecordingRuntimeError(f"group mixes tasks: {sorted(task_ids)}")
+        recorder.begin_group(
+            prompts[0],
+            len(completions),
+            task_id=task_ids.pop() if task_ids else "unknown",
+        )
+        ...
 ```
 
-注意：TRL reward kwargs 的 dataset 列名与值形态（单值 vs list）需在实现时以 `test_recording_reward` 的 FakeRecorder 断言锁定——测试里 `task_id=["t"]*4` 传入。
+注意：`binary_reward` 先跑（env 逐个 `_finalize` 产出 trajectory），因此取 task_id 必须在 `reward_adapter(...)` **之后**；`trajectory is None`（finalize 失败路径）用 `"unknown"` 兜底。测试里 FakeEnvironment 的 `trajectory` 用带 `task_id` 属性的桩。
+
+多任务 run 不存在唯一镜像，因此 `run.json` provenance 删除全局 `task_id`、`image_tag`、`image_id`；batch/group 保留当前组 `task_id`。rollout/verifier cleanup event 也携带任务身份，recording 不再读取已删除的单任务配置字段。
 
 - [ ] **Step 3: 采样不变量更新**
 
@@ -621,7 +631,7 @@ yaml：`dataset.max_tasks: 8`，`grpo.max_steps: 4`（其余不变）。采样�
 
 - [ ] **Step 2: 启动 run 并观察**
 
-Run: `CUDA_VISIBLE_DEVICES=0,1 scripts/grpo.sh`
+Run: `CUDA_VISIBLE_DEVICES=2,3 scripts/grpo.sh`
 观察点：
 - `rollouts/batch-*/group.json` 的 `task_id` 出现 ≥2 个不同值；
 - 每组 `rewards` 记录与 trajectory 落盘正常；
@@ -638,5 +648,6 @@ Run: `CUDA_VISIBLE_DEVICES=0,1 scripts/grpo.sh`
 
 - **Spec 覆盖**：资产生成(1)、配置(2)、加载(3)、训练集成(4)、资格(5)、试跑(6) 全覆盖；"镜像 digest 获取"在 Task 1 的 `fetch_registry_digest` 有着落。
 - **Placeholder 扫描**：所有步骤含具体代码或具体命令；Task 6 属运行验证，给出明确观察点。
-- **类型一致性**：`select_task_ids` / `load_task_instance` / `build_training_dataset(context)` / `begin_group(..., task_id=)` 签名跨任务一致；`task_ids: list[str]` 在 reward kwargs 的形态由 Task 4 Step 2 的测试锁定。
-- **遗留风险**：① TRL reward kwargs 对 dataset 列的广播形态（单值/list）需在 Task 4 实现时以真实 trainer 行为复核，若 TRL 传的是去重值则改用 `environment.trajectory.task_id` 记录；② 100 任务资产首次生成时 digest 抓取受镜像站限速，失败任务需可重跑（生成器幂等已保证）。
+- **类型一致性**：`select_task_ids` / `load_task_instance` / `build_training_dataset(context)` / `begin_group(..., task_id=)` 签名跨任务一致；task_id 统一从 `environment.trajectory.task_id` 读取，无 TRL 行为依赖。
+- **已按用户决策简化**：① task_id 来源改为 environment.trajectory（绕开 TRL kwargs 广播的不确定性）；② 任务选择语义定为"未指定 task_ids 则按 max_tasks 截断；两者同时指定且数量不一致报错"。
+- **遗留风险**：100 任务资产首次生成时 digest 抓取受镜像站限速，失败任务可重跑（生成器幂等已保证）。

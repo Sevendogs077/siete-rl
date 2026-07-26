@@ -7,6 +7,7 @@ import pytest
 
 from swe_agent.config import load_config
 from swe_agent.train import (
+    RecordingRuntimeError,
     RuntimeNotQualifiedError,
     _clear_vllm_cuda_graphs,
     _detach_vllm_engine,
@@ -148,9 +149,10 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
             self.begun = []
             self.group = None
             self.events = []
+            self.native_policy_path_reached = False
 
-        def begin_group(self, prompt, rollout_count):
-            self.begun.append((prompt, rollout_count))
+        def begin_group(self, prompt, rollout_count, *, task_id):
+            self.begun.append((prompt, rollout_count, task_id))
 
         def write_rollout(self, index, **values):
             self.rollouts.append((index, values))
@@ -158,13 +160,16 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
         def complete_group(self, **values):
             self.group = values
 
+        def observe_native_policy_path(self, reached):
+            self.native_policy_path_reached = self.native_policy_path_reached or reached
+
         def merge_cleanup_events(self, events):
             self.events.extend(events)
 
     class FakeEnvironment:
         def __init__(self, index: int) -> None:
             self.episode_id = f"episode-{index}"
-            self.trajectory = f"trajectory-{index}"
+            self.trajectory = None
             self.frozen_patch = None
             self.verification = None
             self.index = index
@@ -179,6 +184,16 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
 
     def adapter(*, completions, environments, **kwargs):
         del completions, kwargs
+        for environment in environments:
+            environment.trajectory = type(
+                "Trajectory",
+                (),
+                {
+                    "task_id": "getmoto__moto-7023",
+                    "termination": "format_exhausted",
+                    "steps": [],
+                },
+            )()
         return [float(environment.index == 0) for environment in environments]
 
     reward = _recording_reward(recorder, adapter)
@@ -191,9 +206,123 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
     assert recorder.rollouts[2][1]["messages"] == prompts[2] + completions[2]
     assert recorder.group["episode_ids"] == [f"episode-{index}" for index in range(4)]
     assert recorder.events == [{"index": index} for index in range(4)]
+    assert recorder.native_policy_path_reached is False
     # 多步训练：reward 可被多次调用，每次开始一个新 group
     reward(prompts=prompts, completions=completions, environments=environments)
-    assert recorder.begun == [(prompts[0], 4), (prompts[0], 4)]
+    assert recorder.begun == [
+        (prompts[0], 4, "getmoto__moto-7023"),
+        (prompts[0], 4, "getmoto__moto-7023"),
+    ]
+
+
+def test_recording_reward_preserves_an_earlier_native_policy_path() -> None:
+    class FakeRecorder:
+        def __init__(self) -> None:
+            self.native_policy_path_reached = False
+
+        def begin_group(self, *args, **kwargs):
+            del args, kwargs
+
+        def write_rollout(self, *args, **kwargs):
+            del args, kwargs
+
+        def complete_group(self, *args, **kwargs):
+            del args, kwargs
+
+        def observe_native_policy_path(self, reached):
+            self.native_policy_path_reached = self.native_policy_path_reached or reached
+
+        def merge_cleanup_events(self, events):
+            del events
+
+    class FakeEnvironment:
+        def __init__(self) -> None:
+            self.episode_id = "episode-0"
+            self.trajectory = None
+            self.frozen_patch = None
+            self.verification = None
+            self._reward = None
+
+        def _drain_events(self):
+            return []
+
+    recorder = FakeRecorder()
+    environments = [FakeEnvironment()]
+    calls = 0
+
+    def adapter(*, environments, **kwargs):
+        nonlocal calls
+        del kwargs
+        environment = environments[0]
+        if calls == 0:
+            step = lambda name: type(
+                "Step", (), {"action": type("Action", (), {"tool_name": name})()}
+            )()
+            environment.trajectory = type(
+                "Trajectory",
+                (),
+                {
+                    "task_id": "getmoto__moto-7023",
+                    "termination": "submitted",
+                    "steps": [step("edit_file"), step("submit")],
+                },
+            )()
+            environment.frozen_patch = "diff --git a/x b/x\n"
+            environment.verification = object()
+            environment._reward = 1.0
+        else:
+            environment.trajectory = type(
+                "Trajectory",
+                (),
+                {
+                    "task_id": "getmoto__moto-7023",
+                    "termination": "context_overlong",
+                    "steps": [],
+                },
+            )()
+            environment.frozen_patch = None
+            environment.verification = None
+            environment._reward = 0.0
+        calls += 1
+        return [environment._reward]
+
+    reward = _recording_reward(recorder, adapter)
+    reward(prompts=[[]], completions=[[]], environments=environments)
+    reward(prompts=[[]], completions=[[]], environments=environments)
+
+    assert recorder.native_policy_path_reached is True
+
+
+def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> None:
+    class FakeRecorder:
+        def __init__(self) -> None:
+            self.begun = []
+
+        def begin_group(self, *args, **kwargs):
+            self.begun.append((args, kwargs))
+
+        def merge_cleanup_events(self, events):
+            del events
+
+    class FakeEnvironment:
+        def __init__(self, task_id: str) -> None:
+            self.trajectory = type("Trajectory", (), {"task_id": task_id})()
+
+        def _drain_events(self):
+            return []
+
+    recorder = FakeRecorder()
+    reward = _recording_reward(recorder, lambda **kwargs: [0.0, 0.0])
+    with pytest.raises(RecordingRuntimeError, match="group mixes tasks"):
+        reward(
+            prompts=[[], []],
+            completions=[[], []],
+            environments=[
+                FakeEnvironment("getmoto__moto-7023"),
+                FakeEnvironment("getmoto__moto-7212"),
+            ],
+        )
+    assert recorder.begun == []
 
 
 def test_native_policy_path_requires_executed_edit_submit_patch_verifier_and_reward() -> None:

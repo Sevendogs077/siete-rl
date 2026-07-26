@@ -1,15 +1,13 @@
 schema_version: 1
 dataset:
-  task_id: getmoto__moto-7023
+  tasks_dir: assets/swegym
+  task_ids: null        # null=未指定；或 [getmoto__moto-7023, getmoto__moto-7212]
+  max_tasks: null       # null=不截断；试跑写 8
   official_path: data/swegym/SWE-Gym__SWE-Gym/bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb/data/train-00000-of-00001.parquet
   official_revision: bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb
   subset_path: data/swegym/SumanthRH__SWE-Gym-Subset/3f22e68f673027edbaebe3424e4c20ae580563fd/data/train-00000-of-00001.parquet
   subset_revision: 3f22e68f673027edbaebe3424e4c20ae580563fd
-  assets_dir: assets/swegym/getmoto__moto-7023
 docker:
-  image: docker.io/xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest
-  expected_image_id: sha256:8ce447e420f0511fe21b50bc5406b937411b4d829829e82b9b9c1619eeace9de
-  expected_registry_digest: sha256:3d027c271d5ec1a8ac81de7995f4e7f6bbbe1e0e435038251aff351f24a53885
   platform: linux/amd64
   pull_policy: never
   network_mode: none
@@ -62,7 +60,7 @@ generation:
   structured_outputs_regex: null
 grpo:
   reward_type: binary_verifier
-  num_generations: 4
+  num_generations: 8
   num_iterations: 1
   loss_type: grpo
   scale_rewards: group
@@ -80,8 +78,8 @@ grpo:
   vllm_importance_sampling_clip_max: 3.0
   vllm_importance_sampling_clip_min: null
   per_device_train_batch_size: 1
-  gradient_accumulation_steps: 4
-  generation_batch_size: 4
+  gradient_accumulation_steps: 8
+  generation_batch_size: 8
   steps_per_generation: null
   max_steps: 24
   learning_rate: 1.0e-06

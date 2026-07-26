@@ -99,9 +99,6 @@ class RunRecorder:
                 "generation_backend": "vllm",
                 "official_dataset_revision": config.dataset.official_revision,
                 "subset_dataset_revision": config.dataset.subset_revision,
-                "task_id": config.dataset.task_id,
-                "image_tag": config.docker.image,
-                "image_id": config.docker.expected_image_id,
                 "image_platform": config.docker.platform,
                 "seed": seed,
             },
@@ -153,7 +150,9 @@ class RunRecorder:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def begin_group(self, prompt: object, rollout_count: int) -> list[Path]:
+    def begin_group(
+        self, prompt: object, rollout_count: int, *, task_id: str
+    ) -> list[Path]:
         """开始一个新的 generation batch（单 group）；上一个 batch 随之完成。"""
 
         if rollout_count < 1:
@@ -176,7 +175,7 @@ class RunRecorder:
             "batch_index": batch_index,
             "batch_id": f"batch-{batch_index:04d}",
             "state": "running",
-            "task_id": self.config.dataset.task_id,
+            "task_id": task_id,
             "generation_backend": "vllm",
             "global_step_at_generation": batch_index,
             "started_at": _utc_now(),
@@ -189,7 +188,7 @@ class RunRecorder:
             "group_index": 0,
             "group_id": "group-0000",
             "state": "running",
-            "task_id": self.config.dataset.task_id,
+            "task_id": task_id,
             "prompt_sha256": _payload_sha256(prompt),
             "rollout_dirs": [f"{index:04d}" for index in range(rollout_count)],
             "episode_ids": [],
@@ -305,6 +304,17 @@ class RunRecorder:
         self.run["training"].update(values)
         self.flush_run()
 
+    def observe_native_policy_path(self, reached: bool) -> None:
+        """累积每个已完成 group 的原生策略闭环观察结果。"""
+
+        if not isinstance(reached, bool):
+            raise ValueError("native policy path observation must be a bool")
+        training = self.run["training"]
+        if training["native_policy_path_reached"] is True:
+            return
+        training["native_policy_path_reached"] = reached
+        self.flush_run()
+
     def update_observations(self, **values: bool | None) -> None:
         observations = self.run["training"]["observations"]
         unknown = set(values) - set(observations)
@@ -318,13 +328,19 @@ class RunRecorder:
         for event in events:
             name = event.get("container_name")
             scope = event.get("scope")
-            if not isinstance(name, str) or scope not in {"rollout", "verifier"}:
+            task_id = event.get("task_id")
+            if (
+                not isinstance(name, str)
+                or scope not in {"rollout", "verifier"}
+                or not isinstance(task_id, str)
+                or not task_id
+            ):
                 raise ValueError("invalid container cleanup event")
             existing = next((item for item in containers if item["container_name"] == name), None)
             if existing is None:
                 existing = {
                     "episode_id": event.get("episode_id"),
-                    "task_id": self.config.dataset.task_id,
+                    "task_id": task_id,
                     "scope": scope,
                     "container_id": event.get("container_id"),
                     "container_name": name,

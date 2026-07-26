@@ -22,6 +22,7 @@ from swe_agent.swegym import (
     _read_object,
     _require_sha256,
     _resolve,
+    select_task_ids,
     transform_eval_script_offline,
 )
 
@@ -36,20 +37,28 @@ class Check:
 
 def check_dataset(config: ProjectConfig, project_root: Path) -> list[Check]:
     checks: list[Check] = []
-    task_id = config.dataset.task_id
+    for task_id in select_task_ids(config, project_root):
+        checks.extend(_check_dataset_one(config, project_root, task_id))
+    return checks
+
+
+def _check_dataset_one(
+    config: ProjectConfig, project_root: Path, task_id: str
+) -> list[Check]:
+    checks: list[Check] = []
     official_path = _resolve(project_root, config.dataset.official_path)
     subset_path = _resolve(project_root, config.dataset.subset_path)
     official = subset = None
     try:
         official = _read_exact_row(official_path, task_id)
-        checks.append(Check("dataset.official_row", True, task_id))
+        checks.append(Check(f"dataset.{task_id}.official_row", True, task_id))
     except SWEGymContractError as exc:
-        checks.append(Check("dataset.official_row", False, str(exc)))
+        checks.append(Check(f"dataset.{task_id}.official_row", False, str(exc)))
     try:
         subset = _read_exact_row(subset_path, task_id)
-        checks.append(Check("dataset.subset_row", True, task_id))
+        checks.append(Check(f"dataset.{task_id}.subset_row", True, task_id))
     except SWEGymContractError as exc:
-        checks.append(Check("dataset.subset_row", False, str(exc)))
+        checks.append(Check(f"dataset.{task_id}.subset_row", False, str(exc)))
     if official is not None and subset is not None:
         mismatched = [
             field
@@ -58,21 +67,21 @@ def check_dataset(config: ProjectConfig, project_root: Path) -> list[Check]:
         ]
         checks.append(
             Check(
-                "dataset.cross_table_fields",
+                f"dataset.{task_id}.cross_table_fields",
                 not mismatched,
                 "一致" if not mismatched else f"字段不一致: {', '.join(mismatched)}",
             )
         )
         eval_script = subset.get("eval_script")
         ok = isinstance(eval_script, str) and bool(eval_script.strip())
-        checks.append(Check("dataset.eval_script", ok, "存在" if ok else "缺失"))
+        checks.append(Check(f"dataset.{task_id}.eval_script", ok, "存在" if ok else "缺失"))
     revision_ok = (
         config.dataset.official_revision == OFFICIAL_REVISION
         and config.dataset.subset_revision == SUBSET_REVISION
     )
     checks.append(
         Check(
-            "dataset.revisions",
+            f"dataset.{task_id}.revisions",
             revision_ok,
             "与锁定版本一致" if revision_ok else "与锁定版本不一致",
         )
@@ -82,8 +91,16 @@ def check_dataset(config: ProjectConfig, project_root: Path) -> list[Check]:
 
 def check_assets(config: ProjectConfig, project_root: Path) -> list[Check]:
     checks: list[Check] = []
-    task_id = config.dataset.task_id
-    assets_dir = _resolve(project_root, config.dataset.assets_dir)
+    for task_id in select_task_ids(config, project_root):
+        checks.extend(_check_assets_one(config, project_root, task_id))
+    return checks
+
+
+def _check_assets_one(
+    config: ProjectConfig, project_root: Path, task_id: str
+) -> list[Check]:
+    checks: list[Check] = []
+    assets_dir = _resolve(project_root, config.dataset.tasks_dir) / task_id
     official = subset = None
     try:
         official = _read_exact_row(_resolve(project_root, config.dataset.official_path), task_id)
@@ -101,15 +118,20 @@ def check_assets(config: ProjectConfig, project_root: Path) -> list[Check]:
         "eval_script.offline.sh",
         "gold.patch",
         "test.patch",
+        "manifest.json",
     ):
         checks.append(
-            Check(f"assets.exists.{name}", _text(name) is not None, str(assets_dir / name))
+            Check(
+                f"assets.{task_id}.exists.{name}",
+                _text(name) is not None,
+                str(assets_dir / name),
+            )
         )
     original, offline = _text("eval_script.sh"), _text("eval_script.offline.sh")
     if subset is not None and original is not None:
         checks.append(
             Check(
-                "assets.eval_script_matches_dataset",
+                f"assets.{task_id}.eval_script_matches_dataset",
                 original == subset.get("eval_script"),
                 "eval_script.sh 与数据集行一致" if original == subset.get("eval_script") else "不一致",
             )
@@ -120,21 +142,41 @@ def check_assets(config: ProjectConfig, project_root: Path) -> list[Check]:
             detail = "离线化正确" if ok else "离线脚本不等于受控替换"
         except SWEGymContractError as exc:
             ok, detail = False, str(exc)
-        checks.append(Check("assets.offline_transform", ok, detail))
+        checks.append(Check(f"assets.{task_id}.offline_transform", ok, detail))
     if official is not None:
         gold, test_patch = _text("gold.patch"), _text("test.patch")
         if gold is not None:
             checks.append(
-                Check("assets.gold_matches_patch", gold == official.get("patch"), "gold.patch")
+                Check(
+                    f"assets.{task_id}.gold_matches_patch",
+                    gold == official.get("patch"),
+                    "gold.patch",
+                )
             )
         if test_patch is not None:
             checks.append(
                 Check(
-                    "assets.test_matches_test_patch",
+                    f"assets.{task_id}.test_matches_test_patch",
                     test_patch == official.get("test_patch"),
                     "test.patch",
                 )
             )
+    manifest_path = assets_dir / "manifest.json"
+    manifest = None
+    if manifest_path.is_file():
+        try:
+            manifest = _read_object(manifest_path)
+            for name, expected_hash in (manifest.get("files") or {}).items():
+                _require_sha256(assets_dir / name, expected_hash)
+            checks.append(
+                Check(
+                    f"assets.{task_id}.manifest_hashes",
+                    True,
+                    "manifest 文件哈希全部一致",
+                )
+            )
+        except SWEGymContractError as exc:
+            checks.append(Check(f"assets.{task_id}.manifest_hashes", False, str(exc)))
     selected_path = assets_dir / "selected_instance.json"
     if selected_path.is_file() and official is not None:
         try:
@@ -146,30 +188,23 @@ def check_assets(config: ProjectConfig, project_root: Path) -> list[Check]:
                 != _normalize(task_id if field == "instance_id" else
                               official.get(field) if field != "eval_script" else subset.get(field))
             ]
-            if _normalize(selected.get("image_name")) != _normalize(config.docker.image):
+            if manifest is None or _normalize(selected.get("image_name")) != _normalize(
+                manifest.get("image_name")
+            ):
                 mismatched.append("image_name")
             checks.append(
                 Check(
-                    "assets.selected_instance",
+                    f"assets.{task_id}.selected_instance",
                     not mismatched,
                     "一致" if not mismatched else f"字段不一致: {', '.join(mismatched)}",
                 )
             )
         except SWEGymContractError as exc:
-            checks.append(Check("assets.selected_instance", False, str(exc)))
-    manifest_path = assets_dir / "manifest.json"
-    if manifest_path.is_file():
-        try:
-            manifest = _read_object(manifest_path)
-            for name, expected_hash in (manifest.get("files") or {}).items():
-                _require_sha256(assets_dir / name, expected_hash)
-            checks.append(Check("assets.manifest_hashes", True, "manifest 文件哈希全部一致"))
-        except SWEGymContractError as exc:
-            checks.append(Check("assets.manifest_hashes", False, str(exc)))
+            checks.append(Check(f"assets.{task_id}.selected_instance", False, str(exc)))
     return checks
 
 
-def check_docker(config: ProjectConfig) -> list[Check]:
+def check_docker(config: ProjectConfig, project_root: Path) -> list[Check]:
     from swe_agent.docker import DockerRuntimeError, SubprocessDockerClient, inspect_image
     from swe_agent.models import Environment
 
@@ -178,24 +213,33 @@ def check_docker(config: ProjectConfig) -> list[Check]:
     except DockerRuntimeError as exc:
         return [Check("docker.daemon", False, str(exc))]
     checks = [Check("docker.daemon", True, client.docker_host)]
-    try:
-        probe = Environment(
-            environment_id="qualify",
-            task_id=config.dataset.task_id,
-            image_name=config.docker.image,
-            expected_image_id=config.docker.expected_image_id,
-            expected_registry_digest=config.docker.expected_registry_digest,
-            workdir="/testbed",
-            cpus=config.docker.cpus,
-            memory=config.docker.memory,
-            pids_limit=config.docker.pids_limit,
-            exec_timeout_sec=config.docker.exec_timeout_sec,
-            verifier_timeout_sec=config.docker.verifier_timeout_sec,
-        )
-        inspect_image(client, probe)
-        checks.append(Check("docker.image", True, f"{config.docker.image} id 匹配"))
-    except Exception as exc:
-        checks.append(Check("docker.image", False, str(exc)))
+    tasks_dir = _resolve(project_root, config.dataset.tasks_dir)
+    for task_id in select_task_ids(config, project_root):
+        try:
+            manifest = _read_object(tasks_dir / task_id / "manifest.json")
+            probe = Environment(
+                environment_id=f"qualify:{task_id}",
+                task_id=task_id,
+                image_name=manifest["image_name"],
+                expected_image_id=manifest["expected_image_id"],
+                expected_registry_digest=manifest["expected_registry_digest"],
+                workdir="/testbed",
+                cpus=config.docker.cpus,
+                memory=config.docker.memory,
+                pids_limit=config.docker.pids_limit,
+                exec_timeout_sec=config.docker.exec_timeout_sec,
+                verifier_timeout_sec=config.docker.verifier_timeout_sec,
+            )
+            inspect_image(client, probe)
+            checks.append(
+                Check(
+                    f"docker.{task_id}.image",
+                    True,
+                    f"{probe.image_name} id 匹配",
+                )
+            )
+        except Exception as exc:
+            checks.append(Check(f"docker.{task_id}.image", False, str(exc)))
     return checks
 
 
@@ -271,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     checks.extend(check_dataset(config, project_root))
     checks.extend(check_assets(config, project_root))
     if not args.no_docker:
-        checks.extend(check_docker(config))
+        checks.extend(check_docker(config, project_root))
     checks.extend(check_tokenizer(config))
     checks.extend(check_gpu())
 

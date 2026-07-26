@@ -48,25 +48,45 @@ class SWEGymContractError(RuntimeError):
 TaskContext = Mapping[str, tuple[Sample, Evaluation]]
 
 
-def load_qualified_instance(config: ProjectConfig, project_root: Path) -> tuple[Sample, Evaluation]:
-    """加载一个任务；只保留加载所必需的完整性检查。"""
+def select_task_ids(config: ProjectConfig, project_root: Path) -> list[str]:
+    """按配置从资产目录选择确定且非空的任务列表。"""
 
-    task_id = config.dataset.task_id
+    tasks_dir = _resolve(project_root, config.dataset.tasks_dir)
+    if config.dataset.task_ids is not None:
+        selected = sorted(config.dataset.task_ids)
+    else:
+        try:
+            selected = sorted(path.name for path in tasks_dir.iterdir() if path.is_dir())
+        except OSError as exc:
+            raise SWEGymContractError(f"failed to list task assets under {tasks_dir}: {exc}") from exc
+    if config.dataset.max_tasks is not None:
+        selected = selected[: config.dataset.max_tasks]
+    if not selected:
+        raise SWEGymContractError(f"no task assets found under {tasks_dir}")
+    return selected
+
+
+def load_task_instance(
+    config: ProjectConfig, project_root: Path, task_id: str
+) -> tuple[Sample, Evaluation]:
+    """从一个任务的锁定数据和自包含资产构造运行时上下文。"""
+
     official_path = _resolve(project_root, config.dataset.official_path)
     subset_path = _resolve(project_root, config.dataset.subset_path)
-    assets_dir = _resolve(project_root, config.dataset.assets_dir)
 
     official = _read_exact_row(official_path, task_id)
     subset = _read_exact_row(subset_path, task_id)
     eval_script = subset.get("eval_script")
     if not isinstance(eval_script, str) or not eval_script.strip():
-        raise SWEGymContractError("derived dataset is missing eval_script")
+        raise SWEGymContractError(f"{task_id}: derived dataset is missing eval_script")
 
+    assets_dir = _resolve(project_root, config.dataset.tasks_dir) / task_id
     offline_path = assets_dir / "eval_script.offline.sh"
     try:
         offline = offline_path.read_text(encoding="utf-8")
     except OSError as exc:
         raise SWEGymContractError(f"missing offline evaluator asset: {offline_path}") from exc
+    manifest = _read_object(assets_dir / "manifest.json")
 
     task = Task(
         task_id=task_id,
@@ -77,9 +97,9 @@ def load_qualified_instance(config: ProjectConfig, project_root: Path) -> tuple[
     environment = Environment(
         environment_id=f"swegym:{task_id}",
         task_id=task_id,
-        image_name=config.docker.image,
-        expected_image_id=config.docker.expected_image_id,
-        expected_registry_digest=config.docker.expected_registry_digest,
+        image_name=manifest["image_name"],
+        expected_image_id=manifest["expected_image_id"],
+        expected_registry_digest=manifest["expected_registry_digest"],
         workdir="/testbed",
         cpus=config.docker.cpus,
         memory=config.docker.memory,
@@ -91,29 +111,45 @@ def load_qualified_instance(config: ProjectConfig, project_root: Path) -> tuple[
 
 
 def load_task_context(config: ProjectConfig, project_root: Path) -> TaskContext:
-    sample, evaluation = load_qualified_instance(config, project_root)
-    return MappingProxyType({sample.task.task_id: (sample, evaluation)})
+    return MappingProxyType(
+        {
+            task_id: load_task_instance(config, project_root, task_id)
+            for task_id in select_task_ids(config, project_root)
+        }
+    )
 
 
-def build_training_dataset(sample: Sample) -> Dataset:
-    """构造只含公开 task_id 与 prompt 的单任务 TRL Dataset。"""
+def build_training_dataset(context: TaskContext) -> Dataset:
+    """构造每个选中任务一行的公开 TRL Dataset。"""
 
     return Dataset.from_list(
-        [{"task_id": sample.task.task_id, "prompt": build_prompt(sample.task)}]
+        [
+            {"task_id": task_id, "prompt": build_prompt(sample.task)}
+            for task_id, (sample, _) in context.items()
+        ]
     )
 
 
 def transform_eval_script_offline(script: str) -> str:
     lines = script.splitlines(keepends=True)
-    indexes = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == "make init"]
-    if len(indexes) != 1:
+    make_init = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == "make init"]
+    pip_install = [
+        index
+        for index, line in enumerate(lines)
+        if line.rstrip("\r\n").startswith("python -m pip install") and "pip install -e ." in line
+    ]
+    hits = len(make_init) + len(pip_install)
+    if hits != 1:
         raise SWEGymContractError(
-            f"eval_script must contain exactly one standalone make init; found {len(indexes)}"
+            "eval_script must contain exactly one install line "
+            "(standalone make init or python -m pip install); "
+            f"found {hits} (make init: {len(make_init)}, pip install: {len(pip_install)})"
         )
+    index = make_init[0] if make_init else pip_install[0]
     replacement = OFFLINE_REPLACEMENT
-    if lines[indexes[0]].endswith("\r\n"):
+    if lines[index].endswith("\r\n"):
         replacement = replacement.replace("\n", "\r\n")
-    lines[indexes[0] : indexes[0] + 1] = [replacement]
+    lines[index : index + 1] = [replacement]
     return "".join(lines)
 
 

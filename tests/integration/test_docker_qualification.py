@@ -8,7 +8,7 @@ import pytest
 from swe_agent.config import load_config
 from swe_agent.docker import DockerSandbox, SubprocessDockerClient, inspect_image
 from swe_agent.models import Action
-from swe_agent.swegym import load_qualified_instance
+from swe_agent.swegym import load_task_instance
 from swe_agent.tools import ToolExecutor, validate_tool_arguments
 from swe_agent.verifier import SWEGymVerifier
 
@@ -17,12 +17,13 @@ pytestmark = pytest.mark.docker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+TASK_ID = "getmoto__moto-7023"
 
 
 @pytest.fixture(scope="module")
 def domain():
     config, project_root, _ = load_config(CONFIG_PATH)
-    sample, evaluation = load_qualified_instance(config, project_root)
+    sample, evaluation = load_task_instance(config, project_root, TASK_ID)
     return config, sample, evaluation
 
 
@@ -103,7 +104,7 @@ def test_real_six_tool_executor_and_nonempty_submit(domain) -> None:
 
 def test_gold_patch_resolves_in_fresh_verifier_container(domain) -> None:
     config, _, evaluation = domain
-    patch = (Path(config.dataset.assets_dir) / "gold.patch").read_text(encoding="utf-8")
+    patch = (Path(config.dataset.tasks_dir) / TASK_ID / "gold.patch").read_text(encoding="utf-8")
     verifier = SWEGymVerifier(
         sandbox_factory=lambda: sandbox_for(domain, "verifier"),
         evaluation=evaluation,

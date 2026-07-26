@@ -102,9 +102,6 @@ def test_run_id_and_initial_files_have_exact_contract(tmp_path: Path) -> None:
         "generation_backend",
         "official_dataset_revision",
         "subset_dataset_revision",
-        "task_id",
-        "image_tag",
-        "image_id",
         "image_platform",
         "seed",
     }
@@ -148,10 +145,10 @@ def test_run_id_and_initial_files_have_exact_contract(tmp_path: Path) -> None:
 def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
     recorder = RunRecorder(config=configured_for(tmp_path), seed=7, run_id="run-a")
     prompt = [{"role": "user", "content": "repair it"}]
-    rollout_dirs = recorder.begin_group(prompt, 4)
+    rollout_dirs = recorder.begin_group(prompt, 4, task_id="getmoto__moto-7023")
     assert [path.name for path in rollout_dirs] == ["0000", "0001", "0002", "0003"]
     with pytest.raises(RuntimeError, match="previous group must complete"):
-        recorder.begin_group(prompt, 4)
+        recorder.begin_group(prompt, 4, task_id="getmoto__moto-7023")
 
     batch_path = recorder.output_dir / "rollouts/batch-0000/batch.json"
     group_path = recorder.output_dir / "rollouts/batch-0000/group-0000/group.json"
@@ -171,6 +168,7 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
         "consumed_by_global_steps",
     }
     assert batch["state"] == "running"
+    assert batch["task_id"] == "getmoto__moto-7023"
     assert batch["global_step_at_generation"] == 0
     assert batch["groups"] == ["group-0000"]
     assert batch["consumed_by_global_steps"] == []
@@ -189,6 +187,7 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
         "degenerate",
         "verification_counts",
     }
+    assert group["task_id"] == "getmoto__moto-7023"
 
     messages = prompt + [{"role": "assistant", "content": "done"}]
     first_verification = verification()
@@ -245,9 +244,22 @@ def test_first_group_rollout_and_consumption_files(tmp_path: Path) -> None:
     assert load_json(recorder.output_dir / "run.json")["training"]["global_step"] == 1
 
 
+def test_native_policy_path_observation_is_monotonic(tmp_path: Path) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="native-path-run")
+
+    recorder.observe_native_policy_path(False)
+    recorder.observe_native_policy_path(True)
+    recorder.observe_native_policy_path(False)
+
+    assert recorder.run["training"]["native_policy_path_reached"] is True
+    assert load_json(recorder.output_dir / "run.json")["training"][
+        "native_policy_path_reached"
+    ] is True
+
+
 def test_failure_and_interruption_finish_active_indexes(tmp_path: Path) -> None:
     recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="failed-run")
-    recorder.begin_group("prompt", 4)
+    recorder.begin_group("prompt", 4, task_id="getmoto__moto-7023")
     recorder.update_training(
         system_closed_loop="failed",
         native_policy_path_reached=False,
@@ -270,7 +282,7 @@ def test_failure_and_interruption_finish_active_indexes(tmp_path: Path) -> None:
     interrupted = RunRecorder(
         config=configured_for(tmp_path), seed=2, run_id="interrupted-run"
     )
-    interrupted.begin_group("prompt", 4)
+    interrupted.begin_group("prompt", 4, task_id="getmoto__moto-7023")
     interrupted.fail(
         category="trainer",
         primary_type="KeyboardInterrupt",
@@ -301,6 +313,7 @@ def test_cleanup_history_residuals_and_completion_gate(tmp_path: Path) -> None:
     }
     common = {
         "scope": "rollout",
+        "task_id": "getmoto__moto-7023",
         "episode_id": "episode-1",
         "container_name": "rollout-1",
         "container_id": "a" * 64,

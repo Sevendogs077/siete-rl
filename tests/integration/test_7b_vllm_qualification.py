@@ -14,6 +14,7 @@ pytestmark = [pytest.mark.gpu, pytest.mark.vllm]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+TASK_ID = "getmoto__moto-7023"
 
 
 class QualificationEnvironment:
@@ -65,7 +66,7 @@ def test_qwen25_colocate_sleep_generate_and_peft_weight_sync(tmp_path: Path) -> 
     )
     rows = [
         {
-            "task_id": config.dataset.task_id,
+            "task_id": TASK_ID,
             "prompt": [{"role": "user", "content": "Reply with OK."}],
         }
         for _ in range(config.grpo.num_generations)

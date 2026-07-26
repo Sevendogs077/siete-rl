@@ -22,9 +22,10 @@ FAILED="$STATE_DIR/pull_failed.txt"
 mapfile -t tags < <(.venv/bin/python - "$PARQUET" <<'EOF'
 import sys
 import pyarrow.parquet as pq
+from swe_agent.asset_generation import image_tag_for
 t = pq.read_table(sys.argv[1])
 for i in t.column('instance_id').to_pylist():
-    print(f'docker.io/xingyaoww/sweb.eval.x86_64.{i.replace("__", "_s_")}:latest')
+    print(image_tag_for(i))
 EOF
 )
 echo "[$(date -Is)] total ${#tags[@]} tags, mirror=$MIRROR, concurrency=$CONCURRENCY" | tee -a "$LOG"
@@ -56,5 +57,44 @@ export LOG FAILED MIRROR RETRIES
 
 printf '%s\n' "${tags[@]}" | xargs -P "$CONCURRENCY" -I{} bash -c 'pull_one "$@"' _ {} || true
 
-ok=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^docker.io/xingyaoww/sweb.eval.x86_64\.' || true)
+ok=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^xingyaoww/sweb.eval.x86_64\.' || true)
 echo "[$(date -Is)] done: $ok/${#tags[@]} images present; failures listed in $FAILED" | tee -a "$LOG"
+
+echo "[$(date -Is)] generating task assets" | tee -a "$LOG"
+.venv/bin/python - "$PARQUET" "$MIRROR" <<'EOF'
+import sys
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+from swe_agent.asset_generation import fetch_registry_digest, generate_task_assets, image_tag_for
+from swe_agent.docker import SubprocessDockerClient
+from swe_agent.swegym import OFFICIAL_REVISION, SUBSET_REVISION
+
+parquet = sys.argv[1]
+mirror = sys.argv[2]
+rows = pq.read_table(parquet, columns=["instance_id"]).to_pylist()
+client = SubprocessDockerClient()
+official = Path(f"data/swegym/SWE-Gym__SWE-Gym/{OFFICIAL_REVISION}/data/train-00000-of-00001.parquet")
+for row in rows:
+    task_id = row["instance_id"]
+    tag = image_tag_for(task_id)
+    inspected = client.run(["docker", "image", "inspect", tag, "--format", "{{.Id}}"], timeout_sec=30)
+    if inspected.exit_code != 0:
+        raise SystemExit(f"image missing in dedicated daemon, run prepare.sh pull first: {tag}")
+    image_id = inspected.stdout.strip()
+    if not image_id.startswith("sha256:"):
+        raise SystemExit(f"docker image inspect 未返回 sha256 镜像 ID: {tag} -> {image_id!r}")
+    generate_task_assets(
+        task_id=task_id,
+        official_path=official,
+        subset_path=Path(parquet),
+        assets_dir=Path("assets/swegym"),
+        image=tag,
+        image_id=image_id,
+        registry_digest=fetch_registry_digest(mirror, task_id),
+        official_revision=OFFICIAL_REVISION,
+        subset_revision=SUBSET_REVISION,
+    )
+    print(f"assets OK {task_id}")
+EOF

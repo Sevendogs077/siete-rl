@@ -24,7 +24,7 @@ from swe_agent.verifier import SWEGymVerifier
 
 
 SandboxFactory = Callable[[Sample, str, Literal["rollout", "verifier"]], DockerSandbox]
-VerifierFactory = Callable[[Evaluation, str], SWEGymVerifier]
+VerifierFactory = Callable[[Sample, Evaluation, str], SWEGymVerifier]
 
 
 class SWEEnvironment:
@@ -298,7 +298,9 @@ class SWEEnvironment:
             raise RuntimeError("submitted episode is missing its frozen patch")
         self._close_rollout()
         if self._verifier is None:
-            self._verifier = self._verifier_factory(self._evaluation, self.episode_id)
+            self._verifier = self._verifier_factory(
+                self._sample, self._evaluation, self.episode_id
+            )
         try:
             self._verification = self._verifier.verify(self._frozen_patch)
         finally:
@@ -318,6 +320,7 @@ class SWEEnvironment:
                 {
                     "scope": "rollout",
                     "episode_id": self.episode_id,
+                    "task_id": sandbox.environment.task_id,
                     "container_name": sandbox.container_name,
                     "container_id": getattr(sandbox, "acquired_container_id", sandbox.container_id),
                     "operations": sandbox.drain_cleanup_operations(),

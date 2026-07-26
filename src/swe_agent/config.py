@@ -19,18 +19,28 @@ class StrictConfig(BaseModel):
 
 
 class DatasetConfig(StrictConfig):
-    task_id: str = Field(min_length=1)
+    tasks_dir: str = Field(min_length=1)
+    task_ids: tuple[str, ...] | None = Field(default=None, min_length=1)
+    max_tasks: int | None = Field(default=None, ge=1)
     official_path: str
     official_revision: str = Field(min_length=40, max_length=40)
     subset_path: str
     subset_revision: str = Field(min_length=40, max_length=40)
-    assets_dir: str
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> Self:
+        if self.task_ids is not None and len(set(self.task_ids)) != len(self.task_ids):
+            raise ValueError("task_ids must not contain duplicates")
+        if (
+            self.task_ids is not None
+            and self.max_tasks is not None
+            and len(self.task_ids) != self.max_tasks
+        ):
+            raise ValueError("task_ids and max_tasks disagree in count")
+        return self
 
 
 class DockerConfig(StrictConfig):
-    image: str = Field(min_length=1)
-    expected_image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    expected_registry_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     platform: Literal["linux/amd64"]
     pull_policy: Literal["never"]
     network_mode: Literal["none"]
@@ -252,7 +262,7 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
                 update={
                     "official_path": resolve_path(project_root, config.dataset.official_path),
                     "subset_path": resolve_path(project_root, config.dataset.subset_path),
-                    "assets_dir": resolve_path(project_root, config.dataset.assets_dir),
+                    "tasks_dir": resolve_path(project_root, config.dataset.tasks_dir),
                 }
             ),
             "model": config.model.model_copy(

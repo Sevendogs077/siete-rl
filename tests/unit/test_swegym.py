@@ -7,58 +7,63 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from swe_agent import swegym
 from swe_agent.config import load_config
 from swe_agent.models import Evaluation
-from swe_agent import swegym
 from swe_agent.swegym import (
     SWEGymContractError,
     build_training_dataset,
-    load_qualified_instance,
     load_task_context,
+    load_task_instance,
     transform_eval_script_offline,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+TASK_ID = "getmoto__moto-7023"
 
 
 @pytest.fixture(scope="module")
 def loaded():
     config, project_root, _ = load_config(CONFIG_PATH)
-    sample, evaluation = load_qualified_instance(config, project_root)
+    sample, evaluation = load_task_instance(config, project_root, TASK_ID)
     return config, project_root, sample, evaluation
 
 
 def test_real_two_table_assets_and_runtime_boundary(loaded) -> None:
-    config, _, sample, evaluation = loaded
-    assert sample.task.task_id == "getmoto__moto-7023"
+    _, _, sample, evaluation = loaded
+    assert sample.task.task_id == TASK_ID
     assert sample.task.repo_name == "getmoto/moto"
     assert sample.task.base_commit == "447710c6a68e7d5ea7ad6d7df93c663de32ac7f1"
-    assert sample.environment.image_name == config.docker.image
-    assert sample.environment.expected_image_id == config.docker.expected_image_id
+    assert sample.environment.image_name.endswith("getmoto_s_moto-7023:latest")
+    assert sample.environment.expected_image_id.startswith("sha256:")
     assert set(Evaluation.model_fields) == {"offline_eval_script"}
     assert "PIP_NO_INDEX=1" in evaluation.offline_eval_script
 
 
-def test_task_context_is_read_only_and_keyed_by_task_id(loaded) -> None:
+def test_task_context_covers_all_selected_tasks_and_is_read_only(loaded) -> None:
     config, project_root, sample, evaluation = loaded
     context = load_task_context(config, project_root)
-    assert context[sample.task.task_id] == (sample, evaluation)
+    assert len(context) >= 2
+    assert context[TASK_ID] == (sample, evaluation)
+    assert context[TASK_ID][0].environment.image_name.endswith("getmoto_s_moto-7023:latest")
+    assert "PIP_NO_INDEX=1" in context[TASK_ID][1].offline_eval_script
+    assert len(build_training_dataset(context)) == len(context)
     with pytest.raises(TypeError):
         context["other"] = (sample, evaluation)  # type: ignore[index]
 
 
 def test_dataset_and_prompt_contain_only_public_fields(loaded) -> None:
-    _, _, sample, evaluation = loaded
-    dataset = build_training_dataset(sample)
+    config, project_root, sample, evaluation = loaded
+    dataset = build_training_dataset(load_task_context(config, project_root))
     assert dataset.column_names == ["task_id", "prompt"]
-    assert len(dataset) == 1
+    assert len(dataset) >= 2
     public_payload = json.dumps(
-        {"sample": sample.model_dump(mode="json"), "row": dataset[0]},
+        {"sample": sample.model_dump(mode="json"), "rows": list(dataset)},
         ensure_ascii=False,
     )
-    assets = PROJECT_ROOT / "assets/swegym/getmoto__moto-7023"
+    assets = Path(config.dataset.tasks_dir) / TASK_ID
     for secret in (
         (assets / "gold.patch").read_text(encoding="utf-8"),
         (assets / "test.patch").read_text(encoding="utf-8"),
@@ -86,7 +91,7 @@ def test_exactly_one_parquet_row_is_required(tmp_path: Path) -> None:
 
 def test_offline_transform_is_exact_and_fail_closed(loaded) -> None:
     config, _, _, _ = loaded
-    assets = Path(config.dataset.assets_dir)
+    assets = Path(config.dataset.tasks_dir) / TASK_ID
     original = (assets / "eval_script.sh").read_text(encoding="utf-8")
     offline = (assets / "eval_script.offline.sh").read_text(encoding="utf-8")
     assert transform_eval_script_offline(original) == offline
@@ -94,3 +99,19 @@ def test_offline_transform_is_exact_and_fail_closed(loaded) -> None:
         transform_eval_script_offline("echo no-init\n")
     with pytest.raises(SWEGymContractError, match="exactly one"):
         transform_eval_script_offline("make init\nmake init\n")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "python -m pip install -r test-requirements.txt; python -m pip install -e .; hash -r\npytest -q\n",
+        "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r;\npytest -q\n",
+        "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r\npytest -q\n",
+    ],
+)
+def test_offline_transform_replaces_mypy_pip_install_line(script: str) -> None:
+    offline = transform_eval_script_offline(script)
+    assert "PIP_NO_INDEX=1" in offline
+    assert "pip install -r test-requirements.txt" not in offline
+    # OFFLINE_REPLACEMENT 注释里提及 `make init`；这里断言不存在独立的 make init 行。
+    assert all(line != "make init" for line in offline.splitlines())

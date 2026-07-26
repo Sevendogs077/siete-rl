@@ -58,11 +58,10 @@ def test_shared_training_contract_is_fixed() -> None:
         == config.model.context_length
     )
     # GRPO 组约束：generation batch 必须整除出完整的组；
-    # 且单任务数据集（1 行）下，RepeatSampler 每 batch 的 unique prompt 数不能超过 1，
-    # 否则采样器产出 0 条、训练 0 步空转
+    # 多任务数据集最多 100 行，RepeatSampler 每 batch 的 unique prompt 数不能超过数据集行数。
     assert config.grpo.num_generations >= 2
     assert config.grpo.generation_batch_size % config.grpo.num_generations == 0
-    assert config.grpo.generation_batch_size // config.grpo.num_generations <= 1
+    assert config.grpo.generation_batch_size // config.grpo.num_generations <= 100
     # TRL 节拍对齐：generation_batch_size == pdbs × steps_per_generation（缺省取 accum）
     steps_per_generation = (
         config.grpo.steps_per_generation or config.grpo.gradient_accumulation_steps
@@ -74,6 +73,58 @@ def test_shared_training_contract_is_fixed() -> None:
     assert config.grpo.max_steps >= 1
     assert config.vllm.use_vllm is True
     assert config.vllm.enable_sleep_mode is (config.vllm.mode == "colocate")
+    assert config.dataset.tasks_dir.endswith("assets/swegym")
+    assert config.dataset.task_ids is None or len(config.dataset.task_ids) >= 1
+    assert not hasattr(config.docker, "image")
+
+
+def test_task_ids_and_max_tasks_count_mismatch_is_rejected() -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["dataset"]["task_ids"] = ["a", "b"]
+    payload["dataset"]["max_tasks"] = 3
+    with pytest.raises(ValidationError, match="disagree"):
+        ProjectConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("task_ids", "max_tasks"),
+    [
+        (["a", "b"], 2),
+        (None, 8),
+        (["a"], None),
+    ],
+)
+def test_task_selection_accepts_consistent_combinations(
+    task_ids: list[str] | None, max_tasks: int | None
+) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["dataset"].update(task_ids=task_ids, max_tasks=max_tasks)
+
+    validated = ProjectConfig.model_validate(payload)
+
+    assert validated.dataset.task_ids == (tuple(task_ids) if task_ids is not None else None)
+    assert validated.dataset.max_tasks == max_tasks
+
+
+@pytest.mark.parametrize(
+    ("task_ids", "max_tasks", "match"),
+    [
+        (None, 0, "greater than or equal to 1"),
+        ([], None, "at least 1 item"),
+        (["a", "a"], None, "must not contain duplicates"),
+    ],
+)
+def test_task_selection_rejects_invalid_values(
+    task_ids: list[str] | None, max_tasks: int | None, match: str
+) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["dataset"].update(task_ids=task_ids, max_tasks=max_tasks)
+
+    with pytest.raises(ValidationError, match=match):
+        ProjectConfig.model_validate(payload)
 
 
 def test_extra_fields_are_rejected() -> None:

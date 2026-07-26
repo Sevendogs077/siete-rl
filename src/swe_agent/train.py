@@ -90,7 +90,10 @@ def preflight(config: ProjectConfig, project_root: Path) -> dict[str, Any]:
     ]
     return {
         "status": "preflight_passed",
-        "task_id": config.dataset.task_id,
+        "task_selection": {
+            "task_ids": list(config.dataset.task_ids) if config.dataset.task_ids else None,
+            "max_tasks": config.dataset.max_tasks,
+        },
         "model": config.model.provenance_id,
         "model_path": model_path.resolve().as_posix(),
         "vllm_mode": config.vllm.mode,
@@ -339,9 +342,8 @@ def _run_once(
         gpu_baseline = _gpu_baseline(physical_device)
         stage = "load_task"
         task_context = load_task_context(config, project_root)
-        sample, _ = task_context[config.dataset.task_id]
-        dataset = build_training_dataset(sample)
-        prompt = dataset[0]["prompt"]
+        dataset = build_training_dataset(task_context)
+        recorder.log(f"task context ready: {len(task_context)} tasks")
 
         docker_client = SubprocessDockerClient()
         # atexit 兜底：即使 finally 被 KeyboardInterrupt 截断，孤儿容器也会在进程退出时被清扫
@@ -357,9 +359,9 @@ def _run_once(
                 scope=scope,
             )
 
-        def verifier_factory(evaluation, episode_id: str):
+        def verifier_factory(sample_arg, evaluation, episode_id: str):
             return SWEGymVerifier(
-                sandbox_factory=lambda: sandbox_factory(sample, episode_id, "verifier"),
+                sandbox_factory=lambda: sandbox_factory(sample_arg, episode_id, "verifier"),
                 evaluation=evaluation,
             )
 
@@ -392,7 +394,10 @@ def _run_once(
         from transformers import set_seed
 
         set_seed(seed)
-        _validate_rendered_prompt_length(trainer, prompt, config.chat.max_prompt_length)
+        for row in dataset:
+            _validate_rendered_prompt_length(
+                trainer, row["prompt"], config.chat.max_prompt_length
+            )
         pre_step_adapter = _adapter_state(trainer.model)
         recorder.log("trainer constructed; rollout policy global_step=0")
 
@@ -532,7 +537,7 @@ def _run_once(
                     "interrupted": "False",
                 }
 
-    native_policy_path_reached = _native_policy_path_reached(environments)
+    native_policy_path_reached = recorder.run["training"]["native_policy_path_reached"] is True
     system_passed = native_policy_path_reached and trainer_group_consumed
     recorder.update_training(
         system_closed_loop="passed" if system_passed else "failed",
@@ -581,10 +586,21 @@ def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]])
     ) -> list[float]:
         if not (len(prompts) == len(completions) == len(environments)) or not completions:
             raise RecordingRuntimeError("reward requires aligned non-empty rollouts")
-        recorder.begin_group(prompts[0], len(completions))
         rewards: list[float] = []
         try:
             rewards = reward_adapter(completions=completions, environments=environments, **kwargs)
+            task_ids = {
+                environment.trajectory.task_id
+                for environment in environments
+                if environment.trajectory is not None
+            }
+            if len(task_ids) > 1:
+                raise RecordingRuntimeError(f"group mixes tasks: {sorted(task_ids)}")
+            recorder.begin_group(
+                prompts[0],
+                len(completions),
+                task_id=next(iter(task_ids), "unknown"),
+            )
             for index, (prompt, completion, environment) in enumerate(
                 zip(prompts, completions, environments, strict=True)
             ):
@@ -600,6 +616,7 @@ def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]])
                 rewards=rewards,
                 verifications=[environment.verification for environment in environments],
             )
+            recorder.observe_native_policy_path(_native_policy_path_reached(environments))
             return rewards
         except RecordingRuntimeError:
             raise

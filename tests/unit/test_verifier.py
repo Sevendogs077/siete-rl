@@ -9,13 +9,14 @@ import pytest
 from swe_agent.config import load_config
 from swe_agent.docker import CommandResult, ContainerCleanupError, DockerRuntimeError
 from swe_agent.models import Evaluation
-from swe_agent.swegym import load_qualified_instance
+from swe_agent.swegym import load_task_instance
 from swe_agent.verifier import SWEGymVerifier, VerificationInfrastructureError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
 PATCH = "diff --git a/x b/x\n"
+TASK_ID = "getmoto__moto-7023"
 
 
 def command_result(
@@ -77,7 +78,7 @@ class FakeSandbox:
 @pytest.fixture(scope="module")
 def domain():
     config, project_root, _ = load_config(CONFIG_PATH)
-    sample, evaluation = load_qualified_instance(config, project_root)
+    sample, evaluation = load_task_instance(config, project_root, TASK_ID)
     return sample.environment, evaluation
 
 

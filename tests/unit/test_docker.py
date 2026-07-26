@@ -20,12 +20,13 @@ from swe_agent.docker import (
     inspect_image,
     sweep_run_containers,
 )
-from swe_agent.swegym import load_qualified_instance
+from swe_agent.swegym import load_task_instance
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
 CONTAINER_ID = "a" * 64
+TASK_ID = "getmoto__moto-7023"
 
 
 def result(
@@ -76,7 +77,7 @@ class FakeClient:
 @pytest.fixture(scope="module")
 def domain():
     config, project_root, _ = load_config(CONFIG_PATH)
-    sample, _ = load_qualified_instance(config, project_root)
+    sample, _ = load_task_instance(config, project_root, TASK_ID)
     return sample.task, sample.environment
 
 

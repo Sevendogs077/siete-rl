@@ -17,6 +17,7 @@ from swe_agent.swegym import load_task_context
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+TASK_ID = "getmoto__moto-7023"
 
 
 def command_result(
@@ -131,9 +132,10 @@ def harness():
         sandboxes.append(sandbox)
         return sandbox
 
-    def verifier_factory(evaluation: Evaluation, episode_id: str):
+    def verifier_factory(sample, evaluation: Evaluation, episode_id: str):
         del evaluation, episode_id
         verifier = FakeVerifier()
+        verifier.sample = sample
         verifiers.append(verifier)
         return verifier
 
@@ -166,21 +168,21 @@ def test_constructor_has_no_side_effect_and_exact_six_methods_are_tools(harness)
 
 
 def test_reset_creates_fresh_sandbox_only_after_old_cleanup(harness) -> None:
-    config, environment, sandboxes, _ = harness
-    environment.reset(config.dataset.task_id, prompt="ignored")
+    _, environment, sandboxes, _ = harness
+    environment.reset(TASK_ID, prompt="ignored")
     first = sandboxes[0]
-    environment.reset(config.dataset.task_id)
+    environment.reset(TASK_ID)
     assert first.container_id is None
     assert len(sandboxes) == 2
     assert sandboxes[1] is not first
 
 
 def test_cleanup_failure_blocks_next_reset_and_preserves_handle(harness) -> None:
-    config, environment, sandboxes, _ = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, _ = harness
+    environment.reset(TASK_ID)
     sandboxes[0].close_failures = 1
     with pytest.raises(ContainerCleanupError, match="remove failed"):
-        environment.reset(config.dataset.task_id)
+        environment.reset(TASK_ID)
     assert len(sandboxes) == 1
     assert sandboxes[0].container_id is not None
     environment._close()
@@ -188,8 +190,8 @@ def test_cleanup_failure_blocks_next_reset_and_preserves_handle(harness) -> None
 
 
 def test_multiple_calls_record_contiguous_steps_and_policy_failure(harness) -> None:
-    config, environment, sandboxes, verifiers = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, verifiers = harness
+    environment.reset(TASK_ID)
     sandboxes[0].responses.extend(
         [command_result(stdout="one.py"), command_result(stdout="1: content")]
     )
@@ -205,8 +207,8 @@ def test_multiple_calls_record_contiguous_steps_and_policy_failure(harness) -> N
 
 
 def test_submit_final_turn_verifies_once_and_is_idempotent(harness) -> None:
-    config, environment, sandboxes, verifiers = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, verifiers = harness
+    environment.reset(TASK_ID)
     sandboxes[0].diff = "diff --git a/x b/x\n"
     environment.submit()
     completion = [{"role": "assistant", "content": "final", "tool_calls": []}]
@@ -219,9 +221,21 @@ def test_submit_final_turn_verifies_once_and_is_idempotent(harness) -> None:
     assert verifiers[0].verify_calls == 1
 
 
+def test_verifier_uses_the_same_task_sample_as_the_rollout(harness) -> None:
+    _, environment, sandboxes, verifiers = harness
+    task_id = next(task_id for task_id in environment._task_context if task_id != TASK_ID)
+    environment.reset(task_id)
+    sandboxes[0].diff = "diff --git a/x b/x\n"
+    environment.submit()
+
+    assert environment._finalize([]) == 1.0
+    assert verifiers[0].sample.task.task_id == task_id
+    assert verifiers[0].sample.environment.task_id == task_id
+
+
 def test_invalid_arguments_do_not_lock_termination(harness) -> None:
-    config, environment, sandboxes, verifiers = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, verifiers = harness
+    environment.reset(TASK_ID)
     invalid = environment.read_file("x", start_line=3, end_line=2)
     assert "end_line" in invalid
     environment._record_loop_exit("format_exhausted")
@@ -232,8 +246,8 @@ def test_invalid_arguments_do_not_lock_termination(harness) -> None:
 
 
 def test_finalize_uses_terminal_event_or_loop_exit(harness) -> None:
-    config, environment, sandboxes, verifiers = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, verifiers = harness
+    environment.reset(TASK_ID)
     assert not environment.terminated
     unknown = [
         {
@@ -256,13 +270,13 @@ def test_finalize_uses_terminal_event_or_loop_exit(harness) -> None:
     assert environment.trajectory.steps == []
     assert not verifiers
 
-    environment.reset(config.dataset.task_id)
+    environment.reset(TASK_ID)
     environment._record_loop_exit("iteration_cap")
     assert environment._finalize([]) == 0.0
     assert environment.trajectory is not None
     assert environment.trajectory.termination == "iteration_cap"
 
-    environment.reset(config.dataset.task_id)
+    environment.reset(TASK_ID)
     sandboxes[-1].diff = "diff --git a/x b/x\n"
     environment.submit()
     assert environment.terminated
@@ -274,8 +288,8 @@ def test_finalize_uses_terminal_event_or_loop_exit(harness) -> None:
 
 
 def test_tool_error_does_not_lock_termination_and_submit_still_wins(harness) -> None:
-    config, environment, sandboxes, verifiers = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, verifiers = harness
+    environment.reset(TASK_ID)
     sandboxes[0].responses.append(command_result(exit_code=1, stderr="boom"))
     result = environment.run_command("cat missing.py")
     assert "boom" in result
@@ -289,8 +303,8 @@ def test_tool_error_does_not_lock_termination_and_submit_still_wins(harness) -> 
 
 
 def test_docker_infrastructure_error_propagates_and_runner_close_releases(harness) -> None:
-    config, environment, sandboxes, _ = harness
-    environment.reset(config.dataset.task_id)
+    _, environment, sandboxes, _ = harness
+    environment.reset(TASK_ID)
     sandboxes[0].raise_infra = True
     with pytest.raises(DockerRuntimeError, match="daemon unavailable"):
         environment.read_file("x")
@@ -299,7 +313,7 @@ def test_docker_infrastructure_error_propagates_and_runner_close_releases(harnes
 
 
 def test_binary_reward_is_position_aligned_and_strict(harness) -> None:
-    config, first, first_sandboxes, _ = harness
+    _, first, first_sandboxes, _ = harness
     second = SWEEnvironment(
         task_context=first._task_context,
         sandbox_factory=first._sandbox_factory,
@@ -307,8 +321,8 @@ def test_binary_reward_is_position_aligned_and_strict(harness) -> None:
         output_limit_chars=first._output_limit_chars,
         max_timeout_sec=first._max_timeout_sec,
     )
-    first.reset(config.dataset.task_id)
-    second.reset(config.dataset.task_id)
+    first.reset(TASK_ID)
+    second.reset(TASK_ID)
     first_sandboxes[0].diff = "diff --git a/x b/x\n"
     first.submit()
     second._record_loop_exit("format_exhausted")
