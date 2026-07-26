@@ -10,6 +10,8 @@ from swe_agent.train import (
     RecordingRuntimeError,
     RuntimeNotQualifiedError,
     _clear_vllm_cuda_graphs,
+    _close_vllm_communicator,
+    _detach_vllm_client_atexit,
     _detach_vllm_engine,
     _native_policy_path_reached,
     _recording_reward,
@@ -22,6 +24,7 @@ from swe_agent.train import (
     preflight,
     run,
 )
+from swe_agent.launcher import VLLMEndpoints
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -51,11 +54,9 @@ def test_preflight_is_read_only_and_reports_complete_stage_modules(tmp_path: Pat
     assert not list(tmp_path.iterdir())
 
 
-def test_entry_executes_exactly_one_run(
+def test_entry_delegates_to_the_supervisor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seeds: list[int] = []
-    devices: list[int] = []
     outcome = {
         "run_id": "run-0",
         "status": "completed",
@@ -69,22 +70,8 @@ def test_entry_executes_exactly_one_run(
         "interrupted_signum": None,
     }
 
-    monkeypatch.setattr("swe_agent.train._require_single_visible_gpu", lambda: 3)
-    monkeypatch.setattr("swe_agent.launcher.split_visible_gpus", lambda config: "0")
-
-    def fake_run_once(*, config, project_root, seed, physical_device, server_gpu):
-        del config, project_root
-        seeds.append(seed)
-        devices.append(physical_device)
-        server_gpus.append(server_gpu)
-        return outcome
-
-    server_gpus: list[str] = []
-    monkeypatch.setattr("swe_agent.train._run_once", fake_run_once)
+    monkeypatch.setattr("swe_agent.supervisor.run", lambda path: outcome)
     result = run(CONFIG_7B)
-    assert seeds == [20260714]
-    assert devices == [3]
-    assert server_gpus == ["0"]
     assert result == outcome
 
 
@@ -141,6 +128,43 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     )
     assert grpo_config.router_aux_loss_coef == 0.0
     assert grpo_config.shuffle_dataset is True
+
+
+def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    endpoints = VLLMEndpoints(host="127.0.0.1", server_port=18421, group_port=18422)
+    grpo_config = build_grpo_config(
+        config,
+        tmp_path / "output",
+        seed=config.runtime.base_seed,
+        use_cpu=True,
+        vllm_endpoints=endpoints,
+    )
+    assert grpo_config.vllm_server_base_url == endpoints.base_url
+    assert grpo_config.vllm_server_port == 18421
+    assert grpo_config.vllm_group_port == 18422
+
+
+def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+
+    class Client:
+        def close_communicator(self) -> None:
+            events.append("close")
+
+    client = Client()
+    trainer = type(
+        "Trainer", (), {"vllm_generation": type("Generation", (), {"vllm_client": client})()}
+    )()
+    recorder = type("Recorder", (), {"log": lambda self, message: events.append(message)})()
+    monkeypatch.setattr("swe_agent.train.atexit.unregister", lambda callback: events.append("unregister"))
+
+    detached = _detach_vllm_client_atexit(trainer, recorder)
+    handle = _close_vllm_communicator(detached, recorder)
+
+    assert events[0] == "unregister"
+    assert "close" in events
+    assert handle["final_state"] == "closed"
 
 
 def test_recording_reward_preserves_trl_position_order_and_drains_events() -> None:

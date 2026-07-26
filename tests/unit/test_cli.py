@@ -55,6 +55,19 @@ def test_cli_preserves_sigterm_exit_after_structured_cleanup(
     assert '"status": "interrupted"' in capsys.readouterr().out
 
 
+def test_cli_preserves_sigterm_exit_from_supervisor_report(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        train,
+        "run",
+        lambda path: {"status": "interrupted", "interrupted_signum": signal.SIGTERM},
+    )
+
+    assert cli.main(["grpo", "--config", "config.yaml"]) == 143
+    assert '"status": "interrupted"' in capsys.readouterr().out
+
+
 def test_cli_rejects_unqualified_runtime(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def reject(path: Path) -> dict[str, object]:
         del path

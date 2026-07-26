@@ -81,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     if status == "failed":
         return 1
     if status == "interrupted":
-        return 128 + signal.SIGINT
+        signum = report.get("interrupted_signum", signal.SIGINT)
+        return 128 + int(signum)
     return 0
 
 

@@ -83,12 +83,26 @@ class RunRecorder:
         code_commit: str | None = None,
         code_dirty: bool = True,
         model_revision: str | None = None,
+        workspace_prepared: bool = False,
     ) -> None:
         self.config = config
         self.run_id = run_id or config.output.run_id or generate_run_id()
         self.output_dir = (Path(config.output.output_root) / self.run_id).resolve()
         self.output_dir.parent.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(exist_ok=False)
+        workspace_marker = self.output_dir / ".swe-agent-supervisor-workspace"
+        if workspace_prepared:
+            try:
+                marker_run_id = workspace_marker.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(
+                    f"supervisor workspace is missing its ownership marker: {self.output_dir}"
+                ) from exc
+            if marker_run_id != self.run_id:
+                raise ValueError(
+                    f"supervisor workspace belongs to {marker_run_id!r}, not {self.run_id!r}"
+                )
+        else:
+            self.output_dir.mkdir(exist_ok=False)
         self.rollouts_root = self.output_dir / "rollouts"
         self.metrics_path = self.output_dir / "metrics.jsonl"
         self.cleanup_path = self.output_dir / "cleanup.json"
@@ -191,6 +205,7 @@ class RunRecorder:
                 "subset_dataset_revision": config.dataset.subset_revision,
                 "image_platform": config.docker.platform,
                 "dependency_versions": dependency_versions or installed_dependency_versions(),
+                "vllm_endpoints": None,
             },
         }
         _atomic_write_yaml(
@@ -211,6 +226,15 @@ class RunRecorder:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+
+    def set_vllm_endpoints(self, *, server_url: str, group_port: int) -> None:
+        """记录本 run 实际使用的 vLLM 通信端点，而非 YAML 中的模板端口。"""
+
+        self.run["provenance"]["vllm_endpoints"] = {
+            "server_url": server_url,
+            "group_port": group_port,
+        }
+        self.flush_run()
 
     def begin_group(
         self, prompt: object, rollout_count: int, *, task_id: str

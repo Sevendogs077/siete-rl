@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 from pathlib import Path
 
@@ -8,8 +9,11 @@ import pytest
 from swe_agent.config import load_config
 from swe_agent.launcher import (
     LauncherError,
+    VLLMEndpoints,
     VLLMServer,
+    allocate_vllm_endpoints,
     build_server_command,
+    resolve_gpu_topology,
     split_visible_gpus,
 )
 
@@ -54,6 +58,23 @@ def test_split_visible_gpus_requires_two_devices(monkeypatch) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     with pytest.raises(LauncherError, match="at least"):
         split_visible_gpus(load_project_config())
+
+
+def test_resolve_gpu_topology_does_not_mutate_environment(monkeypatch) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    assert resolve_gpu_topology(load_project_config()) == ("2", "3")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "2,3"
+
+
+def test_run_endpoints_are_distinct_and_override_fixed_config_port(monkeypatch) -> None:
+    config = load_project_config()
+    ports = iter((18421, 18422))
+    monkeypatch.setattr("swe_agent.launcher._reserve_ephemeral_port", lambda host, excluded=None: next(ports))
+    endpoints = allocate_vllm_endpoints(config)
+    assert endpoints.host == "127.0.0.1"
+    assert endpoints.server_port != endpoints.group_port
+    command = build_server_command(config, endpoints)
+    assert command[command.index("--port") + 1] == str(endpoints.server_port)
 
 
 def test_build_server_command_matches_config() -> None:

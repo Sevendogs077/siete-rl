@@ -153,6 +153,26 @@ def test_run_id_and_initial_files_have_exact_contract(tmp_path: Path) -> None:
         RunRecorder(config=config, seed=123)
 
 
+def test_supervisor_workspace_preserves_vllm_log_and_records_runtime_endpoints(tmp_path: Path) -> None:
+    config = configured_for(tmp_path, run_id="supervised-run")
+    output_dir = tmp_path / "outputs/supervised-run"
+    output_dir.mkdir(parents=True)
+    (output_dir / ".swe-agent-supervisor-workspace").write_text(
+        "supervised-run", encoding="utf-8"
+    )
+    (output_dir / "vllm.log").write_text("server started\n", encoding="utf-8")
+
+    recorder = RunRecorder(config=config, seed=7, workspace_prepared=True)
+    recorder.set_vllm_endpoints(server_url="http://127.0.0.1:18421", group_port=18422)
+
+    assert (output_dir / "vllm.log").read_text(encoding="utf-8") == "server started\n"
+    run = load_json(output_dir / "run.json")
+    assert run["provenance"]["vllm_endpoints"] == {
+        "server_url": "http://127.0.0.1:18421",
+        "group_port": 18422,
+    }
+
+
 def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     recorder = RunRecorder(config=configured_for(tmp_path), seed=7, run_id="run-a")
     prompt = [{"role": "user", "content": "repair it"}]

@@ -1,7 +1,7 @@
 """vLLM server 生命周期与 GPU 拆分（替代 scripts/grpo.sh 的编排职责）。
 
 设计约束：
-- ``split_visible_gpus`` 必须在任何 torch CUDA 初始化之前调用；
+- GPU 拓扑必须在任何 torch CUDA 初始化之前解析；
 - server 子进程 ``start_new_session=True`` 自成进程组，退出时按
   TERM → 宽限 → KILL 升级（对齐原 bash cleanup 语义）；
 - server stdout/stderr tee 到 run 目录下的 ``vllm.log``。
@@ -12,11 +12,13 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +35,48 @@ class LauncherError(RuntimeError):
     """vLLM server 启动或生命周期管理失败。"""
 
 
+@dataclass(frozen=True, slots=True)
+class VLLMEndpoints:
+    """一个 run 独占的 vLLM HTTP 与权重同步端点。"""
+
+    host: str
+    server_port: int
+    group_port: int
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.server_port}"
+
+
+def allocate_vllm_endpoints(config: ProjectConfig) -> VLLMEndpoints:
+    """为单个 run 选择两个不同的本地 TCP 端口。
+
+    HTTP 服务端口和 TRL 的 NCCL 权重同步端口都不能跨 run 复用。端口由
+    OS 在 loopback 上挑选；若外部进程在释放到 bind 的窗口抢占端口，后续
+    server/client 初始化会明确失败，而不会误连到另一个 run。
+    """
+
+    if config.vllm.mode != "server" or config.vllm.server_base_url is None:
+        raise LauncherError("vLLM endpoint allocation requires server mode with server_base_url")
+    url = urlparse(config.vllm.server_base_url)
+    if url.scheme != "http" or url.hostname is None:
+        raise LauncherError("vllm.server_base_url must be an http URL with a hostname")
+    server_port = _reserve_ephemeral_port(url.hostname)
+    group_port = _reserve_ephemeral_port(url.hostname, excluded={server_port})
+    return VLLMEndpoints(host=url.hostname, server_port=server_port, group_port=group_port)
+
+
+def _reserve_ephemeral_port(host: str, *, excluded: set[int] | None = None) -> int:
+    excluded = excluded or set()
+    for _ in range(32):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind((host, 0))
+            port = int(listener.getsockname()[1])
+        if port not in excluded:
+            return port
+    raise LauncherError("could not allocate distinct local vLLM ports")
+
+
 def split_visible_gpus(config: ProjectConfig) -> str | None:
     """server 模式把多卡 CUDA_VISIBLE_DEVICES 拆成 server/trainer 两张卡。
 
@@ -40,9 +84,22 @@ def split_visible_gpus(config: ProjectConfig) -> str | None:
     返回 server 卡索引；非 server 模式返回 None，维持调用方环境。
     """
 
+    topology = resolve_gpu_topology(config)
+    if topology is None:
+        return None
+    server_gpu, trainer_gpu = topology
+    os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu
+    return server_gpu
+
+
+def resolve_gpu_topology(
+    config: ProjectConfig, visible: str | None = None
+) -> tuple[str, str] | None:
+    """只解析 server/trainer 卡，不修改调用方环境。"""
+
     if config.vllm.mode != "server":
         return None
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "") if visible is None else visible
     devices = [value.strip() for value in visible.split(",") if value.strip()]
     if len(devices) < 2:
         raise LauncherError(
@@ -50,18 +107,21 @@ def split_visible_gpus(config: ProjectConfig) -> str | None:
             f"two GPUs (server, trainer); got {visible!r}"
         )
     server_gpu, trainer_gpu = devices[0], devices[1]
-    os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu
-    return server_gpu
+    return server_gpu, trainer_gpu
 
 
-def build_server_command(config: ProjectConfig) -> list[str]:
+def build_server_command(config: ProjectConfig, endpoints: VLLMEndpoints | None = None) -> list[str]:
     """由配置推导 `trl vllm-serve` 参数（对齐原 grpo.sh 的参数表）。"""
 
     if config.vllm.mode != "server" or config.vllm.server_base_url is None:
         raise LauncherError("build_server_command requires vllm server mode configuration")
     url = urlparse(config.vllm.server_base_url)
-    if url.scheme != "http" or url.hostname is None or url.port is None:
-        raise LauncherError("vllm.server_base_url must be an http URL with an explicit port")
+    if url.scheme != "http" or url.hostname is None:
+        raise LauncherError("vllm.server_base_url must be an http URL with a hostname")
+    host = endpoints.host if endpoints is not None else url.hostname
+    port = endpoints.server_port if endpoints is not None else url.port
+    if port is None:
+        raise LauncherError("vllm.server_base_url must include a port when no run endpoints are supplied")
     command = [
         _trl_executable(),
         "vllm-serve",
@@ -76,9 +136,9 @@ def build_server_command(config: ProjectConfig) -> list[str]:
         "--max-model-len",
         str(config.vllm.max_model_length),
         "--host",
-        url.hostname,
+        host,
         "--port",
-        str(url.port),
+        str(port),
     ]
     if config.model.trust_remote_code:
         command.append("--trust-remote-code")
@@ -123,7 +183,7 @@ class VLLMServer:
     def pid(self) -> int | None:
         return self._process.pid if self._process is not None else None
 
-    def start(self) -> None:
+    def start(self, *, cancelled: Callable[[], bool] | None = None) -> None:
         if self._process is not None:
             raise LauncherError("vLLM server already started")
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,6 +209,8 @@ class VLLMServer:
         self._record("spawn", "success")
         deadline = time.monotonic() + self._health_timeout_sec
         while time.monotonic() < deadline:
+            if cancelled is not None and cancelled():
+                raise LauncherError("vLLM server startup cancelled")
             if self._process.poll() is not None:
                 raise LauncherError(
                     f"vLLM server exited before becoming ready; see {self._log_path}"

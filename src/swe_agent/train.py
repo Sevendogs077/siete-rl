@@ -53,6 +53,8 @@ REQUIRED_DOMAIN_MODULES = (
     "recording.py",
     "trainer.py",
     "launcher.py",
+    "supervisor.py",
+    "worker.py",
 )
 
 
@@ -140,6 +142,7 @@ def build_grpo_config(
     *,
     seed: int,
     use_cpu: bool = False,
+    vllm_endpoints: Any | None = None,
 ) -> Any:
     """只映射计划已冻结的公共 GRPOConfig 字段。"""
 
@@ -198,7 +201,15 @@ def build_grpo_config(
         log_completions=grpo.log_completions,
         use_vllm=vllm.use_vllm,
         vllm_mode=vllm.mode,
-        vllm_server_base_url=vllm.server_base_url,
+        vllm_server_base_url=(
+            vllm_endpoints.base_url if vllm_endpoints is not None else vllm.server_base_url
+        ),
+        vllm_server_port=(
+            vllm_endpoints.server_port if vllm_endpoints is not None else 8000
+        ),
+        vllm_group_port=(
+            vllm_endpoints.group_port if vllm_endpoints is not None else 51216
+        ),
         vllm_model_impl=vllm.model_impl,
         vllm_enable_sleep_mode=vllm.enable_sleep_mode,
         vllm_tensor_parallel_size=vllm.tensor_parallel_size or 1,
@@ -216,6 +227,7 @@ def build_trainer(
     environment_factory: Callable[[], Any],
     reward_func: Callable[..., list[float]],
     processing_class: Any | None = None,
+    vllm_endpoints: Any | None = None,
 ) -> Any:
     """构造 SWEGRPOTrainer（GRPOTrainer 子类，加入环境信号终止）。"""
 
@@ -223,7 +235,9 @@ def build_trainer(
 
     return SWEGRPOTrainer(
         model=config.model.model_path,
-        args=build_grpo_config(config, output_dir, seed=seed),
+        args=build_grpo_config(
+            config, output_dir, seed=seed, vllm_endpoints=vllm_endpoints
+        ),
         train_dataset=train_dataset,
         processing_class=processing_class,
         environment_factory=environment_factory,
@@ -287,8 +301,71 @@ def _sync_recorder_from_trainer(recorder: Any, trainer: Any | None) -> None:
     )
 
 
+def _detach_vllm_client_atexit(trainer: Any, recorder: Any) -> Any | None:
+    """把 TRL 的隐式 communicator 清理改为本 run 的显式清理。
+
+    TRL server mode 会在 VLLMClient 初始化时注册 ``atexit`` 回调。该回调
+    没有 run 身份隔离，且无法知道是否还有权重同步在执行，因此只能在训练器
+    已构造、后续 worker 子进程尚未启动时立刻移除。真正的关闭在 finally 中
+    于 trainer 释放前执行。
+    """
+
+    backend = getattr(trainer, "vllm_generation", None)
+    client = getattr(backend, "vllm_client", None)
+    if client is None:
+        recorder.log("vLLM server client unavailable; no communicator atexit callback to detach")
+        return None
+    close = getattr(client, "close_communicator", None)
+    if not callable(close):
+        recorder.log("vLLM server client has no close_communicator method")
+        return None
+    atexit.unregister(close)
+    recorder.log("vLLM communicator atexit callback detached; worker owns explicit close")
+    return client
+
+
+def _close_vllm_communicator(client: Any | None, recorder: Any) -> dict[str, Any]:
+    """在所有训练调用栈退出后关闭本 worker 的 vLLM 通信组。"""
+
+    if client is None:
+        return _not_initialized_handle("vllm_communicator", "server_client")
+    try:
+        client.close_communicator()
+    except BaseException as exc:  # noqa: BLE001 - 清理失败必须继续收束其他资源
+        recorder.log(f"vLLM communicator explicit close failed: {type(exc).__name__}: {exc}")
+        return {
+            "scope": "vllm_communicator",
+            "identifier": "server_client",
+            "operations": [_cleanup_operation(1, "close", "failed", str(exc))],
+            "final_state": "residual",
+            "residual": True,
+        }
+    recorder.log("vLLM communicator explicitly closed")
+    return {
+        "scope": "vllm_communicator",
+        "identifier": "server_client",
+        "operations": [_cleanup_operation(1, "close", "success")],
+        "final_state": "closed",
+        "residual": False,
+    }
+
+
 def run(config_path: str | Path) -> dict[str, Any]:
-    """一次 CLI 调用只创建并执行一个 run。"""
+    """以无 CUDA supervisor 执行一次可终止的真实训练 run。"""
+
+    from swe_agent.supervisor import run as supervise_run
+
+    return supervise_run(config_path)
+
+
+def run_worker(
+    config_path: str | Path,
+    *,
+    run_id: str,
+    vllm_endpoints: Any,
+    trainer_gpu: str,
+) -> dict[str, Any]:
+    """在 supervisor 创建的独立进程中执行真实 GRPO。"""
 
     config, project_root, resolved_config_path = load_config(config_path)
     report = preflight(config, project_root)
@@ -300,18 +377,18 @@ def run(config_path: str | Path) -> dict[str, Any]:
             f"拒绝启动真实训练；缺少: {missing}"
         )
 
-    from swe_agent.launcher import split_visible_gpus
-
     os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    server_gpu = split_visible_gpus(config)
+    os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu
     physical_device = _require_single_visible_gpu()
     report = _run_once(
         config=config,
         project_root=project_root,
         seed=config.runtime.base_seed,
         physical_device=physical_device,
-        server_gpu=server_gpu,
+        run_id=run_id,
+        vllm_endpoints=vllm_endpoints,
+        workspace_prepared=True,
     )
     if report["status"] == "interrupted":
         raise TrainingInterrupted(int(report["interrupted_signum"]), report)
@@ -324,13 +401,14 @@ def _run_once(
     project_root: Path,
     seed: int,
     physical_device: int,
-    server_gpu: str | None,
+    run_id: str | None = None,
+    vllm_endpoints: Any | None = None,
+    workspace_prepared: bool = False,
 ) -> dict[str, Any]:
     """创建并终结唯一 output_dir；所有项目 JSON 只由本函数驱动。"""
 
     from swe_agent.docker import DockerSandbox, SubprocessDockerClient, sweep_run_containers
     from swe_agent.environment import SWEEnvironment
-    from swe_agent.launcher import VLLMServer, build_server_command
     from swe_agent.recording import RunRecorder
     from swe_agent.rewards import binary_reward
     from swe_agent.swegym import build_training_dataset, load_task_context
@@ -340,17 +418,23 @@ def _run_once(
     recorder = RunRecorder(
         config=config,
         seed=seed,
-        run_id=os.environ.get("SWE_AGENT_RUN_ID"),
+        run_id=run_id or os.environ.get("SWE_AGENT_RUN_ID"),
         code_commit=commit,
         code_dirty=dirty,
         model_revision=_model_revision(Path(config.model.model_path)),
+        workspace_prepared=workspace_prepared,
     )
     recorder.log(f"run started seed={seed} device={physical_device}")
+    if vllm_endpoints is not None:
+        recorder.set_vllm_endpoints(
+            server_url=vllm_endpoints.base_url,
+            group_port=int(vllm_endpoints.group_port),
+        )
 
     trainer: Any | None = None
     environments: list[SWEEnvironment] = []
     docker_client: SubprocessDockerClient | None = None
-    vllm_server: VLLMServer | None = None
+    vllm_client: Any | None = None
     gpu_baseline: dict[str, int] | None = None
     child_process_baseline = _snapshot_child_processes()
     run_processes: dict[int, dict[str, Any]] = {}
@@ -359,18 +443,6 @@ def _run_once(
     interrupted_signum: int | None = None
 
     try:
-        if server_gpu is not None:
-            stage = "vllm_server"
-            if config.vllm.server_base_url is None:
-                raise RuntimeError("vllm server mode requires vllm.server_base_url")
-            vllm_server = VLLMServer(
-                build_server_command(config),
-                server_gpu=server_gpu,
-                base_url=config.vllm.server_base_url,
-                log_path=recorder.output_dir / "vllm.log",
-            )
-            vllm_server.start()
-            recorder.log(f"vLLM server ready pid={vllm_server.pid}")
         gpu_baseline = _gpu_baseline(physical_device)
         stage = "load_task"
         task_context = load_task_context(config, project_root)
@@ -420,7 +492,9 @@ def _run_once(
             environment_factory=environment_factory,
             reward_func=reward_func,
             processing_class=tokenizer,
+            vllm_endpoints=vllm_endpoints,
         )
+        vllm_client = _detach_vllm_client_atexit(trainer, recorder)
         trainer.add_callback(_run_metrics_callback(recorder))
         run_processes.update(_new_child_processes(child_process_baseline))
         # vLLM 的 in-process engine 构造会使用自己的固定 seed；恢复本 run seed。
@@ -495,7 +569,10 @@ def _run_once(
                 "trainer state sync failed: "
                 f"{type(sync_error).__name__}: {sync_error}"
             )
-        server_handle = _guarded("vllm_server.close", lambda: vllm_server.close() if vllm_server is not None else None)
+        communicator_handle = _guarded(
+            "vllm_communicator.close",
+            lambda: _close_vllm_communicator(vllm_client, recorder),
+        )
         if docker_client is not None:
             swept = _guarded(
                 "sweep_run_containers",
@@ -529,7 +606,7 @@ def _run_once(
             lambda: recorder.set_runtime_handles(
                 [
                     *environment_handles,
-                    *([server_handle] if server_handle is not None else []),
+                    *([communicator_handle] if communicator_handle is not None else []),
                     *trainer_handles,
                 ]
             ),
