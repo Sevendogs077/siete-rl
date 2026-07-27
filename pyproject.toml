@@ -12,6 +12,7 @@ dependencies = [
   "bitsandbytes==0.49.2",
   "datasets==5.0.0",
   "jmespath==1.1.0",
+  "liger-kernel>=0.8.0,<1.0.0",
   "matplotlib==3.11.1",
   "peft==0.19.1",
   "pyarrow==25.0.0",

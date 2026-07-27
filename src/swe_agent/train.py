@@ -179,6 +179,7 @@ def build_grpo_config(
         num_generations=grpo.num_generations,
         num_iterations=grpo.num_iterations,
         max_completion_length=generation.max_completion_length,
+        use_liger_kernel=generation.use_liger_kernel,
         max_tool_calling_iterations=generation.max_tool_calling_iterations,
         temperature=generation.temperature,
         top_p=generation.top_p,

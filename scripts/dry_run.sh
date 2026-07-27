@@ -58,8 +58,15 @@ logits_fp32 = T_comp * V * 4 / GB            # accelerate convert_to_fp32 峰值
 logits_extra = logits_fp32                   # log_softmax 的第二个 fp32 副本（最坏情况）
 
 steady = weights_gb + lora_gb + adam_gb + grad_gb + act_gb
-peak_typ = steady + logits_bf16 + logits_fp32
-peak_worst = peak_typ + logits_extra
+use_liger = config.generation.use_liger_kernel
+if use_liger:
+    # Liger fused GRPO loss：policy 前向/反向不再物化 logits；
+    # 仅 old/ref 的 no-grad logp 前向仍瞬态物化 bf16 logits（无 fp32 副本、无反向图）。
+    peak_typ = steady + logits_bf16
+    peak_worst = peak_typ
+else:
+    peak_typ = steady + logits_bf16 + logits_fp32
+    peak_worst = peak_typ + logits_extra
 
 # --- vLLM server 卡 ---
 gpu_total = 80.0  # A100-SXM4-80GB
@@ -71,6 +78,7 @@ print("GRPO 显存估算（按配置推算，非实测）")
 print("=" * 56)
 print(f"模型: {config.model.provenance_id}  参数量: {params/1e9:.2f}B ({config.model.dtype})")
 print(f"序列预算: prompt {T_prompt} + completion {T_comp}")
+print(f"Liger fused loss: {'开启' if use_liger else '关闭'}")
 print()
 print(f"[vLLM server 卡]  gpu_memory_utilization={config.vllm.gpu_memory_utilization}")
 print(f"  固定占用 ≈ {p(server_gb)} GB（权重 + KV cache 池，启动即占满该比例）")
@@ -81,11 +89,19 @@ print(f"  LoRA 权重/梯度     {p(lora_gb + grad_gb)} GB")
 print(f"  AdamW 动量(fp32)   {p(adam_gb)} GB")
 print(f"  激活(梯度检查点)   {p(act_gb)} GB")
 print(f"  小计 ≈ {p(steady)} GB")
-print("[trainer 卡]  logits 尖峰（accelerate bf16→fp32 转换）")
-print(f"  bf16 logits       {p(logits_bf16)} GB")
-print(f"  fp32 转换          {p(logits_fp32)} GB")
+if use_liger:
+    print("[trainer 卡]  logits 占用（liger 模式）")
+    print("  policy logits      0.0 GB（fused loss 不物化）")
+    print(f"  old/ref 瞬态      {p(logits_bf16)} GB（no-grad，bf16）")
+else:
+    print("[trainer 卡]  logits 尖峰（accelerate bf16→fp32 转换）")
+    print(f"  bf16 logits       {p(logits_bf16)} GB")
+    print(f"  fp32 转换          {p(logits_fp32)} GB")
 print(f"  典型峰值 ≈ {p(peak_typ)} GB")
-print(f"  最坏峰值 ≈ {p(peak_worst)} GB（含 log_softmax 第二份 fp32 副本）")
+if use_liger:
+    print(f"  最坏峰值 ≈ {p(peak_worst)} GB")
+else:
+    print(f"  最坏峰值 ≈ {p(peak_worst)} GB（含 log_softmax 第二份 fp32 副本）")
 print()
 print(f"结论: server 卡需要 ≥ {p(server_gb)} GB 空闲；")
 print(f"      trainer 卡需要 ≥ {p(peak_typ)} GB 空闲（最坏 {p(peak_worst)} GB）。")

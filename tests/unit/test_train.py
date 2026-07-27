@@ -130,6 +130,17 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     assert grpo_config.shuffle_dataset is True
 
 
+def test_grpo_config_enables_liger_kernel(tmp_path: Path) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    grpo_config = build_grpo_config(
+        config,
+        tmp_path / "output",
+        seed=config.runtime.base_seed,
+        use_cpu=True,
+    )
+    assert grpo_config.use_liger_kernel is True
+
+
 def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
     config, _, _ = load_config(CONFIG_7B)
     endpoints = VLLMEndpoints(host="127.0.0.1", server_port=18421, group_port=18422)

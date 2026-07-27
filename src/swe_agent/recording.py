@@ -186,6 +186,7 @@ class RunRecorder:
                 "learning_rate": config.grpo.learning_rate,
                 "beta": config.grpo.beta,
                 "max_completion_length": config.generation.max_completion_length,
+                "use_liger_kernel": config.generation.use_liger_kernel,
                 "training_mode": config.model.training_mode,
             },
             "cleanup": {

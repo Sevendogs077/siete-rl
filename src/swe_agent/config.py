@@ -88,6 +88,7 @@ class ChatConfig(StrictConfig):
 class GenerationConfig(StrictConfig):
     max_completion_length: int = Field(ge=1)
     context_safety_margin: int = Field(ge=0)
+    use_liger_kernel: bool
     max_tool_calling_iterations: int = Field(ge=1)
     max_consecutive_protocol_errors: int = Field(ge=1)
     temperature: float = Field(gt=0.0)
@@ -211,6 +212,13 @@ class ProjectConfig(StrictConfig):
             > self.vllm.max_model_length
         ):
             raise ValueError("prompt and completion exceed vLLM max model length")
+        if self.generation.use_liger_kernel and self.grpo.importance_sampling_level not in (
+            "token",
+            "sequence",
+        ):
+            raise ValueError(
+                "use_liger_kernel requires importance_sampling_level 'token' or 'sequence'"
+            )
         if self.grpo.generation_batch_size % self.grpo.num_generations != 0:
             raise ValueError("generation_batch_size must be divisible by num_generations")
         if (

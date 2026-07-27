@@ -44,3 +44,35 @@ temperature=1.0 可能不合适，需要调整
 ~~目前同组内相关性巨大，要么全 1 要么全 0，需要排查组内相关性，目前种子可能没问题~~，已排查，单次成功率太低
 
 ~~考虑下一步接入多任务，但还是小批量跑，等待全显卡空闲~~
+
+### d2da3a
+
+接入 OpenHands SFT model 后，单次 Tool Call 调用 + Observation 就接近 5000 Token，Context 严重不足，但提高 Context 又会造成 OOM，具体如下解决：
+
+真正的显存大头：activation，尤其是 logits 尖峰。Qwen2-7B 词表 ~152k，32k token 序列的 logits bf16 就 ~9.3GB，TRL 算 per-token logprob 时 fp32 log_softmax 再翻一倍（为了防止数值误差，通常用 FP32 做 Softmax）；加上 backward 中间量，这才是 trainer 卡逼近 42GB 上限的原因。分片参数对这一点毫无帮助
+
+解决：Liger Kernel，消除 Loss 计算时的尖峰
+
+原来：先保存巨大 logits，再计算 loss
+```
+隐藏状态
+  ↓
+lm_head
+  ↓
+生成完整 logits：[8000, 152000]
+  ↓
+完整 log_softmax
+  ↓
+从每一行取出实际生成 token 的 logprob
+  ↓
+计算 GRPO loss
+```
+
+现在：边计算 logits，边计算 loss，不保存完整 logits
+```
+隐藏状态
+  ↓
+lm_head + log_softmax + 取目标 token + GRPO loss
+  ↓
+直接得到 loss
+```

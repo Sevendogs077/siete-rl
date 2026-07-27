@@ -937,6 +937,19 @@ wheels = [
 ]
 
 [[package]]
+name = "liger-kernel"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "triton", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/6b/5d4b965e411d35fb1f533d4b2a2a9a1e99f4bf3fc751ab22b989159c2a18/liger_kernel-0.8.1.tar.gz", hash = "sha256:ae708a8079d2283070128e38497aa2976294d822e21a0f21ea86e63c67334a8b", size = 4157449, upload-time = "2026-07-23T00:01:37.77Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/dc/68b2d8400e97d64412536bf3bd72c8890238013ebf75b95598c56b3b10a8/liger_kernel-0.8.1-py3-none-any.whl", hash = "sha256:90836c1e9de22a1c57a640775fb79151ea704748cf9c3f6658dddaa06fff1989", size = 506445, upload-time = "2026-07-23T00:01:35.995Z" },
+]
+
+[[package]]
 name = "llguidance"
 version = "1.7.6"
 source = { registry = "https://pypi.org/simple" }
@@ -2146,6 +2159,7 @@ dependencies = [
     { name = "bitsandbytes", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "datasets", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "jmespath", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "liger-kernel", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "matplotlib", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "peft", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "pyarrow", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -2166,6 +2180,7 @@ requires-dist = [
     { name = "bitsandbytes", specifier = "==0.49.2" },
     { name = "datasets", specifier = "==5.0.0" },
     { name = "jmespath", specifier = "==1.1.0" },
+    { name = "liger-kernel", specifier = ">=0.8.0,<1.0.0" },
     { name = "matplotlib", specifier = "==3.11.1" },
     { name = "peft", specifier = "==0.19.1" },
     { name = "pyarrow", specifier = "==25.0.0" },

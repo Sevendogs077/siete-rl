@@ -50,12 +50,13 @@ def test_shared_training_contract_is_fixed() -> None:
 
     config, _, _ = load_config(CONFIG_7B)
     assert config.peft.target_modules == LORA_TARGET_MODULES
-    # 上下文预算方程：prompt + completion + margin 必须恰好顶满模型上下文
+    # 上下文预算方程：prompt + completion + margin 不得超过模型上下文（与
+    # config.validate_contract 的运行时契约一致；margin 为 0、是否顶满属调参，不是结构契约）
     assert (
         config.chat.max_prompt_length
         + config.generation.max_completion_length
         + config.generation.context_safety_margin
-        == config.model.context_length
+        <= config.model.context_length
     )
     # GRPO 组约束：generation batch 必须整除出完整的组；
     # 多任务数据集最多 100 行，RepeatSampler 每 batch 的 unique prompt 数不能超过数据集行数。
@@ -228,4 +229,17 @@ def test_steering_parameters_reject_out_of_range_values(
     payload[section][field] = value
 
     with pytest.raises(ValidationError):
+        ProjectConfig.model_validate(payload)
+
+
+def test_generation_config_exposes_use_liger_kernel() -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    assert config.generation.use_liger_kernel is True
+
+
+def test_use_liger_kernel_rejects_sequence_token_importance_sampling() -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["grpo"]["importance_sampling_level"] = "sequence_token"
+    with pytest.raises(ValidationError, match="use_liger_kernel"):
         ProjectConfig.model_validate(payload)
