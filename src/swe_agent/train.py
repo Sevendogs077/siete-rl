@@ -6,6 +6,7 @@ import atexit
 import gc
 import hashlib
 import json
+import logging
 import os
 import re
 import signal
@@ -119,6 +120,25 @@ def build_peft_config(config: ProjectConfig) -> Any:
         target_modules=list(config.peft.target_modules),
         modules_to_save=config.peft.modules_to_save,
     )
+
+
+def _apply_liger_runtime_flags(config: ProjectConfig) -> None:
+    """trainer 进程的运行时开关，须在 trainer 构造（及任何 torch.compile）之前调用。
+
+    - 降噪：peft 0.19 仍读 ``config.use_return_dict``（transformers v5 改名
+      ``return_dict`` 后的兼容别名），每进程首次 PEFT forward 打一条 warning_once；
+      行为无害，按模块精准降噪。与 liger 无关，恒生效。
+    - dynamo 绕行（仅 liger 开启时）：torch 2.11 的 dynamo 在 liger 0.8 chunked GRPO
+      loss 遇到新 shape 重编译时，于 ``produce_guards_verbose`` 对无 source 的
+      symbol 抛 ``IndexError: list index out of range``（见 run 20260727T120045Z-592f
+      step 2 崩溃）。liger 的显存节省来自分块而非 compile，eager 回退不改变显存
+      画像；``TORCHDYNAMO_DISABLE`` 在 ``torch._dynamo.optimize`` 调用时读取，
+      此处设置即生效；setdefault 允许外部环境变量覆盖。
+    """
+
+    logging.getLogger("transformers.configuration_utils").setLevel(logging.ERROR)
+    if config.generation.use_liger_kernel:
+        os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 
 def build_quantization_config(config: ProjectConfig) -> Any | None:
@@ -483,6 +503,7 @@ def _run_once(
         stage = "tokenizer"
         tokenizer = build_processing_class(config)
         stage = "trainer_construct"
+        _apply_liger_runtime_flags(config)
         trainer = build_trainer(
             config,
             output_dir=recorder.output_dir,

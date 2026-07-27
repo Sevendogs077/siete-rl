@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 import pytest
 
-from swe_agent.config import load_config
+from swe_agent.config import ProjectConfig, load_config
 from swe_agent.train import (
     RecordingRuntimeError,
     RuntimeNotQualifiedError,
+    _apply_liger_runtime_flags,
     _clear_vllm_cuda_graphs,
     _close_vllm_communicator,
     _detach_vllm_client_atexit,
@@ -139,6 +141,38 @@ def test_grpo_config_enables_liger_kernel(tmp_path: Path) -> None:
         use_cpu=True,
     )
     assert grpo_config.use_liger_kernel is True
+
+
+def test_liger_runtime_flags_disable_dynamo_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    monkeypatch.delenv("TORCHDYNAMO_DISABLE", raising=False)
+
+    _apply_liger_runtime_flags(config)
+
+    assert os.environ["TORCHDYNAMO_DISABLE"] == "1"
+    assert (
+        logging.getLogger("transformers.configuration_utils").level == logging.ERROR
+    )
+
+
+def test_liger_runtime_flags_leave_dynamo_alone_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["generation"]["use_liger_kernel"] = False
+    config = ProjectConfig.model_validate(payload)
+    monkeypatch.delenv("TORCHDYNAMO_DISABLE", raising=False)
+
+    _apply_liger_runtime_flags(config)
+
+    assert "TORCHDYNAMO_DISABLE" not in os.environ
+    # 降噪与 liger 无关（peft forward 总会触发别名 warning），关闭 liger 也生效
+    assert (
+        logging.getLogger("transformers.configuration_utils").level == logging.ERROR
+    )
 
 
 def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:

@@ -76,3 +76,8 @@ lm_head + log_softmax + 取目标 token + GRPO loss
   ↓
 直接得到 loss
 ```
+
+
+### 1a5c98
+
+完成 Liger Kernel fused GRPO loss，目前可跑：16384 completion length
