@@ -19,7 +19,7 @@ from swe_agent.launcher import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 
 
 def load_project_config():
@@ -120,6 +120,7 @@ def test_server_start_and_clean_close(monkeypatch, tmp_path) -> None:
 
     assert spawned["env"]["CUDA_VISIBLE_DEVICES"] == "0"
     assert "127.0.0.1" in spawned["env"]["NO_PROXY"]
+    assert "::1" in spawned["env"]["no_proxy"]
     assert spawned["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
     assert spawned["start_new_session"] is True
     assert (tmp_path / "vllm.log").exists()

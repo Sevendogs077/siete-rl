@@ -1,178 +1,220 @@
-"""严格接受完整 Qwen tool call、bare JSON 或 fenced JSON 工具调用。"""
+"""本地 OpenHands mock-function-calling 协议。
+
+这个模块刻意不依赖 OpenHands 或 TRL 的私有实现。它保存 checkpoint 所见的
+XML 函数格式，并把它转换为 TRL 用于调用环境方法的普通 function call。
+"""
 
 from __future__ import annotations
 
 import json
+import re
 from types import MethodType
 from typing import Any
 
 
 class ToolCallParseError(ValueError):
-    """可预期的工具调用序列化或最小结构错误。"""
+    """模型输出不是一个可执行的 OpenHands function call。"""
 
 
-_INSTALLED_ATTR = "_swe_agent_compatible_tool_call_parser_installed"
-_ORIGINAL_ATTR = "_swe_agent_original_parse_response"
+SYSTEM_PROMPT_SUFFIX_TEMPLATE = """
+You have access to the following functions:
+
+{description}
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<function=example_function_name>
+<parameter=example_parameter_1>value_1</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format, start with <function= and end with </function>
+- Required parameters MUST be specified
+- Only call one function at a time
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after.
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+"""
+
+FN_REGEX_PATTERN = r"<function=([^>]+)>\n(.*?)</function>"
+FN_PARAM_REGEX_PATTERN = r"<parameter=([^>]+)>(.*?)</parameter>"
+FIXED_FAKE_USER = (
+    "Please continue working on the task on whatever approach you think is suitable.\n"
+    "If you think you have solved the task, please first send your answer to user through message and then finish the interaction.\n"
+    "IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN HELP.\n"
+)
 
 
-def parse_compatible_tool_call(visible_text: str) -> dict[str, Any]:
-    """严格解析完整 fenced/bare JSON；其他任意输出均为协议错误。"""
-
-    if not isinstance(visible_text, str):
-        raise TypeError("visible assistant content must be a string")
-    text = visible_text.strip()
-    if not text:
-        raise ToolCallParseError("assistant response must contain one complete tool call")
-
-    if text.startswith("```"):
-        payload = _parse_fenced_object(text)
-        return _standard_message(payload)
-
-    if not text.startswith("{"):
-        raise ToolCallParseError(
-            "assistant response must be one complete Qwen tool call, JSON object, or fenced JSON block"
-        )
-    payload = _load_strict_object(text)
-    return _standard_message(payload)
+def _schema(name: str, description: str, properties: dict[str, dict[str, Any]], required: list[str]) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required}}}
 
 
-def install_compatible_tool_call_parser(tokenizer: Any) -> Any:
-    """在官方 tokenizer parser 外幂等安装两个严格 JSON fallback。"""
+OPENHANDS_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
+    _schema("execute_bash", """Execute a bash command in the terminal.
+* Long running commands: For commands that may run indefinitely, it should be run in the background and the output should be redirected to a file, e.g. command = `python3 app.py > server.log 2>&1 &`.
+* Interactive: If a bash command returns exit code `-1`, this means the process is not yet finished. The assistant must then send a second call to terminal with an empty `command` (which will retrieve any additional logs), or it can send additional text (set `command` to the text) to STDIN of the running process, or it can send command=`ctrl+c` to interrupt the process.
+* Timeout: If a command execution result says "Command timed out. Sending SIGINT to the process", the assistant should retry running the command in the background.
+""", {"command": {"type": "string", "description": "The bash command to execute. Can be empty to view additional logs when previous exit code is `-1`. Can be `ctrl+c` to interrupt the currently running process."}}, ["command"]),
+    _schema("finish", "Finish the interaction when the task is complete OR if the assistant cannot proceed further with the task.", {}, []),
+    _schema("str_replace_editor", """Custom editing tool for viewing, creating and editing files
+* State is persistent across command calls and discussions with the user
+* If `path` is a file, `view` displays the result of applying `cat -n`. If `path` is a directory, `view` lists non-hidden files and directories up to 2 levels deep
+* The `create` command cannot be used if the specified `path` already exists as a file
+* If a `command` generates a long output, it will be truncated and marked with `<response clipped>`
+* The `undo_edit` command will revert the last edit made to the file at `path`
 
+Notes for using the `str_replace` command:
+* The `old_str` parameter should match EXACTLY one or more consecutive lines from the original file. Be mindful of whitespaces!
+* If the `old_str` parameter is not unique in the file, the replacement will not be performed. Make sure to include enough context in `old_str` to make it unique
+* The `new_str` parameter should contain the edited lines that should replace the `old_str`
+""", {
+        "command": {"type": "string", "description": "The commands to run. Allowed options are: `view`, `create`, `str_replace`, `insert`, `undo_edit`.", "enum": ["view", "create", "str_replace", "insert", "undo_edit"]},
+        "path": {"type": "string", "description": "Absolute path to file or directory, e.g. `/repo/file.py` or `/repo`."},
+        "file_text": {"type": "string", "description": "Required parameter of `create` command, with the content of the file to be created."},
+        "old_str": {"type": "string", "description": "Required parameter of `str_replace` command containing the string in `path` to replace."},
+        "new_str": {"type": "string", "description": "Optional parameter of `str_replace` command containing the new string (if not given, no string will be added). Required parameter of `insert` command containing the string to insert."},
+        "insert_line": {"type": "integer", "description": "Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`."},
+        "view_range": {"type": "array", "items": {"type": "integer"}, "description": "Optional parameter of `view` command when `path` points to a file. If none is given, the full file is shown. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12. Indexing at 1 to start. Setting `[start_line, -1]` shows all lines from `start_line` to the end of the file."},
+    }, ["command", "path"]),
+)
+_BY_NAME = {item["function"]["name"]: item["function"] for item in OPENHANDS_TOOL_SCHEMAS}
+_INSTALLED_ATTR = "_swe_agent_openhands_parser_installed"
+
+
+def render_tool_descriptions(tools: tuple[dict[str, Any], ...] = OPENHANDS_TOOL_SCHEMAS) -> str:
+    """使用锁定 converter 的简洁描述格式，保持工具顺序不变。"""
+    rendered: list[str] = []
+    for index, tool in enumerate(tools, 1):
+        function = tool["function"]
+        parameters = function["parameters"]
+        rendered.extend((f"---- BEGIN FUNCTION #{index}: {function['name']} ----", f"Description: {function['description']}"))
+        properties = parameters.get("properties", {})
+        if properties:
+            rendered.append("Parameters:")
+            required = set(parameters.get("required", []))
+            for number, (name, detail) in enumerate(properties.items(), 1):
+                description = detail.get("description", "No description provided")
+                if "enum" in detail:
+                    description += "\nAllowed values: [" + ", ".join(f"`{value}`" for value in detail["enum"]) + "]"
+                rendered.append(f"  ({number}) {name} ({detail.get('type', 'string')}, {'required' if name in required else 'optional'}): {description}")
+        else:
+            rendered.append("No parameters are required for this function.")
+        rendered.append(f"---- END FUNCTION #{index} ----\n")
+    return "\n".join(rendered)
+
+
+def render_system_suffix() -> str:
+    return SYSTEM_PROMPT_SUFFIX_TEMPLATE.format(description=render_tool_descriptions())
+
+
+def render_tool_call(name: str, arguments: dict[str, Any]) -> str:
+    value = f"<function={name}>\n"
+    for key, argument in arguments.items():
+        argument = json.dumps(argument) if isinstance(argument, (list, dict)) else str(argument)
+        value += f"<parameter={key}>{argument}</parameter>\n"
+    return value + "</function>"
+
+
+def render_observation(name: str, content: str, *, error: bool = False) -> str:
+    return f"EXECUTION RESULT of [{name}]:\n" + ("ERROR:\n" if error else "") + content
+
+
+def _convert_params(name: str, body: str) -> dict[str, Any]:
+    function = _BY_NAME[name]
+    properties = function["parameters"]["properties"]
+    values: dict[str, Any] = {}
+    for match in re.finditer(FN_PARAM_REGEX_PATTERN, body, flags=re.DOTALL):
+        key, value = match.group(1), match.group(2).strip()
+        if key not in properties:
+            raise ToolCallParseError(f"Parameter '{key}' is not allowed for function '{name}'.")
+        if key in values:
+            raise ToolCallParseError(f"Parameter '{key}' was supplied more than once.")
+        expected = properties[key].get("type", "string")
+        try:
+            if expected == "integer":
+                value = int(value)
+            elif expected == "array":
+                value = json.loads(value)
+                if not isinstance(value, list):
+                    raise ValueError("not an array")
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ToolCallParseError(f"Parameter '{key}' is expected to be {expected}.") from exc
+        if "enum" in properties[key] and value not in properties[key]["enum"]:
+            raise ToolCallParseError(f"Parameter '{key}' has an invalid value.")
+        values[key] = value
+    missing = set(function["parameters"].get("required", [])) - values.keys()
+    if missing:
+        raise ToolCallParseError("Missing required parameter(s): " + ", ".join(sorted(missing)))
+    return values
+
+
+def parse_openhands_text(text: str) -> dict[str, Any]:
+    """分类为 plain message、tool call 或 protocol error。
+
+    function call 前的 reasoning 原样保留为 assistant content；function closing tag
+    之后的文字不属于 checkpoint 支持的 call，按协议错误处理。
+    """
+    if not isinstance(text, str):
+        raise TypeError("assistant response must be a string")
+    matches = list(re.finditer(FN_REGEX_PATTERN, text, flags=re.DOTALL))
+    if not matches:
+        if "<function=" in text or "</function>" in text:
+            return {"kind": "protocol_error", "reason": "incomplete function call", "content": text}
+        return {"kind": "message", "content": text}
+    if len(matches) != 1:
+        return {"kind": "protocol_error", "reason": "only one function call is allowed", "content": text}
+    match = matches[0]
+    if text[match.end():].strip():
+        return {"kind": "protocol_error", "reason": "function call has a suffix", "content": text}
+    name = match.group(1)
+    if name not in _BY_NAME:
+        return {"kind": "protocol_error", "reason": f"unknown function: {name}", "content": text}
+    try:
+        arguments = _convert_params(name, match.group(2))
+    except ToolCallParseError as exc:
+        return {"kind": "protocol_error", "reason": str(exc), "content": text}
+    return {"kind": "tool", "content": text, "tool_calls": [{"type": "function", "function": {"name": name, "arguments": arguments}}]}
+
+
+def install_openhands_tool_protocol(tokenizer: Any) -> Any:
+    """幂等安装 TRL 1.8 所需的 parser 与不带 native tools 的 renderer。"""
     if getattr(tokenizer, _INSTALLED_ATTR, False):
         return tokenizer
+    original_template = tokenizer.apply_chat_template
+    tokenizer._swe_agent_original_apply_chat_template = original_template
 
-    original = getattr(tokenizer, "parse_response", None)
-    if not callable(original):
-        raise TypeError("tokenizer must provide parse_response before compatibility installation")
+    def apply_chat_template(self: Any, conversation: Any, *args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("tools", None)
+        return original_template(conversation, *args, **kwargs)
 
-    def compatible_parse_response(
-        self: Any,
-        response: Any,
-        schema: list[Any] | dict[str, Any] | None = None,
-        *,
-        prefix: Any = None,
-    ) -> Any:
-        if schema is not None or _is_batched_response(response):
-            return original(response, schema, prefix=prefix)
+    def parse_response(self: Any, ids: Any, *, prefix: Any = None) -> dict[str, Any]:
+        del prefix
+        # vLLM 可能把 Qwen 的 turn-end EOS 放进 completion。TRL 会在调用
+        # parser 后才清理它；因此这里先移除该唯一的 tokenizer 终止符，避免
+        # ``</function><|im_end|>`` 被误判为真实文本后缀。
+        text = self.decode(ids, skip_special_tokens=False)
+        eos_token = getattr(self, "eos_token", None)
+        if isinstance(eos_token, str):
+            text = text.removesuffix(eos_token)
+        parsed = parse_openhands_text(text)
+        if parsed["kind"] == "protocol_error":
+            return {"role": "assistant", "content": text, "parse_error": parsed["reason"]}
+        if parsed["kind"] == "message":
+            return {"role": "assistant", "content": text}
+        return {"role": "assistant", "content": text, "tool_calls": parsed["tool_calls"]}
 
-        official: Any = None
-        try:
-            official = original(response, schema, prefix=prefix)
-        except (ValueError, TypeError):
-            # 预期的官方解析失败仍需检查协议标记和两个严格兼容分支。
-            official = None
-
-        visible_text = _decode_response(self, response, skip_special_tokens=True)
-        try:
-            if isinstance(official, dict) and official.get("tool_calls"):
-                _validate_official_message(official)
-                _validate_official_envelope(visible_text)
-                normalized_official = dict(official)
-                normalized_official["content"] = ""
-                return normalized_official
-            compatible = parse_compatible_tool_call(visible_text)
-        except ToolCallParseError as exc:
-            return {
-                "role": "assistant",
-                "content": visible_text,
-                "parse_error": str(exc),
-            }
-        return compatible
-
-    compatible_parse_response.__name__ = "parse_response"
-    compatible_parse_response.__qualname__ = type(tokenizer).__name__ + ".parse_response"
-    setattr(tokenizer, _ORIGINAL_ATTR, original)
-    setattr(tokenizer, "parse_response", MethodType(compatible_parse_response, tokenizer))
+    tokenizer.apply_chat_template = MethodType(apply_chat_template, tokenizer)
+    tokenizer.parse_response = MethodType(parse_response, tokenizer)
+    # TRL 1.8.0 仅在这两个字段之一非空时调用 parser；这只是激活标志。
+    tokenizer.response_template = "openhands-local-parser"
+    tokenizer.response_schema = None
+    # 该 tokenizer 本身不带 native schema；wrapper 已提供等价的本地协议能力。
+    tokenizer.supports_tool_calling = True
+    tokenizer.is_chat_template_prefix_preserving = True
     setattr(tokenizer, _INSTALLED_ATTR, True)
     return tokenizer
-
-
-def _validate_official_envelope(visible_text: str) -> None:
-    text = visible_text.strip()
-    if not text.startswith("<tool_call>") or not text.endswith("</tool_call>"):
-        raise ToolCallParseError("official Qwen tool call must use one complete outer envelope")
-
-
-def _validate_official_message(message: dict[str, Any]) -> None:
-    calls = message.get("tool_calls")
-    if not isinstance(calls, list) or len(calls) != 1:
-        raise ToolCallParseError("official response must contain exactly one tool call")
-    call = calls[0]
-    if not isinstance(call, dict) or call.get("type") != "function":
-        raise ToolCallParseError("official tool call type must be function")
-    function = call.get("function")
-    if not isinstance(function, dict):
-        raise ToolCallParseError("official tool call function must be an object")
-    name = function.get("name")
-    arguments = function.get("arguments")
-    if not isinstance(name, str) or not name.strip():
-        raise ToolCallParseError("official tool call name must be a non-empty string")
-    if not isinstance(arguments, dict):
-        raise ToolCallParseError("official tool call arguments must be an object")
-    content = message.get("content", "")
-    if content is not None and (not isinstance(content, str) or content.strip()):
-        raise ToolCallParseError("official tool call content must be empty")
-
-
-def _parse_fenced_object(text: str) -> dict[str, Any]:
-    lines = text.splitlines()
-    if len(lines) < 3:
-        raise ToolCallParseError("assistant response is not one complete fenced block")
-    if lines[0] != "```json":
-        raise ToolCallParseError("fenced tool call language must be json")
-    if lines[-1] != "```":
-        raise ToolCallParseError("assistant response is not one complete fenced block")
-    return _load_strict_object("\n".join(lines[1:-1]))
-
-
-def _is_batched_response(response: Any) -> bool:
-    if isinstance(response, (list, tuple)):
-        if not response:
-            return False
-        return isinstance(response[0], (str, list, tuple))
-    ndim = getattr(response, "ndim", None)
-    return isinstance(ndim, int) and ndim >= 2
-
-
-def _load_strict_object(text: str) -> dict[str, Any]:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ToolCallParseError("tool call must be one complete valid JSON value") from exc
-    if not isinstance(value, dict):
-        raise ToolCallParseError("tool call JSON must be an object")
-    if set(value) != {"name", "arguments"}:
-        raise ToolCallParseError("tool call object must contain exactly name and arguments")
-    name = value["name"]
-    arguments = value["arguments"]
-    if not isinstance(name, str) or not name.strip():
-        raise ToolCallParseError("tool call name must be a non-empty string")
-    if not isinstance(arguments, dict):
-        raise ToolCallParseError("tool call arguments must be an object")
-    return value
-
-
-def _standard_message(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "type": "function",
-                "function": {
-                    "name": payload["name"],
-                    "arguments": payload["arguments"],
-                },
-            }
-        ],
-    }
-
-
-def _decode_response(tokenizer: Any, response: Any, *, skip_special_tokens: bool) -> str:
-    if isinstance(response, str):
-        return response
-    decoded = tokenizer.decode(response, skip_special_tokens=skip_special_tokens)
-    if not isinstance(decoded, str):
-        raise TypeError("tokenizer.decode must return a string for one response")
-    return decoded

@@ -17,6 +17,7 @@ from swe_agent.launcher import (
     TERM_GRACE_SEC,
     LauncherError,
     VLLMServer,
+    allow_loopback_without_proxy,
     allocate_vllm_endpoints,
     build_server_command,
     resolve_gpu_topology,
@@ -189,6 +190,9 @@ def _start_worker(
     ]
     env = dict(os.environ)
     env["SWE_AGENT_RUN_ID"] = run_id
+    # TRL 的 VLLMClient 在 trainer 构造阶段以 requests.get 探测本机 server；
+    # 该实现不设 timeout，必须确保 loopback 不会被 HTTP(S)_PROXY 截获。
+    allow_loopback_without_proxy(env)
     return subprocess.Popen(command, env=env, start_new_session=True)
 
 

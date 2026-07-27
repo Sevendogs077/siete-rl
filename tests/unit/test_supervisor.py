@@ -10,7 +10,7 @@ from swe_agent import supervisor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 
 
 def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path: Path) -> None:
@@ -80,6 +80,9 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
     assert command[command.index("--group-port") + 1] == "18422"
     assert command[command.index("--trainer-gpu") + 1] == "1"
     assert calls["worker_kwargs"]["start_new_session"] is True
+    worker_env = calls["worker_kwargs"]["env"]
+    assert "127.0.0.1" in worker_env["NO_PROXY"]
+    assert "localhost" in worker_env["no_proxy"]
 
 
 def test_supervisor_marks_stale_worker_report_interrupted(tmp_path: Path) -> None:

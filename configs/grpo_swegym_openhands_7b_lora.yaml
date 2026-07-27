@@ -1,8 +1,8 @@
 schema_version: 1
 dataset:
   tasks_dir: assets/swegym
-  task_ids: null        # null=未指定；或 [getmoto__moto-7023, getmoto__moto-7212]
-  max_tasks: null       # null=不截断；试跑写 8
+  task_ids: null
+  max_tasks: null
   official_path: data/swegym/SWE-Gym__SWE-Gym/bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb/data/train-00000-of-00001.parquet
   official_revision: bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb
   subset_path: data/swegym/SumanthRH__SWE-Gym-Subset/3f22e68f673027edbaebe3424e4c20ae580563fd/data/train-00000-of-00001.parquet
@@ -18,9 +18,9 @@ docker:
   exec_timeout_sec: 300
   verifier_timeout_sec: 3600
 model:
-  provenance_id: Qwen/Qwen2.5-Coder-7B-Instruct
-  model_path: /home/2025user/zyp/.cache/modelscope/hub/Qwen/Qwen2.5-Coder-7B-Instruct
-  tokenizer_path: /home/2025user/zyp/.cache/modelscope/hub/Qwen/Qwen2.5-Coder-7B-Instruct
+  provenance_id: NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
+  model_path: /home/2025user/zyp/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
+  tokenizer_path: /home/2025user/zyp/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
   architecture: Qwen2ForCausalLM
   context_length: 32768
   trust_remote_code: true
@@ -37,27 +37,20 @@ peft:
   alpha: 32
   dropout: 0.0
   bias: none
-  target_modules:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
   modules_to_save: null
 chat:
-  native_tool_calling: true
-  add_response_schema: true
   max_prompt_length: 8192
-  max_observation_chars: 12000
+  max_observation_chars: 30000
 generation:
   max_completion_length: 8192
   context_safety_margin: 16384
   max_tool_calling_iterations: 40
-  max_consecutive_format_errors: 5
-  temperature: 1.0
-  top_p: 1.0
-  top_k: 0
-  repetition_penalty: 1.0
-  structured_outputs_regex: null
+  max_consecutive_protocol_errors: 5
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  repetition_penalty: 1.1
 grpo:
   reward_type: binary_verifier
   num_generations: 8

@@ -156,6 +156,22 @@ def health_probe(url: str) -> bool:
         return False
 
 
+def allow_loopback_without_proxy(env: dict[str, str]) -> None:
+    """让本机 vLLM HTTP/NCCL 控制面不经过用户配置的 HTTP 代理。
+
+    TRL 的 ``VLLMClient.check_server`` 直接调用 ``requests.get``，既不复用
+    client session，也未设置请求超时。若 ``HTTP(S)_PROXY`` 存在而 ``NO_PROXY``
+    未包含 loopback，Trainer 构造会在代理连接上无限等待。server 与 trainer
+    worker 都是本 run 自己启动的本机进程，因此只追加 loopback 白名单，不改
+    用户对其他地址的代理设置。
+    """
+
+    loopback_hosts = "127.0.0.1,localhost,::1"
+    for key in ("NO_PROXY", "no_proxy"):
+        existing = env.get(key, "").strip(",")
+        env[key] = f"{existing},{loopback_hosts}" if existing else loopback_hosts
+
+
 class VLLMServer:
     """一个 vLLM server 子进程的生命周期；close 幂等且返回 runtime handle 记录。"""
 
@@ -191,9 +207,7 @@ class VLLMServer:
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = self._server_gpu
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        for key in ("NO_PROXY", "no_proxy"):
-            existing = env.get(key)
-            env[key] = f"{existing},127.0.0.1,localhost" if existing else "127.0.0.1,localhost"
+        allow_loopback_without_proxy(env)
         try:
             self._process = subprocess.Popen(
                 self._command,

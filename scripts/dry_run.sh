@@ -2,7 +2,7 @@
 # 估算当前配置下一次 GRPO run 两张卡各需要多少显存（纯配置推算，不依赖本机状态）。
 set -euo pipefail
 
-config_path="${GRPO_CONFIG:-/home/2025user/zyp/work/2607_trl_swe_agent/configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml}"
+config_path="${GRPO_CONFIG:-/home/2025user/zyp/work/2607_trl_swe_agent/configs/grpo_swegym_openhands_7b_lora.yaml}"
 .venv/bin/python - "$config_path" <<'EOF'
 import json
 import sys

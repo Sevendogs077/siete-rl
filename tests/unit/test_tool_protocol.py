@@ -5,239 +5,72 @@ from typing import Any
 import pytest
 
 from swe_agent.tool_protocol import (
-    ToolCallParseError,
-    install_compatible_tool_call_parser,
-    parse_compatible_tool_call,
+    FIXED_FAKE_USER,
+    OPENHANDS_TOOL_SCHEMAS,
+    install_openhands_tool_protocol,
+    parse_openhands_text,
+    render_observation,
+    render_system_suffix,
 )
 
 
-STANDARD_READ_FILE = {
-    "role": "assistant",
-    "content": "",
-    "tool_calls": [
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "arguments": {"path": "README.md"},
-            },
-        }
-    ],
-}
+def test_schema_has_the_trajectory_tool_order() -> None:
+    assert [item["function"]["name"] for item in OPENHANDS_TOOL_SCHEMAS] == ["execute_bash", "finish", "str_replace_editor"]
+    rendered = render_system_suffix()
+    assert rendered.count("---- BEGIN FUNCTION") == 3
+    assert "<function=example_function_name>" in rendered
+    assert "<tool_call>" not in rendered
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        '```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```',
-        '  \n```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```\n ',
-        '{"name":"read_file","arguments":{"path":"README.md"}}',
-        ' \n {"name":"read_file","arguments":{"path":"README.md"}} \n ',
-    ],
-)
-def test_compatible_formats_are_normalized(text: str) -> None:
-    parsed = parse_compatible_tool_call(text)
-    assert parsed == STANDARD_READ_FILE
+@pytest.mark.parametrize(("text", "name", "arguments"), [
+    ("reasoning\n<function=execute_bash>\n<parameter=command>pwd\nls</parameter>\n</function>", "execute_bash", {"command": "pwd\nls"}),
+    ("<function=finish>\n</function>", "finish", {}),
+    ("<function=str_replace_editor>\n<parameter=command>view</parameter>\n<parameter=path>/repo/a.py</parameter>\n<parameter=view_range>[1, -1]</parameter>\n</function>", "str_replace_editor", {"command": "view", "path": "/repo/a.py", "view_range": [1, -1]}),
+    ("<function=str_replace_editor>\n<parameter=command>insert</parameter>\n<parameter=path>/repo/a.py</parameter>\n<parameter=insert_line>3</parameter>\n</function>", "str_replace_editor", {"command": "insert", "path": "/repo/a.py", "insert_line": 3}),
+])
+def test_parser_converts_supported_function_calls(text: str, name: str, arguments: dict[str, Any]) -> None:
+    parsed = parse_openhands_text(text)
+    assert parsed["kind"] == "tool"
+    assert parsed["content"] == text
+    assert parsed["tool_calls"][0]["function"] == {"name": name, "arguments": arguments}
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "I will inspect the repository first.",
-        "# Repository inspection\nUse the available tools.",
-        (
-            "I will inspect first.\n```json\n"
-            '{"name":"read_file","arguments":{"path":"README.md"}}\n```'
-        ),
-        (
-            "Example only: "
-            '{"name":"read_file","arguments":{"path":"README.md"}}'
-        ),
-    ],
-)
-def test_non_whole_response_examples_are_rejected(text: str) -> None:
-    with pytest.raises(ToolCallParseError):
-        parse_compatible_tool_call(text)
+@pytest.mark.parametrize("text", [
+    "just an ordinary assistant message",
+    "<function=execute_bash>\n<parameter=command>pwd</parameter>",
+    "<function=unknown>\n</function>",
+    "<function=execute_bash>\n</function>",
+    "<function=str_replace_editor>\n<parameter=command>bad</parameter>\n<parameter=path>/repo</parameter>\n</function>",
+    "<function=finish>\n</function> suffix",
+    "<function=finish>\n</function><function=finish>\n</function>",
+])
+def test_plain_and_invalid_outputs_are_classified(text: str) -> None:
+    parsed = parse_openhands_text(text)
+    if text == "just an ordinary assistant message":
+        assert parsed == {"kind": "message", "content": text}
+    else:
+        assert parsed["kind"] == "protocol_error"
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        (
-            '```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```\n'
-            "I will continue."
-        ),
-        (
-            '```json\n{"name":"read_file","arguments":{"path":"README.md"}}\n```\n'
-            '```json\n{"name":"submit","arguments":{}}\n```'
-        ),
-        '```\n{"name":"read_file","arguments":{}}\n```',
-        '```json\n{"name":"read_file","arguments":{}}',
-        '```python\n{"name":"read_file","arguments":{}}\n```',
-        "```json\n[]\n```",
-        '```json\n"read_file"\n```',
-        "```json\n42\n```",
-        "```json\ntrue\n```",
-        "```json\nnull\n```",
-        '```json\n{"name":"read_file","arguments":{}} {}\n```',
-        "```json\n{'name':'read_file','arguments':{}}\n```",
-        '```json\n{"name":"read_file","arguments":{},}\n```',
-        '```json\n{"name":"read_file","arguments":[]}\n```',
-        '```json\n{"arguments":{}}\n```',
-        '```json\n{"name":"read_file"}\n```',
-        '```json\n{"name":"read_file","arguments":{},"extra":1}\n```',
-    ],
-)
-def test_malformed_or_ambiguous_fenced_json_is_rejected(text: str) -> None:
-    with pytest.raises(ToolCallParseError):
-        parse_compatible_tool_call(text)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        '{"name":"read_file","arguments":{}} trailing text',
-        '{"name":"read_file","arguments":{}} {}',
-        "{'name':'read_file','arguments':{}}",
-        '{"name":"read_file","arguments":{},}',
-        '{"name":"read_file","arguments":"{}"}',
-        '{"name":"","arguments":{}}',
-        '{"arguments":{}}',
-        '{"name":"read_file"}',
-        '{"name":"read_file","arguments":{},"extra":1}',
-        '{"type":"function","function":{"name":"read_file","arguments":{}}}',
-        '{"tool_calls":[]}',
-        '{"name":"read_file","parameters":{}}',
-    ],
-)
-def test_malformed_or_non_flat_bare_json_is_rejected(text: str) -> None:
-    with pytest.raises(ToolCallParseError):
-        parse_compatible_tool_call(text)
-
-
-def test_protocol_layer_does_not_validate_tool_name_or_business_arguments() -> None:
-    parsed = parse_compatible_tool_call(
-        '{"name":"not_a_registered_tool","arguments":{"unexpected":"value"}}'
-    )
-    assert parsed is not None
-    assert parsed["tool_calls"][0]["function"] == {
-        "name": "not_a_registered_tool",
-        "arguments": {"unexpected": "value"},
-    }
-
-
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_compatible_json_allows_protocol_delimiters_inside_arguments(wrapped: bool) -> None:
-    payload = (
-        '{"name":"edit_file","arguments":{"content":'
-        '"Example:\\n```python\\nprint(1)\\n```\\n<tool_call>demo</tool_call>"}}'
-    )
-    text = f"```json\n{payload}\n```" if wrapped else payload
-
-    parsed = parse_compatible_tool_call(text)
-
-    assert parsed is not None
-    assert parsed["tool_calls"][0]["function"]["arguments"]["content"].startswith("Example:")
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        '{"name":"read_file","arguments":{"path":"README.md"}}}',
-        '{"name":"read_file","arguments":{"path":"README.md"}}}}  ',
-        '```json\n{"name":"read_file","arguments":{"path":"README.md"}}}\n```',
-    ],
-)
-def test_trailing_extra_braces_are_rejected(text: str) -> None:
-    with pytest.raises(ToolCallParseError):
-        parse_compatible_tool_call(text)
+def test_runtime_strings_are_exact_and_terminated() -> None:
+    assert render_observation("execute_bash", "ok") == "EXECUTION RESULT of [execute_bash]:\nok"
+    assert render_observation("str_replace_editor", "bad", error=True) == "EXECUTION RESULT of [str_replace_editor]:\nERROR:\nbad"
+    assert FIXED_FAKE_USER.endswith("\n")
 
 
 class FixtureTokenizer:
-    def __init__(self) -> None:
-        self.calls: list[tuple[Any, Any, Any]] = []
-
-    def parse_response(self, response: Any, schema: Any = None, *, prefix: Any = None) -> dict:
-        self.calls.append((response, schema, prefix))
-        return {"role": "assistant", "content": str(response)}
-
-    def decode(self, response: Any, *, skip_special_tokens: bool) -> str:
+    def decode(self, ids: Any, *, skip_special_tokens: bool) -> str:
         del skip_special_tokens
-        return str(response)
+        return str(ids)
+
+    def apply_chat_template(self, conversation: Any, *args: Any, **kwargs: Any) -> Any:
+        return {"conversation": conversation, "args": args, "kwargs": kwargs}
 
 
-def test_installation_is_idempotent_and_forwards_schema_and_prefix() -> None:
-    tokenizer = FixtureTokenizer()
-    installed = install_compatible_tool_call_parser(tokenizer)
-    wrapper = tokenizer.parse_response.__func__
-    original = tokenizer._swe_agent_original_parse_response
-
-    assert install_compatible_tool_call_parser(tokenizer) is installed
-    assert tokenizer.parse_response.__func__ is wrapper
-    assert tokenizer._swe_agent_original_parse_response is original
-
-    prefix = [1, 2, 3]
-    parsed = tokenizer.parse_response(
-        '{"name":"read_file","arguments":{"path":"README.md"}}',
-        prefix=prefix,
-    )
-    assert parsed == STANDARD_READ_FILE
-    assert tokenizer.calls == [
-        ('{"name":"read_file","arguments":{"path":"README.md"}}', None, prefix)
-    ]
-
-
-def test_explicit_schema_is_delegated_without_compatibility_fallback() -> None:
-    tokenizer = install_compatible_tool_call_parser(FixtureTokenizer())
-    schema = {"schema": "sentinel"}
-    response = '{"name":"read_file","arguments":{}}'
-
-    parsed = tokenizer.parse_response(response, schema, prefix="prefix")
-
-    assert parsed == {"role": "assistant", "content": response}
-    assert tokenizer.calls == [(response, schema, "prefix")]
-
-
-def test_batch_is_delegated_without_single_response_decoding() -> None:
-    tokenizer = install_compatible_tool_call_parser(FixtureTokenizer())
-    responses = [
-        '{"name":"read_file","arguments":{}}',
-        '{"name":"submit","arguments":{}}',
-    ]
-
-    parsed = tokenizer.parse_response(responses, prefix=["", ""])
-
-    assert parsed == {"role": "assistant", "content": str(responses)}
-    assert tokenizer.calls == [(responses, None, ["", ""])]
-
-
-def test_malformed_compatible_attempt_returns_parse_error_marker() -> None:
-    tokenizer = install_compatible_tool_call_parser(FixtureTokenizer())
-    text = '```json\n{"name":"read_file","arguments":}\n```'
-
-    parsed = tokenizer.parse_response(text)
-
-    assert parsed["role"] == "assistant"
-    assert parsed["content"] == text
-    assert "tool_calls" not in parsed
-    assert parsed["parse_error"]
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "I will inspect the repository.",
-        'I will inspect first.\n```json\n{"name":"read_file","arguments":{}}\n```',
-        '<tool_call>\n{"name":"read_file","arguments":{}',
-        "",
-    ],
-)
-def test_any_non_complete_tool_call_returns_parse_error_marker(text: str) -> None:
-    tokenizer = install_compatible_tool_call_parser(FixtureTokenizer())
-
-    parsed = tokenizer.parse_response(text)
-
-    assert parsed["role"] == "assistant"
-    assert parsed["content"] == text
-    assert "tool_calls" not in parsed
-    assert parsed["parse_error"]
+def test_installation_is_idempotent_and_ignores_native_tools() -> None:
+    tokenizer = install_openhands_tool_protocol(FixtureTokenizer())
+    assert install_openhands_tool_protocol(tokenizer) is tokenizer
+    rendered = tokenizer.apply_chat_template([], tools=[{"legacy": True}], tokenize=False)
+    assert "tools" not in rendered["kwargs"]
+    parsed = tokenizer.parse_response("<function=finish>\n</function>", prefix=[1])
+    assert parsed["tool_calls"][0]["function"]["name"] == "finish"

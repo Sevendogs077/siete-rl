@@ -28,7 +28,7 @@ from swe_agent.launcher import VLLMEndpoints
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_7B = PROJECT_ROOT / "configs/grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+CONFIG_7B = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 
 
 def test_preflight_is_read_only_and_reports_complete_stage_modules(tmp_path: Path) -> None:
@@ -289,7 +289,7 @@ def test_recording_reward_preserves_an_earlier_native_policy_path() -> None:
                 {
                     "task_id": "getmoto__moto-7023",
                     "termination": "submitted",
-                    "steps": [step("edit_file"), step("submit")],
+                        "steps": [step("str_replace_editor"), step("finish")],
                 },
             )()
             environment.frozen_patch = "diff --git a/x b/x\n"
@@ -353,7 +353,7 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
 def test_native_policy_path_requires_executed_edit_submit_patch_verifier_and_reward() -> None:
     step = lambda name: type("Step", (), {"action": type("Action", (), {"tool_name": name})()})()
     trajectory = type(
-        "Trajectory", (), {"termination": "submitted", "steps": [step("edit_file"), step("submit")]}
+        "Trajectory", (), {"termination": "submitted", "steps": [step("str_replace_editor"), step("finish")]}
     )()
     environment = type(
         "Environment",

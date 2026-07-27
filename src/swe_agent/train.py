@@ -47,6 +47,8 @@ REQUIRED_DOMAIN_MODULES = (
     "prompts.py",
     "docker.py",
     "tools.py",
+    "tool_protocol.py",
+    "openhands_editor.py",
     "verifier.py",
     "environment.py",
     "rewards.py",
@@ -182,7 +184,6 @@ def build_grpo_config(
         top_p=generation.top_p,
         top_k=generation.top_k,
         repetition_penalty=generation.repetition_penalty,
-        vllm_structured_outputs_regex=generation.structured_outputs_regex,
         beta=grpo.beta,
         epsilon=grpo.epsilon,
         epsilon_high=grpo.epsilon_high,
@@ -244,25 +245,22 @@ def build_trainer(
         reward_funcs=reward_func,
         peft_config=build_peft_config(config),
         quantization_config=build_quantization_config(config),
-        max_consecutive_format_errors=config.generation.max_consecutive_format_errors,
+        max_consecutive_protocol_errors=config.generation.max_consecutive_protocol_errors,
     )
 
 
 def build_processing_class(config: ProjectConfig) -> Any:
-    """构造正式 Trainer 与协议测试共享的 tokenizer/response-schema 对象。"""
+    """构造只渲染本地 OpenHands scaffold 的 tokenizer。"""
 
     from transformers import AutoTokenizer
-    from trl.chat_template_utils import add_response_schema
-
-    from swe_agent.tool_protocol import install_compatible_tool_call_parser
+    from swe_agent.tool_protocol import install_openhands_tool_protocol
 
     tokenizer = AutoTokenizer.from_pretrained(
         config.model.tokenizer_path,
         local_files_only=True,
         trust_remote_code=config.model.trust_remote_code,
     )
-    tokenizer = add_response_schema(tokenizer)
-    return install_compatible_tool_call_parser(tokenizer)
+    return install_openhands_tool_protocol(tokenizer)
 
 
 def _run_metrics_callback(recorder: Any) -> Any:
@@ -1385,8 +1383,8 @@ def _native_policy_path_reached(environments: list[Any]) -> bool:
             continue
         tool_names = [step.action.tool_name for step in trajectory.steps]
         if (
-            "edit_file" in tool_names
-            and "submit" in tool_names
+            "str_replace_editor" in tool_names
+            and "finish" in tool_names
             and isinstance(patch, str)
             and bool(patch.strip())
             and verification is not None

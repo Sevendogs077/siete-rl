@@ -261,9 +261,9 @@ def check_tokenizer(config: ProjectConfig) -> list[Check]:
             max_timeout_sec=config.docker.exec_timeout_sec,
         )
         tools = [
-            member
+            name
             for name, member in _inspect.getmembers(environment, predicate=_inspect.ismethod)
-            if name not in {"reset", "get_reward"} and not name.startswith("_")
+            if name != "reset" and not name.startswith("_")
         ]
         rendered = tokenizer.apply_chat_template(
             build_prompt(
@@ -278,8 +278,9 @@ def check_tokenizer(config: ProjectConfig) -> list[Check]:
             tokenize=False,
             add_generation_prompt=True,
         )
-        ok = rendered.count('"type": "function"') == 6 and "<tool_call>" in rendered
-        return [Check("tokenizer.tool_render", ok, "六工具 + <tool_call> 指令" if ok else "渲染异常")]
+        expected = ["execute_bash", "finish", "str_replace_editor"]
+        ok = tools == expected and rendered.count("---- BEGIN FUNCTION") == 3 and "<tool_call>" not in rendered
+        return [Check("tokenizer.tool_render", ok, "OpenHands 三工具 scaffold" if ok else "渲染异常")]
     except Exception as exc:
         return [Check("tokenizer.tool_render", False, str(exc))]
 

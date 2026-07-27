@@ -1,0 +1,14 @@
+[
+  {
+    "name": "reasoning_bash",
+    "response": "I will inspect the repository.\n<function=execute_bash>\n<parameter=command>pwd</parameter>\n</function>",
+    "tool": "execute_bash",
+    "arguments": {"command": "pwd"}
+  },
+  {
+    "name": "finish",
+    "response": "<function=finish>\n</function>",
+    "tool": "finish",
+    "arguments": {}
+  }
+]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from importlib.metadata import entry_points
 from pathlib import Path
+import ast
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,3 +43,17 @@ def test_package_has_no_legacy_control_plane() -> None:
     assert not (package_root / "runtime").exists()
     assert not (package_root / "training").exists()
     assert not (package_root / "workflow.py").exists()
+
+
+def test_runtime_code_has_no_external_openhands_dependency() -> None:
+    forbidden = {"openhands", "openhands_aci", "litellm", "browsergym"}
+    for root in (PROJECT_ROOT / "src", PROJECT_ROOT / "tests"):
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import): names = [item.name for item in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module: names = [node.module]
+                assert not any(name.split(".")[0] in forbidden for name in names), path
+    dependencies = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
+    assert not any(name in dependencies for name in forbidden)

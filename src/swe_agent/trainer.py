@@ -1,4 +1,4 @@
-"""GRPOTrainer 子类：环境信号终止 + 循环结束归因。
+"""GRPOTrainer 子类：OpenHands 对话状态机 + 循环结束归因。
 
 `_tool_call_loop` 镜像 `trl==1.8.0` 的 `GRPOTrainer._tool_call_loop`，
 仅在若干处插入 swe_agent 逻辑（以 `# >>> swe_agent` 标记）：
@@ -32,43 +32,61 @@ _PARSE_ERROR_SENTINEL = "swe_agent_parse_error"
 """哨兵 tool call：parse_error 样本留在循环内接受格式反馈，不进入真实工具执行。"""
 
 _FORMAT_FEEDBACK_TEMPLATE = (
-    "error: the previous assistant message was not one complete valid tool call ({reason}). "
-    "Respond with exactly one complete Qwen <tool_call>, JSON object, or fenced JSON block; "
-    "do not add prose before or after it."
+    "ERROR: the previous assistant response could not be parsed as one complete "
+    "OpenHands function call ({reason}). Use <function=...> with valid parameters."
 )
+_PLAIN_MESSAGE_SENTINEL = "swe_agent_plain_message"
 
 
 class SWEGRPOTrainer(GRPOTrainer):
     """在官方 GRPOTrainer 上加入环境信号终止；其余行为与 TRL 完全一致。"""
 
-    def __init__(self, *args, max_consecutive_format_errors: int, **kwargs) -> None:
-        if max_consecutive_format_errors < 1:
-            raise ValueError("max_consecutive_format_errors must be positive")
-        self.max_consecutive_format_errors = max_consecutive_format_errors
+    def __init__(self, *args, max_consecutive_protocol_errors: int, **kwargs) -> None:
+        if max_consecutive_protocol_errors < 1:
+            raise ValueError("max_consecutive_protocol_errors must be positive")
+        self.max_consecutive_protocol_errors = max_consecutive_protocol_errors
         super().__init__(*args, **kwargs)
 
     @staticmethod
-    def _tool_calls_or_parse_error(completion):
-        """严格工具回合中，没有完整调用的任意输出都必须进入格式恢复。"""
+    def _next_action(completion):
+        """将 parser 结果区分为工具、普通消息与协议错误。"""
 
         tool_calls = completion.get("tool_calls")
         if tool_calls:
             return tool_calls
         completion.setdefault("role", "assistant")
         completion.setdefault("content", "")
-        completion.setdefault(
-            "parse_error",
-            "assistant response did not contain one complete valid tool call",
-        )
-        return [_PARSE_ERROR_SENTINEL]
+        if completion.get("parse_error"):
+            return [_PARSE_ERROR_SENTINEL]
+        return [_PLAIN_MESSAGE_SENTINEL]
+
+    def _get_openhands_suffix_ids(self, messages):
+        """渲染 runtime user turn 与下一轮 generation marker。
+
+        OpenHands scaffold 只使用普通 assistant/user 对话；因此不能调用 TRL
+        专用于 ``role=tool`` 的 `_get_tool_suffix_ids`。真实 tokenizer 的
+        prefix-preserving 性质由接口集成测试覆盖；裸 trainer 测试可提供这个
+        helper 的替身。
+        """
+        if hasattr(self._tokenizer, "apply_chat_template"):
+            rendered = self._tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                # Transformers 5 的 tokenizer 在 tokenize=True 时默认可返回
+                # BatchEncoding；TRL 后续会把 suffix 当作 token list 拼接。
+                return_dict=False,
+            )
+            return list(rendered)
+        return self._get_tool_suffix_ids(messages)
 
     def _tool_call_loop(self, prompts, prompt_ids, completion_ids, completions, logprobs, images, multimodal_fields):
         # Tool execution loop: execute tools, then regenerate completions with tool results appended to the prompt
         tool_calls = [completion[0].get("tool_calls") for completion in completions]
-        # >>> swe_agent: 所有无 tool call 输出都进入格式恢复
+        # OpenHands 允许普通 assistant message；只有显式 parse_error 才进入恢复。
         format_error_counts = [0] * len(completions)
         tool_calls = [
-            self._tool_calls_or_parse_error(completion[0])
+            self._next_action(completion[0])
             for calls, completion in zip(tool_calls, completions, strict=True)
         ]
         # <<< swe_agent
@@ -103,15 +121,18 @@ class SWEGRPOTrainer(GRPOTrainer):
                 # >>> swe_agent: 哨兵样本跳过工具执行，注入格式反馈消息（mask=0 由 suffix 机制保证）
                 if tool_call_list == [_PARSE_ERROR_SENTINEL]:
                     format_error_counts[idx_with_tool] += 1
-                    if format_error_counts[idx_with_tool] < self.max_consecutive_format_errors:
+                    if format_error_counts[idx_with_tool] < self.max_consecutive_protocol_errors:
                         reason = completions[idx_with_tool][-1].get("parse_error", "unknown parse error")
-                        feedback = {
-                            "role": "tool",
-                            "name": "format_error",
-                            "content": _FORMAT_FEEDBACK_TEMPLATE.format(reason=reason),
-                        }
+                        feedback = {"role": "user", "content": _FORMAT_FEEDBACK_TEMPLATE.format(reason=reason)}
                         prompt_completion_tool.append(feedback)
                         completions[idx_with_tool].append(feedback)
+                    continue
+                if tool_call_list == [_PLAIN_MESSAGE_SENTINEL]:
+                    # 普通消息不是工具失败，也不写领域 Step。
+                    from swe_agent.tool_protocol import FIXED_FAKE_USER
+                    prompt_completion_tool.append({"role": "user", "content": FIXED_FAKE_USER})
+                    completions[idx_with_tool].append({"role": "user", "content": FIXED_FAKE_USER})
+                    format_error_counts[idx_with_tool] = 0
                     continue
                 # <<< swe_agent
                 async_coros = []
@@ -160,7 +181,9 @@ class SWEGRPOTrainer(GRPOTrainer):
                     # (e.g., [{"type": "image", "image": ...}, {"type": "text", "text": "..."}]),
                     # pass them through directly so _tokenize_prompts can extract images for VLMs.
                     content = result if isinstance(result, list) else str(result)
-                    tool_message = {"role": "tool", "name": name, "content": content}
+                    # OpenHands observation 是普通 user turn，而不是 Qwen role=tool。
+                    from swe_agent.tool_protocol import render_observation
+                    tool_message = {"role": "user", "content": render_observation(name, str(content), error=isinstance(result, dict) and "error" in result)}
                     # Collect images from multimodal tool responses
                     if isinstance(content, list):
                         for part in content:
@@ -178,7 +201,7 @@ class SWEGRPOTrainer(GRPOTrainer):
             else:
                 terminated_flags = [False] * len(idxs_with_tool)
             breaker_flags = [
-                format_error_counts[idx_with_tool] >= self.max_consecutive_format_errors
+                format_error_counts[idx_with_tool] >= self.max_consecutive_protocol_errors
                 for idx_with_tool in idxs_with_tool
             ]
             exit_flags = [
@@ -209,11 +232,11 @@ class SWEGRPOTrainer(GRPOTrainer):
                 # Extract trailing tool messages from completions
                 tool_messages = []
                 for message in reversed(completions[idx_with_tool]):
-                    if message["role"] == "tool":
+                    if message["role"] == "user":
                         tool_messages.insert(0, message)
                     else:
                         break
-                suffix_ids = self._get_tool_suffix_ids(tool_messages)
+                suffix_ids = self._get_openhands_suffix_ids(tool_messages)
                 prompt_completion_tool_ids.append(
                     prompt_ids[idx_with_tool] + completion_ids[idx_with_tool] + suffix_ids
                 )
@@ -336,7 +359,7 @@ class SWEGRPOTrainer(GRPOTrainer):
                     loop_exit_reasons[idx] = "context_overlong"
                     tool_calls.append(None)
                     continue
-                calls = self._tool_calls_or_parse_error(completion)
+                calls = self._next_action(completion)
                 if calls != [_PARSE_ERROR_SENTINEL]:
                     format_error_counts[idx] = 0
                 tool_calls.append(calls)

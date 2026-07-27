@@ -11,7 +11,7 @@ from swe_agent.config import LORA_TARGET_MODULES, ProjectConfig, load_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "configs"
-CONFIG_7B = CONFIG_DIR / "grpo_swegym_qwen2_5_coder_7b_lora.yaml"
+CONFIG_7B = CONFIG_DIR / "grpo_swegym_openhands_7b_lora.yaml"
 
 
 def test_complete_config_parses_independently() -> None:
@@ -158,12 +158,11 @@ def test_steering_parameters_accept_theoretical_boundaries() -> None:
         max_completion_length=1,
         context_safety_margin=0,
         max_tool_calling_iterations=1,
-        max_consecutive_format_errors=1,
+            max_consecutive_protocol_errors=1,
         temperature=0.1,
         top_p=1.0,
         top_k=0,
         repetition_penalty=0.1,
-        structured_outputs_regex=r"\{.*\}",
     )
     payload["grpo"].update(
         num_generations=2,

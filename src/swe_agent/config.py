@@ -81,8 +81,6 @@ class PeftConfig(StrictConfig):
 
 
 class ChatConfig(StrictConfig):
-    native_tool_calling: Literal[True]
-    add_response_schema: Literal[True]
     max_prompt_length: int = Field(ge=1)
     max_observation_chars: int = Field(ge=1)
 
@@ -91,12 +89,11 @@ class GenerationConfig(StrictConfig):
     max_completion_length: int = Field(ge=1)
     context_safety_margin: int = Field(ge=0)
     max_tool_calling_iterations: int = Field(ge=1)
-    max_consecutive_format_errors: int = Field(ge=1)
+    max_consecutive_protocol_errors: int = Field(ge=1)
     temperature: float = Field(gt=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
     top_k: int = Field(ge=0)
     repetition_penalty: float = Field(gt=0.0)
-    structured_outputs_regex: str | None
 
 
 class GRPOConfigValues(StrictConfig):

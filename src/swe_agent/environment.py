@@ -1,8 +1,9 @@
-"""TRL environment adapter：固定六工具、episode 状态与资源收束。"""
+"""TRL environment adapter：OpenHands 三工具、episode 状态与资源收束。"""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
+import re
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -80,7 +81,7 @@ class SWEEnvironment:
     def frozen_patch(self) -> str | None:
         return self._frozen_patch
 
-    def reset(self, task_id: str, **kwargs: object) -> str:
+    def reset(self, task_id: str, **kwargs: object) -> None:
         """Start a fresh repository episode for one public task ID."""
 
         del kwargs
@@ -107,10 +108,13 @@ class SWEEnvironment:
         self._sandbox = sandbox
         try:
             sandbox.open()
+            workspace = _workspace_for_task(task_id)
+            _install_workspace_aliases(sandbox, workspace)
             self._executor = ToolExecutor(
                 sandbox,
                 output_limit_chars=self._output_limit_chars,
                 max_timeout_sec=self._max_timeout_sec,
+                workspace=workspace,
             )
         except BaseException as exc:
             self._infrastructure_error = exc
@@ -123,100 +127,23 @@ class SWEEnvironment:
                     f"{type(cleanup_exc).__name__}: {cleanup_exc}"
                 )
             raise
-        return (
-            f"Fresh repository for task {task_id} is ready at "
-            f"{sample.environment.workdir}. Use the native tools to inspect and repair it."
-        )
+        return None
 
-    def list_files(self, path: str, max_entries: int = 200) -> str:
-        """List repository files with bounded output.
+    def execute_bash(self, command: str) -> str:
+        """Execute one bash command in the episode workspace."""
+        return self._call_tool("execute_bash", {"command": command})
 
-        Args:
-            path: Repository-relative directory.
-            max_entries: Maximum number of file paths to list.
-        """
-
-        return self._call_tool("list_files", {"path": path, "max_entries": max_entries})
-
-    def read_file(
-        self, path: str, start_line: int | None = None, end_line: int | None = None
+    def str_replace_editor(
+        self, command: str, path: str, file_text: str | None = None,
+        old_str: str | None = None, new_str: str | None = None,
+        insert_line: int | None = None, view_range: list[int] | None = None,
     ) -> str:
-        """Read a numbered window from one UTF-8 repository file.
+        """View or edit a container file with the OpenHands editor."""
+        return self._call_tool("str_replace_editor", _without_none({"command": command, "path": path, "file_text": file_text, "old_str": old_str, "new_str": new_str, "insert_line": insert_line, "view_range": view_range}))
 
-        Args:
-            path: Repository-relative file path.
-            start_line: Optional first line number, starting at one.
-            end_line: Optional final line number, inclusive.
-        """
-
-        return self._call_tool(
-            "read_file",
-            _without_none({"path": path, "start_line": start_line, "end_line": end_line}),
-        )
-
-    def search_code(self, query: str, path: str = ".", max_matches: int = 50) -> str:
-        """Search for exact text in repository files.
-
-        Args:
-            query: Exact text to search for.
-            path: Repository-relative file or directory.
-            max_matches: Maximum number of matching lines.
-        """
-
-        return self._call_tool(
-            "search_code", {"query": query, "path": path, "max_matches": max_matches}
-        )
-
-    def edit_file(
-        self,
-        path: str,
-        operation: str,
-        old_text: str | None = None,
-        new_text: str | None = None,
-        content: str | None = None,
-        line: int | None = None,
-    ) -> str:
-        """Edit one repository file with replace, insert, or create.
-
-        Args:
-            path: Repository-relative file path.
-            operation: One of replace, insert, or create.
-            old_text: Unique old text required by replace.
-            new_text: Replacement or inserted text.
-            content: Complete file content required by create.
-            line: One-based insertion line required by insert.
-        """
-
-        return self._call_tool(
-            "edit_file",
-            _without_none(
-                {
-                    "path": path,
-                    "operation": operation,
-                    "old_text": old_text,
-                    "new_text": new_text,
-                    "content": content,
-                    "line": line,
-                }
-            ),
-        )
-
-    def run_command(self, command: str, timeout_sec: int | None = None) -> str:
-        """Run a diagnostic or public test command inside /testbed.
-
-        Args:
-            command: Shell command to execute.
-            timeout_sec: Optional timeout capped by the configured maximum.
-        """
-
-        return self._call_tool(
-            "run_command", _without_none({"command": command, "timeout_sec": timeout_sec})
-        )
-
-    def submit(self) -> str:
-        """Submit the current non-empty git diff and enter terminal-pending state."""
-
-        return self._call_tool("submit", {})
+    def finish(self) -> str:
+        """Freeze the current diff, including an empty diff, and terminate."""
+        return self._call_tool("finish", {})
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if self._executor is None or self._sandbox is None or self.episode_id is None:
@@ -229,13 +156,11 @@ class SWEEnvironment:
                 error_type="tool_error",
             )
             self._append_step(action, observation)
-            return observation.model_dump_json()
+            return observation.text
         try:
             validate_tool_arguments(name, arguments)
         except ToolContractError as exc:
-            return Observation(
-                text=str(exc), exit_code=1, error_type="tool_error"
-            ).model_dump_json()
+            return str(exc)
 
         action = Action(tool_name=name, arguments=arguments)
         try:
@@ -247,7 +172,7 @@ class SWEEnvironment:
             )
             raise
         self._append_step(action, observation)
-        if name == "submit" and observation.error_type is None and not observation.timed_out:
+        if name == "finish" and observation.error_type is None and not observation.timed_out:
             if self._executor.submitted_patch is None:
                 raise RuntimeError("successful submit did not freeze a patch")
             self._submitted = True
@@ -255,7 +180,7 @@ class SWEEnvironment:
             self._terminal_event = TerminalEvent(
                 kind="submitted", step_index=len(self._steps) - 1
             )
-        return observation.model_dump_json()
+        return observation.text
 
     def _record_loop_exit(self, reason: LoopExit) -> None:
         """由 trainer 在 tool-call loop 出口写回该样本的循环结束原因。"""
@@ -294,9 +219,13 @@ class SWEEnvironment:
             self._finalized = True
             return self._reward
 
-        if self._frozen_patch is None or not self._frozen_patch.strip():
+        if self._frozen_patch is None:
             raise RuntimeError("submitted episode is missing its frozen patch")
         self._close_rollout()
+        if not self._frozen_patch.strip():
+            self._reward = 0.0
+            self._finalized = True
+            return self._reward
         if self._verifier is None:
             self._verifier = self._verifier_factory(
                 self._sample, self._evaluation, self.episode_id
@@ -358,5 +287,24 @@ class SWEEnvironment:
         return events
 
 
-def _without_none(arguments: Mapping[str, Any]) -> dict[str, Any]:
+def _without_none(arguments: dict[str, Any]) -> dict[str, Any]:
     return {name: value for name, value in arguments.items() if value is not None}
+
+
+def _workspace_for_task(task_id: str) -> str:
+    return "/workspace/" + re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)
+
+
+def _install_workspace_aliases(sandbox: DockerSandbox, workspace: str) -> None:
+    """以 argv 调用容器 Python helper；冲突的 alias 必须 fail-closed。"""
+    program = """import os, pathlib, sys
+workspace = pathlib.Path(sys.argv[1]); target = pathlib.Path('/testbed')
+workspace.parent.mkdir(parents=True, exist_ok=True)
+for alias in (workspace, pathlib.Path('/repo')):
+    if alias.is_symlink() and alias.resolve() == target: continue
+    if alias.exists() or alias.is_symlink(): raise SystemExit(f'alias conflict: {alias}')
+    alias.symlink_to(target)
+"""
+    result = sandbox.exec(["python", "-c", program, workspace])
+    if result.timed_out or result.exit_code != 0:
+        raise DockerRuntimeError((result.stderr or result.stdout or "failed to create workspace aliases").strip())
