@@ -242,7 +242,7 @@ class DockerSandbox:
         if self.container_id is None:
             return
         target = self.container_id
-        result = self.client.run(["docker", "rm", "-f", target], timeout_sec=30)
+        result = self.client.run(["docker", "rm", "-f", target], timeout_sec=120)
         missing = _is_missing_container(result)
         success = result.exit_code == 0 and not result.timed_out
         self.cleanup_sequence += 1

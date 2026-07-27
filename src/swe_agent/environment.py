@@ -7,7 +7,7 @@ import re
 from typing import Any, Literal
 from uuid import uuid4
 
-from swe_agent.docker import DockerRuntimeError, DockerSandbox
+from swe_agent.docker import ContainerCleanupError, DockerRuntimeError, DockerSandbox
 from swe_agent.models import (
     Action,
     Evaluation,
@@ -244,6 +244,11 @@ class SWEEnvironment:
         sandbox = self._sandbox
         try:
             sandbox.close()
+        except ContainerCleanupError:
+            # close 失败保留容器 ID（docker.py 既有契约），下方事件 residual=True；
+            # 外层 sweeper 会重试清理。瞬时 docker 抖动不应杀死整个训练 run
+            # （见 run 20260727T131837Z-ea40 step 3 的 rm 30s 超时）。
+            pass
         finally:
             self._events.append(
                 {

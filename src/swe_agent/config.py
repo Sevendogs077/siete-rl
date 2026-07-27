@@ -113,7 +113,9 @@ class GRPOConfigValues(StrictConfig):
     router_aux_loss_coef: float = Field(ge=0.0)
     shuffle_dataset: bool
     vllm_importance_sampling_correction: bool
-    vllm_importance_sampling_mode: Literal["sequence_mask", "sequence", "token"]
+    vllm_importance_sampling_mode: Literal[
+        "sequence_mask", "sequence_truncate", "token_mask", "token_truncate"
+    ]
     vllm_importance_sampling_clip_max: float = Field(gt=0.0)
     vllm_importance_sampling_clip_min: float | None = Field(ge=0.0)
     per_device_train_batch_size: int = Field(ge=1)

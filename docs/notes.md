@@ -81,3 +81,16 @@ lm_head + log_softmax + 取目标 token + GRPO loss
 ### 1a5c98
 
 完成 Liger Kernel fused GRPO loss，目前可跑：16384 completion length
+
+top-p、top-k、repetition_penalty 等参数导致 vLLM processed_logprobs 和 HF trainer 计算的 logprob 不一致，且原本采用 sequence level 会将一个序列每个 token 的 logprob 相加，就是概率相乘再对 GRPO loss 进行重要性采样（注：这里不是 GRPO 核心算法里面的重要性采样，而是缓解 vLLM 和 trainer 采样分布不同的重要性采样），由于每个 token 都有一定程度的误差，长序列轨迹下这个采样权重趋近于 0，导致最后 Loss 趋近于 0，因此必须采用 token level
+
+`vllm_importance_sampling_mode` 设为 `sequence_mask` 理论更严格，但对数千 token 的 Agent trajectory，如果不加 truncate/mask，数值上几乎不可用，sequence_mask 会将整条序列各 token 的 logprob 差累加，等价于连乘 token 级概率比；在长轨迹中，微小误差会持续累积，使重要性采样权重趋近于 0，进而将该序列的 Policy Loss 几乎完全抹除
+
+| 参数值              | 介绍                                                         |
+| ------------------- | ------------------------------------------------------------ |
+| `token_truncate`    | 逐 token 计算 ratio，超出上下界时裁剪到边界，异常 token 仍保留梯度。 |
+| `token_mask`        | 逐 token 计算 ratio，超出上下界的 token 权重直接置 0。       |
+| `sequence_truncate` | 将整条序列的 token ratio 连乘为一个权重，超出上下界时裁剪，再作用于整条序列。 |
+| `sequence_mask`     | 将整条序列的 token ratio 连乘为一个权重，超出上下界时整条序列权重置 0。 |
+
+目前采用 token_truncate，但其它参数保持默认

@@ -243,3 +243,26 @@ def test_use_liger_kernel_rejects_sequence_token_importance_sampling() -> None:
     payload["grpo"]["importance_sampling_level"] = "sequence_token"
     with pytest.raises(ValidationError, match="use_liger_kernel"):
         ProjectConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "mode", ["sequence_mask", "sequence_truncate", "token_mask", "token_truncate"]
+)
+def test_vllm_is_mode_accepts_trl_supported_values(mode: str) -> None:
+    """与 TRL 1.8 GRPOTrainer 的运行时枚举保持一致（grpo_trainer.py:2477）。"""
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["grpo"]["vllm_importance_sampling_mode"] = mode
+
+    validated = ProjectConfig.model_validate(payload)
+
+    assert validated.grpo.vllm_importance_sampling_mode == mode
+
+
+@pytest.mark.parametrize("mode", ["token", "sequence", "token_level", ""])
+def test_vllm_is_mode_rejects_values_trl_would_crash_on(mode: str) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")
+    payload["grpo"]["vllm_importance_sampling_mode"] = mode
+    with pytest.raises(ValidationError):
+        ProjectConfig.model_validate(payload)

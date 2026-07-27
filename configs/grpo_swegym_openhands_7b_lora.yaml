@@ -68,7 +68,7 @@ grpo:
   router_aux_loss_coef: 0.0
   shuffle_dataset: true
   vllm_importance_sampling_correction: true
-  vllm_importance_sampling_mode: sequence_mask
+  vllm_importance_sampling_mode: token_truncate
   vllm_importance_sampling_clip_max: 3.0
   vllm_importance_sampling_clip_min: null
   per_device_train_batch_size: 1

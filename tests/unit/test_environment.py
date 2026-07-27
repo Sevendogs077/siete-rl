@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from collections import deque
 
-from swe_agent.docker import CommandResult
+from swe_agent.docker import CommandResult, ContainerCleanupError
 from swe_agent.environment import SWEEnvironment
 from swe_agent.models import Environment, Evaluation, Sample, Task, Verification
 
@@ -66,3 +66,19 @@ def test_finish_nonempty_patch_verifies_once() -> None:
     assert env._finalize([]) == 1.0
     assert env._finalize([]) == 1.0
     assert verifiers[0].calls == 1
+
+
+def test_close_rollout_cleanup_failure_is_not_fatal() -> None:
+    """docker rm 瞬时失败不应杀死训练 run：容器 ID 保留（residual），交给外层 sweeper 重试。"""
+    env, task_id, sandboxes, _ = harness()
+    env.reset(task_id)
+
+    def failing_close() -> None:
+        raise ContainerCleanupError("failed to remove container (exit=124, timeout=True)")
+
+    sandboxes[0].close = failing_close
+    env.finish()
+
+    assert env._finalize([]) == 0.0
+    event = env._events[-1]
+    assert event["scope"] == "rollout" and event["residual"] is True
