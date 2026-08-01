@@ -94,3 +94,7 @@ top-p、top-k、repetition_penalty 等参数导致 vLLM processed_logprobs 和 H
 | `sequence_mask`     | 将整条序列的 token ratio 连乘为一个权重，超出上下界时整条序列权重置 0。 |
 
 目前采用 token_truncate，但其它参数保持默认
+
+## 28118f9
+
+`gradient_accumulation_steps` 必须始终等于 `num_generations`：此时 1 组=1 个 optimizer step，`max_steps` 即任务组数，两者一旦脱节就会出现步数与组数错位。

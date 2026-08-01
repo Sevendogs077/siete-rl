@@ -10,7 +10,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def test_only_planned_launcher_exists() -> None:
     scripts = sorted(path.name for path in (PROJECT_ROOT / "scripts").iterdir())
-    assert scripts == ["dry_run.sh", "grpo.sh", "prepare.sh", "qualify.sh"]
+    assert scripts == [
+        "dry_run.sh",
+        "grpo.sh",
+        "prepare.sh",
+        "qualify.sh",
+        "rebuild_swegym_mypy_images.sh",
+    ]
     launcher = (PROJECT_ROOT / "scripts/grpo.sh").read_text(encoding="utf-8")
     assert 'exec .venv/bin/swe_agent grpo --config "$config_path"' in launcher
     # vLLM server 生命周期、GPU 拆分与容器清扫均已内嵌 swe_agent.launcher

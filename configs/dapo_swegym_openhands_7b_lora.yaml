@@ -56,7 +56,7 @@ grpo:
   reward_type: binary_verifier
   num_generations: 16
   num_iterations: 1
-  loss_type: grpo
+  loss_type: dapo
   scale_rewards: none
   multi_objective_aggregation: sum_then_normalize
   epsilon: 0.2

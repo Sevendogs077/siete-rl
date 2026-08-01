@@ -60,6 +60,9 @@ printf '%s\n' "${tags[@]}" | xargs -P "$CONCURRENCY" -I{} bash -c 'pull_one "$@"
 ok=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^xingyaoww/sweb.eval.x86_64\.' || true)
 echo "[$(date -Is)] done: $ok/${#tags[@]} images present; failures listed in $FAILED" | tee -a "$LOG"
 
+# SWE-Gym 官方旧版 mypy 规格会用 sed 修改 tracked requirements；从锁定源码重建这五个镜像。
+scripts/rebuild_swegym_mypy_images.sh
+
 echo "[$(date -Is)] generating task assets" | tee -a "$LOG"
 .venv/bin/python - "$PARQUET" "$MIRROR" <<'EOF'
 import sys
