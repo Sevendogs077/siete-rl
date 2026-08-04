@@ -1,251 +1,222 @@
-# SWE-bench Verified 训练后评测最小计划
+# SWE-bench Verified 训练后评测实施计划
 
-> 状态：2026-07-31 修订。Verified 500 个 Docker 镜像已 500/500 就绪（见 §7.6）；
-> 资产阶段完成，进入评测实施阶段。
->
-> 目标：尽量不改变现有 GRPO 训练闭环，在本项目完整 Agent Loop 下评测训练后的
-> LoRA 权重，并用 SWE-bench official harness 得到可用于论文或简历的结果。
->
-> 2026-07-31 修订要点（经代码核查与外部仓库调研后收敛）：
->
-> 1. 明确 scaffold 版本决策：评测固定使用评测时工作区当前代码的 prompt/工具/
->    parser 语义，不恢复训练时 scaffold（§5）；正式结论将在 scaffold 定稿后
->    重新训练并重新评测。
-> 2. 新增 docker.py base-commit 校验与官方 TestSpec 镜像 HEAD 冲突的适配（§4.3）。
-> 3. 明确 vLLM serving 方案：原生 `vllm serve --enable-lora`，同一 server 同时
->    serve base 与 LoRA adapter，`--eval-base` 边际成本为零（§4.4）。
-> 4. 补充 official harness 离线化细节与空 patch 排除规则（§6）。
-> 5. 更新镜像资产状态与阻塞项（§7.6、§11），新增实施门禁（§10）。
+> 状态：2026-08-04 收敛修订。Verified 500 个 Docker 镜像已 500/500 就绪；
+> 当前只实施独立评测闭环，不扩建通用评测平台，不修改训练逻辑。
 
-## 1. 最终决策
+## 0. 唯一目标与完成定义
 
-### 1.1 默认只评测 final
+唯一目标：使用本项目 Agent Loop 和 SWE-bench official harness 评测一个已指定
+训练 run 的 final LoRA，产出可复核的 SWE-bench Verified 结果，并按用户选择与
+同协议本地 base 及此前记录的公开 baseline 放在同一份比较结果中。
 
-不建立 canonical base registry，也不为每个 run 自动重复评测 base。
+计划完成且全部门禁通过后，可以准确地说：
 
-默认行为：
+> 项目新增了一个独立于训练闭环的 post-training eval 系统；它能在固定评测协议下
+> 运行目标 LoRA，并可选运行对应 base，收集 patch，调用固定 revision 的
+> SWE-bench official harness，并输出 resolved 数和 resolve rate；运行 base 时再输出
+> base/final 差值。
 
-```text
-eval-base = False
-只运行 final 或用户显式指定的 checkpoint
+结果主张分两层：
+
+1. **严格主比较**：同一次 evaluator、同一任务集、同一 scaffold、同一预算和同一
+   serving 协议下的本地 base 与 final。可以报告 `final - local_base`，表述为
+   “该 LoRA 权重在本项目固定 eval 协议下相对其 base 的差值”。
+2. **外部参考比较**：SWE-Gym、SkyRL 等已记录数字。由于 scaffold、预算或发布信息
+   不完全相同，只能并列表述为端到端系统参考，不声称严格 apples-to-apples，也不
+   用其差值冒充本项目 LoRA 的因果增益。
+
+在完整 500 任务 inference 和 official grading 完成前，只能说“实现并通过 smoke”，
+不能提前声称已经得到有效的完整 benchmark 结果。
+
+## 1. 对现有代码库和训练逻辑的边界
+
+### 1.1 允许的文件变化
+
+第一阶段只新增：
+
+| 文件 | 用途 |
+|---|---|
+| `scripts/eval.sh` | 薄入口；以项目环境启动 evaluator |
+| `src/swe_agent/eval.py` | run 解析、Verified 任务装载、eval-only sandbox/environment 适配、vLLM 生命周期、Agent inference、prediction 与 official harness 调用 |
+| `tests/test_eval.py` | 纯 eval 单元测试和 characterization test |
+
+计划文件本身之外，不修改现有训练文件。特别禁止修改：
+
+- `src/swe_agent/train.py`；
+- `src/swe_agent/trainer.py` 中的训练 Loop；
+- `src/swe_agent/config.py` 的训练 schema；
+- reward、verifier、recording、supervisor 和现有训练脚本；
+- `src/swe_agent/docker.py` 的训练期 sandbox 合同。
+
+eval 通过导入和复用既有能力工作，不实例化完整 `GRPOTrainer`，不创建 optimizer、
+reference model、reward 计算或 NCCL 同步。评测使用独立进程、run 内独立的 `evals/<eval-timestamp>/`
+输出子目录、独立 Docker run label 和一张明确空闲的 GPU；四张卡都在训练时等待，不
+抢占训练资源。
+
+### 1.2 为什么不会破坏训练逻辑
+
+- 新入口不被 `scripts/grpo.sh`、`src/swe_agent/train.py` 或训练 supervisor 调用；
+- eval-only Docker 适配定义在 `eval.py`，不放宽训练期 base/image 校验；
+- eval-only environment 不调用训练用 `_finalize()`，因此不会调用 SWE-Gym verifier、
+  不生成 reward；它只快照 patch/termination 并关闭 rollout container；
+- 复用 `_tool_call_loop` 仅作为现有方法的调用者，不修改其实现；
+- 新增回归门禁要求现有 unit/integration tests 全部继续通过。
+
+因此，按本计划实施不会改变训练语义。实际风险集中在 eval 自己失败或资源未清理，
+对应门禁见 §7；这些失败必须 fail closed，不能影响正在运行的训练。
+
+## 2. 最小用户入口与输出
+
+第一阶段只支持 run 根目录中的 `final` adapter，不做 checkpoint 自动发现、选优或
+多模型 sweep。入口接受 `outputs/` 或 `_archive/` 中的真实绝对 run 路径：
+
+```bash
+# 单任务 plumbing smoke
+EVAL_TASK_IDS=astropy__astropy-14539 \
+CUDA_VISIBLE_DEVICES=2 \
+scripts/eval.sh /absolute/path/to/run
+
+# 默认只评测 final
+EVAL_BASE=False CUDA_VISIBLE_DEVICES=2 scripts/eval.sh /absolute/path/to/run
+
+# 显式评测 local base 和 final
+EVAL_BASE=True CUDA_VISIBLE_DEVICES=2 scripts/eval.sh /absolute/path/to/run
 ```
 
-只有用户在命令行显式传入 `--eval-base True` 时，才在同一次评测中先运行该 run
-对应的 base，再运行目标 candidate，并输出 base/final 对比。base 与 candidate
-共用同一个 vLLM server（§4.4），base 评测不需要第二次启动推理服务。
+run 根目录必须同时存在 `adapter_config.json` 与 `adapter_model.safetensors`；base 只从
+`adapter_config.json.base_model_name_or_path` 解析，不猜测、不建立 registry、不修改
+训练 checkpoint。
 
-评测仍记录模型、代码、prompt、sampling、数据和 harness revision，目的是让结果
-可查阅，而不是建立自动协议校验系统。其中"代码"指**评测执行时工作区的
-git commit 与 dirty 状态**（prompt/工具/parser 语义来源，见 §5），不是训练
-run 的 code_commit。
+`EVAL_BASE` 默认严格为 `False`，只接受字符串 `True` 或 `False`，其他值立即报错。
+`False` 时只评测 final；`True` 时先评测 local base，再评测 final。单任务 smoke
+遵循相同开关，不隐式增加 base 评测。
 
 最小输出：
 
 ```text
-eval_outputs/
-  runs/<training-run-id>/<candidate>/
-    metadata.json
+<run-root>/evals/<eval-timestamp>/
+  metadata.json           # 会话级协议：工作区 commit/dirty、数据/harness revision、
+                          # turn/context 预算、sampler、engine 参数、任务顺序、GPU
+  base/                   # 仅 EVAL_BASE=True 时存在
+    metadata.json         # serve 方式（shared-LoRA-engine 或 base-only fallback）
     predictions.jsonl
     official-report.json
-    base/                 # 仅 --eval-base True 时存在
-    comparison.json       # 仅 --eval-base True 时存在
+  candidate/
+    metadata.json         # runtime LoRA 或 merged fallback、adapter parity 结果
+    predictions.jsonl
+    official-report.json
+  comparison.json
 ```
 
-`metadata.json` 的 schema 即评测协议契约，至少包含：training run 路径与
-candidate、adapter 的 base_model_name_or_path、评测工作区 git commit/dirty、
-sampling 参数与 seed、turn/completion/context 上限、数据集 parquet sha256、
-harness revision、镜像 manifest sha256、vLLM serving 方式（adapter-serve 或
-merge-serve）与数值一致性 smoke 结果。后续任何 eval 代码修改不得改变已有
-metadata 的语义。
+`<run-root>` 是被评测训练 run 的根目录（`outputs/` 或 `_archive/` 下）。eval 只在 run
+内新增 `evals/` 子目录，不改动任何训练产物；每次评测生成新的 `<eval-timestamp>`
+目录，旧评测结果不可变，不覆盖、不选优。临时 merged model 等中间产物也只能位于
+该次评测的 `candidate/` 下。
 
-### 1.2 正式主张的边界
+`comparison.json` 始终包含 final 结果和 §6 的外部参考表。`EVAL_BASE=True` 时再包含
+base 的 evaluated、resolved、resolve rate、绝对百分点差和逐任务
+`base_only/final_only/both/neither` 计数；`False` 时明确记录 `local_base=not_run`，
+不得生成本地差值。基础设施失败单独记录，不得计为 unresolved，也不得从分母静默删除。
 
-默认只跑 final 时，结果写成：
+## 3. 固定评测协议与可比性
 
-> 本项目 GRPO final 在本项目 Agent Loop 和既定推理预算下取得 Y%。
+### 3.1 本地 base/final 协议
 
-只有使用 `--eval-base True` 得到同配置 base 后，才能进一步写"相对 base 提升
-Y-X 个百分点"。论文或榜单数字只作端到端系统参考，不能替代本地 base 来计算
-本项目的 GRPO 因果增益。
+`EVAL_BASE=True` 时，base 与 final 必须固定：
 
-注意：当前阶段评测使用评测时的工作区 scaffold（§5），而训练 rollout 使用的是
-训练时的工作区 scaffold；两者可能因 scaffold 未冻结而不同。因此第一阶段的
-base/final 差值严格说是"权重差 + scaffold 漂移"的混合效应，引用时必须注明。
-该限制在 scaffold 定稿并重训后消除。
+- 同一 Verified 500 数据 revision 和任务顺序；
+- 同一评测工作区 commit/dirty 状态，即同一 prompt、工具、parser；
+- 同一 tokenizer、context/completion 上限、turn 上限和 Docker 资源上限；
+- 同一 vLLM 版本、sampler backend、engine 参数和请求并发度；
+- `temperature=0`，采用 greedy decoding。
 
-如果要单独证明 scaffold 的贡献，需要以后增加"同一权重、不同 scaffold"的
-ablation；不属于第一阶段。
+评测 sampling 不再继承训练时 `temperature=1.0`。训练 sampling 是优化过程配置，
+不是评测协议；greedy evaluation 能减少在线 serving 的采样随机性，也与已记录的
+SWE-Gym 公开 baseline 更接近。turn/context 上限仍使用目标 run 的已解析配置，并在
+metadata 和外部对比中明确披露；不为 final 单独增加预算。配置的读取来源与缺失
+行为由实测决定，见 §8.1 第 1 条。
 
-### 1.3 Verified 不能用于挑 checkpoint
+vLLM [默认不承诺跨进程、跨批次的逐 token 完全可复现](https://docs.vllm.ai/en/v0.22.0/usage/reproducibility/)。因此固定 seed 仍记录为输入，
+但不把它描述为强一致性保证；运行 base 时固定任务顺序和并发度，禁止 base/final
+使用不同调度配置。
 
-- smoke task 只验证管线，不报告模型能力；
-- 正式 Verified 500 之前预先指定 `final` 或一个 `checkpoint-N`；
-- 不查看多个 checkpoint 的 Verified 结果后选择最高者；
-- 开发期 checkpoint 选择应使用训练 reward、SWE-Gym holdout 或另建 dev 集。
+### 3.2 scaffold 边界
 
-## 2. 第一阶段范围
+base 与 final 都使用评测执行时的当前工作区 scaffold，因此两者差值不是
+“权重差 + scaffold 漂移”的混合量；它是在同一当前 scaffold 下的权重对比。
 
-最小闭环：
+训练 rollout 可能使用较早的 scaffold，这会限制“训练过程完全复现”的主张，但不
+破坏 `EVAL_BASE=True` 时的 base/final 同协议比较。metadata 必须记录评测工作区
+git commit 和 dirty 状态，不恢复历史 scaffold，也不为此修改训练代码。
 
-```text
-一个 Verified gold-patch/environment smoke
-→ final 或预指定 checkpoint smoke
-→ final 的 Verified inference
-→ official grading
-→ 输出 final 结果
-→ 可选：--eval-base True 时再输出同次 base/final 对比
-```
+### 3.3 checkpoint 纪律
 
-不建设：
+正式 Verified 500 前由用户指定唯一 run，评测代码不浏览多个 checkpoint 后选最高
+结果。smoke 只验证管线，不用于报告能力。将来如需 checkpoint 评测，另行显式扩展，
+不在第一阶段预建通用 candidate resolver。
 
-- 通用评测平台；
-- 独立 Docker asset manager；
-- 自定义 Verified verifier；
-- per-task `task.json/eval.sh/grader.json` 资产生成；
-- 自动删除、prune 或镜像所有权数据库；
-- 复杂 resume/retry/reporting 系统（official harness 自身支持已完成实例跳过，
-  见 §6，不再另建）；
-- 多模型或多 checkpoint 自动 sweep；
-- 训练时 scaffold 版本恢复机制（评测固定使用当前工作区代码，见 §5）；
-- 训练代码大规模重构。
+## 4. 实现设计
 
-## 3. 最小用户入口
+### 4.1 复用现有 Agent Loop
 
-目标接口：
+现有完整状态机位于 `SWEGRPOTrainer._tool_call_loop`，已经处理普通 assistant
+message、fixed fake user、tool parse error、bash/editor/finish、termination、长度上限
+和 Loop exit reason。evaluator 只构造该方法需要的最小适配对象，并将单轮生成代理到
+原生 vLLM OpenAI-compatible endpoint；不调用 `GRPOTrainer.evaluate()`。
 
-```bash
-# 默认只评测 final
-CUDA_VISIBLE_DEVICES=2 scripts/eval.sh /absolute/path/to/run final
-
-# 显式要求同一次额外评测 base
-CUDA_VISIBLE_DEVICES=2 scripts/eval.sh \
-  /absolute/path/to/run final --eval-base True
-
-# 允许显式预指定 checkpoint；不自动选优
-CUDA_VISIBLE_DEVICES=2 scripts/eval.sh /absolute/path/to/run checkpoint-24
-
-# 单任务 plumbing smoke
-EVAL_TASK_IDS=astropy__astropy-14539 \
-CUDA_VISIBLE_DEVICES=2 \
-scripts/eval.sh /absolute/path/to/run final
-```
-
-入口接受普通 `outputs/` 和 `_archive/` 中的真实绝对路径，不假设 run 一定位于
-`outputs/<run-id>`。（已核实：`outputs/` 下近期 run 均无 adapter，带 final
-adapter 的 run 全部位于 `outputs/_archive/`。）
-
-候选解析：
-
-- `final`：run **根目录**下的 adapter 文件对（`adapter_config.json` +
-  `adapter_model.safetensors`）。已核实不存在 `final/` 子目录，训练
-  `save_model` 直接写入 run 根目录；
-- `checkpoint-N`：run 根目录下 `checkpoint-N/` 中的 adapter 文件对；
-- `--eval-base True`：从目标 adapter 的 `adapter_config.json` 的
-  `base_model_name_or_path` 解析 base，不猜测；
-- `--eval-base` 默认严格为 `False`；
-- 不存在或不完整时 fail closed；
-- 不做临时 merged model，不修改训练 checkpoint。
-
-GPU 使用约束：
-
-- 评测只需 **1 张空闲 GPU**（vLLM server，无 trainer 进程、无 NCCL 权重同步）；
-- 示例中的 `CUDA_VISIBLE_DEVICES=2` 仅作示意，实际以当时空闲卡为准；
-- 必须避开正在训练占用的卡；四卡全部被训练占用时评测排队等待，不抢占；
-- 容器侧按 `swe_agent.run_id` label 隔离（`docker.py:359-379`），eval 使用
-  自己的 run_id，不会触碰训练容器。
-
-## 4. Agent Loop 最小复用与推理服务
-
-### 4.1 复用 `_tool_call_loop`
-
-现有完整状态机位于 `SWEGRPOTrainer._tool_call_loop`
-（`src/swe_agent/trainer.py:83-380`），包含：
-
-- assistant 普通消息与 fixed fake user；
-- tool-call parse error 恢复；
-- bash/editor/finish 执行；
-- termination 轮询；
-- completion/context 超长处理；
-- completion token IDs 与 tool mask；
-- Loop exit reason。
-
-第一阶段不提取 `agent_loop.py`。薄 evaluator 完成首次 generation 后直接复用现有
-`_tool_call_loop`，不调用 `GRPOTrainer.evaluate()`，也不执行 reward、reference
-model、logprob 或 loss 计算。
-
-已核实的复用依据：
-
-- `trainer.py` 不 import recording/reward，reward/ref/loss 均在 loop 之外；
-- `num_generations` 与权重同步只出现在 `_generate_single_turn`，evaluator
-  自实现 eval 版生成函数即可绕开；
-- `tests/integration/test_trainer_loop.py:15-19` 已有
-  `object.__new__(SWEGRPOTrainer)` 绕过全部 GRPO 初始化、手工注入依赖跑
-  无 GPU loop 回归的先例，evaluator 照此模式复用。
-
-实施前用固定 scripted generation 做 characterization test，比较：
+实施前使用 scripted generation 做 characterization test，比较 eval 与现有 Loop 的：
 
 - 完整 messages；
-- tool call 及 observation 顺序；
-- termination；
-- completion token IDs；
-- tool mask；
-- parse-error/plain-message/finish/overlong 分支。
+- tool call 与 observation 顺序；
+- plain-message、parse-error、finish、iteration/context 上限分支；
+- termination 和最终 patch。
 
-只有直接复用被实测证明不可维护时，才允许提取共享 Loop；届时最小边界只包含现有
-状态机和它直接依赖的 action/suffix helper，训练入口、环境和 recorder 不随之重构。
+训练专用的 logprob、reward、advantage、completion token mask 不属于 eval 成果，不为
+它们建设第二套记录逻辑。只有直接复用被实测证明不可行时才重新评估共享 Loop 抽取；
+第一阶段不重构 `trainer.py`。
 
-### 4.2 环境与 patch 收集
+### 4.2 eval-only environment 与容器收束
 
-当前环境 `_finalize()`（`environment.py:193-239`）会在
-`termination=="submitted"` 且 patch 非空时立即调用 SWE-Gym verifier
-（`environment.py:229-236`）。评测不应把 Verified grading 塞进这里；rollout
-结束只收集 messages、termination 和 frozen patch，官方 grading 在所有
-inference 完成后独立执行。
+训练环境 `_finalize()` 会调用 SWE-Gym verifier，不适用于 Verified。`eval.py` 定义
+eval-only environment 适配：复用 `reset()` 和三个工具，但结束时只读取公开的
+`terminated`/`frozen_patch` 以及 Loop exit reason，关闭 rollout container，然后把
+patch 交给 official harness。不得使用 dummy verifier，也不得把 official grading
+塞进训练环境。
 
-已核实的环境事实：
+每个任务无论成功、模型终止、超长或异常都必须进入 `finally` 调用现有
+`DockerSandbox.close()`；eval 最外层 `finally` 和 `atexit` 直接复用现有
+`sweep_run_containers(client, eval_run_id)`，按独立 `swe_agent.run_id` label 清扫残留，
+不实现第二套 sweep。清理失败报告为 infrastructure failure 并保留可追踪容器 ID，
+不伪装成模型 unresolved。
 
-- `verifier_factory` 是惰性调用（仅在 `_finalize` 内），eval 不调用
-  `_finalize` 即完全绕过 SWE-Gym verifier，无需 dummy verifier；
-- `terminated` / `frozen_patch` / `trajectory` / `verification` 均已有公开
-  property（`environment.py:66-82`），patch 冻结逻辑（`tools.py:75-78` →
-  `docker.py:226-237` 的 `git add -N` + `git diff --binary`）可直接复用；
-- 资源关闭无公开入口（`_close_rollout()`/`_close()` 为私有）。若确实需要，
-  只允许增加一个 eval 专用的最小"关闭 rollout 并快照"公开接口，不改变训练
-  `_finalize()` 路径。
+### 4.3 Verified official image 适配
 
-### 4.3 官方镜像与 base-commit 校验冲突（新增，实施第一雷）
+官方 TestSpec 镜像初始 `HEAD` 是额外 prep commit，其父提交才是任务
+`base_commit`；现有训练 sandbox 要求 `HEAD == base_commit`，不能直接使用。
 
-`DockerSandbox.open()` 的 `_verify_base_contract`（`docker.py:269-280`）硬性
-要求容器 `HEAD == task.base_commit` 且 worktree 干净。而 §7.3 已实测官方
-TestSpec 镜像的初始 HEAD 是镜像内名为 `SWE-bench` 的额外 prep commit（只改
-`pyproject.toml`），其父提交才是任务 `base_commit`。
+适配只在 `eval.py` 的 `DockerSandbox` 子类中完成：
 
-因此官方 Verified 镜像按现状会在 `open()` 直接抛 `ContainerCreateError`。
-适配必须在 eval 侧完成，不改训练路径，候选方案（实施时二选一，取更小者）：
+1. 要求镜像初始 `HEAD == base_commit` 或 `HEAD^ == base_commit`；其他形态 fail closed；
+2. 若为 prep commit，进入 Agent Loop 前 checkout 到准确 `base_commit` 并再次断言
+   worktree clean；
+3. `inspect_image` 仍精确核对本地 image ID、linux/amd64 和已记录 digest；
+4. 不修改 `docker.py`，不放宽训练 sandbox 合同。
 
-1. eval 专用 `DockerSandbox` 子类，放宽 `_verify_base_contract`：允许
-   `HEAD^ == base_commit`（官方 prep commit 形态），其余校验保留；
-2. 装载任务时以镜像实际 HEAD 构造 Task，`open()` 后立即在容器内
-   `git checkout <base_commit>`，再进入 Agent Loop。
+模型输入只能包含 public problem statement，不得包含 gold patch、test patch、
+`FAIL_TO_PASS`、`PASS_TO_PASS`、official eval script 或 grader 结果。
 
-注意 SWE-bench official grading 与容器内 HEAD 无关（harness 新建容器、写入
-patch 后跑 eval.sh），放宽 rollout 侧校验不影响 official grading 有效性。
+### 4.4 vLLM、LoRA 与 local base
 
-另外 `inspect_image`（`docker.py:324-346`）要求 `expected_image_id` 精确匹配，
-eval 装载任务时需先 `docker image inspect` 填充该字段（纯 eval 侧代码）。
+依据 [vLLM LoRA 官方文档](https://docs.vllm.ai/en/v0.22.1/features/lora/)，同一个
+原生 vLLM 0.22.1 服务可以通过请求的 `model` 字段分别路由 base 和 runtime
+LoRA adapter；它是两组独立请求，不是一次请求双输出。共享服务避免第二次加载 base
+权重，但 base 仍增加一整套 Agent inference、Docker rollout 和 grading 成本，不能再
+表述为“边际成本为零”。
 
-### 4.4 vLLM serving：base 与 adapter 同 server 双列出（新增）
-
-训练期的 `trl vllm-serve` **不能用于 eval**：已核实其脚本
-（`trl/scripts/vllm_serve.py`）无 LoRA 支持，且用 `HfArgumentParser`
-严格解析参数，无法透传 `--enable-lora`；训练期 LoRA 进 server 依赖 trainer
-进程持有 PEFT 权重走 NCCL 同步，eval 没有 trainer 进程。
-
-eval 使用原生 vLLM（项目依赖 vllm==0.22.1，已核实 `arg_utils.py` 含
-`--enable-lora`）：
+启动必须使用项目环境并保证子进程能找到项目中已锁定的 `ninja`：
 
 ```bash
-vllm serve <base_model_path> \
+uv run --no-sync vllm serve <base_model_path> \
   --enable-lora \
   --lora-modules candidate=<adapter_path> \
   --max-lora-rank <adapter 实际 rank> \
@@ -253,67 +224,39 @@ vllm serve <base_model_path> \
   --port <port>
 ```
 
-依据 [vLLM LoRA 官方文档](https://docs.vllm.ai/en/stable/features/lora.html)：
+`scripts/eval.sh` 同样通过 `uv run --no-sync` 启动 evaluator。evaluator 若直接创建
+vLLM 子进程，必须把 `Path(sys.executable).parent` 前置到子进程 `PATH`，并在分配 GPU
+前执行：
 
-- `/v1/models` 同时列出 base model 与 adapter；请求时用 `model` 参数选择
-  base 或 `candidate`。**同一 server 天然支持 §1.1 的 `--eval-base`：base
-  评测零额外 serving 成本，且 base/final 共享完全相同的 server 配置**；
-- `--max-lora-rank` 设为 adapter 实际 rank（从 `adapter_config.json` 读取），
-  设太大浪费显存；
-- 运行时动态加载 API（`VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` +
-  `/v1/load_lora_adapter`）本阶段不用，仅作将来 RL 迭代评测的备注。
+```text
+vllm --version
+ninja --version
+torch.utils.cpp_extension.is_ninja_available() == True
+```
 
-数值一致性门禁（必须执行）：runtime LoRA 与 merge 参考系存在已记录的发散案例
-（[vllm#47026](https://github.com/vllm-project/vllm/issues/47026)、
-[vllm#17766](https://github.com/vllm-project/vllm/issues/17766)、
-[vllm#38606](https://github.com/vllm-project/vllm/issues/38606)）。正式
-inference 前做一次 smoke：同一组固定 prompt、temperature=0，对比
-adapter-serve 输出与 HF+PEFT（merge 参考系）输出；若出现实质差异，改用
-merge 后 serve（merge 是 W+BA 一次性舍入，且推理更快；代价是失去同 server
-评 base 的便利，`--eval-base` 需第二次 serve base 权重）。smoke 结果写入
-metadata.json。
+当前 `uv.lock` 和 `.venv` 已包含兼容的 `ninja==1.13.0`，不新增依赖、不运行
+`pip install`、不运行 `uv add ninja`、不安装系统级 ninja。默认保留 FlashInfer sampler；
+不得用 `VLLM_USE_FLASHINFER_SAMPLER=0` 静默绕过启动问题。若未来必须更换 sampler，
+它构成新的 eval 协议；运行 base 时必须同时作用于 base/final，并重新执行下述
+adapter 资格检查和记录。
 
-注意：eval 推理栈（原生 vllm serve）与训练 rollout 推理栈（trl vllm-serve +
-NCCL 同步）不是同一个，characterization test 锁的是 Loop 逻辑等价，锁不了两个
-serving 栈的数值等价；这是本项目固有结构，以上 smoke 是唯一兜底，不为此统一
-推理栈。
+正式 inference 前执行固定 prompt、`temperature=0` 的 adapter 门禁：
 
-## 5. 配置继承规则（2026-07-31 修订）
+**adapter parity**：runtime LoRA 与 HF+PEFT/merged 参考输出一致。
 
-**决策：评测固定使用评测时工作区当前代码的 prompt、工具和 parser 语义。**
-不恢复训练 run 对应的 scaffold 版本（已核实：prompt/工具语义在代码
-`prompts.py`/`tool_protocol.py` 中，不在 config；历史 run 实录的 system
-prompt 与当前代码已不同）。理由：scaffold 尚未定稿，本阶段评测目标是验证
-管线与获得参考结果；正式结论将在 scaffold 定稿后重新训练并以同一份定稿
-scaffold 评测，届时 train/eval scaffold 一致性天然成立。metadata.json 必须
-记录评测工作区的 git commit 与 dirty 状态，使每次评测的 scaffold 可追溯。
+adapter parity 通过后，final 使用 runtime LoRA；`EVAL_BASE=True` 时，base 和 final
+使用同一 LoRA-enabled server，请求分别选择 base model 和 `candidate`。local base 的
+准确名称是“shared-LoRA-engine base”，不是独立部署的 canonical base。
 
-从 run 的 `config.yaml`（完整 resolved dump，可 `load_config()` round-trip）
-继承：
+若 adapter parity 失败，final 改用临时 merged model + 原生 vLLM；
+`EVAL_BASE=True` 时另启 base-only server。fallback 必须使用相同 greedy 协议和 engine
+参数并写入 metadata，临时 merged 产物只能位于该次评测的 `candidate/` 目录，不修改
+训练 run 的任何既有产物。fallback 的单卡显存可行性与协议后果由实测决定，
+见 §8.1 第 2 条。
 
-- base/adapter/tokenizer provenance；
-- sampling 参数与 seed；
-- completion/context 上限；
-- Agent Loop turns、protocol-error 上限；
-- observation 截断和 Docker 资源上限。
+## 5. 数据与 official harness
 
-不继承：
-
-- optimizer、学习率和 scheduler；
-- GRPO `num_generations`；
-- KL、reward 配置；
-- gradient accumulation/checkpointing；
-- save/logging strategy；
-- 训练双 GPU/vLLM 同步拓扑（eval 单 GPU 原生 vllm serve，见 §4.4）；
-- 训练时的 prompt/工具/parser 代码版本（见上）。
-
-每个 candidate 必须使用同一评测协议；禁止为表现较弱的模型单独增加 turns、
-rollout 数或更换 sampling 参数。该纪律的落点是 metadata.json schema（§1.1），
-任何协议变更体现为新 schema 版本，而不是隐式改代码。
-
-## 6. 数据、环境和泄漏边界
-
-固定目标：
+固定数据：
 
 ```text
 dataset: princeton-nlp/SWE-bench_Verified
@@ -324,409 +267,149 @@ parquet sha256: 43ed5a3d1d98da36472c1ade65ddd2085d7b4ff694fcaf6a023a07c5c1f32f21
 harness revision: f7bbbb2ccdf479001d6467c9e34af59e44a840f9
 ```
 
-固定 parquet 已持久化到：
+本地 parquet：
 
 ```text
 data/swegym/SWE-Bench__SWE-bench_Verified/
   91aa3ed51b709be6457e12d00300a6a596d4c6a3/
   data/test-00000-of-00001.parquet
-
-size: 2,090,470 bytes
-sha256: 43ed5a3d1d98da36472c1ade65ddd2085d7b4ff694fcaf6a023a07c5c1f32f21
 ```
 
-本地核验结果：
-
-- Verified 为 500 个唯一实例；
-- 500 个实例均有 `test_patch`、`FAIL_TO_PASS`、`PASS_TO_PASS`；
-- 当前 SWE-Gym 2,438 与 Verified 的 instance ID、repo、problem statement、
-  base commit 精确交集均为 0；
-- 当前 SkyRL 100-task 子集与 Verified 的 instance ID/repo 交集为 0；
-- 491 条本地 OpenHands SFT trajectory 对应 SWE-Gym，未发现 Verified 精确文本交集。
-
-这只能证明当前可见训练数据没有直接交集，不能证明 base model 预训练阶段不存在
-benchmark contamination。
-
-传给模型的 public task 内容不得包含：
-
-- gold patch；
-- test patch；
-- `FAIL_TO_PASS`、`PASS_TO_PASS`；
-- official eval script 或 grader 结果。
-
-SWE-Gym/SkyRL 与 SWE-bench Verified 是两套环境资产：
-
-- 本项目 SkyRL 100-task：`xingyaoww/...` 镜像和本地 `eval_script`；
-- Verified：official harness 的 `swebench/sweb.eval...` TestSpec 镜像和官方 grading。
-
-二者可以存放在同一个 SWE-Gym 专用 Docker daemon，但不能把 SWE-Gym verifier
-当作 Verified official grading。
-
-### 6.1 official harness 离线化与调用细节（已按 pinned revision 源码核实）
-
-以下行为均已对照 harness revision `f7bbbb2` 的
-`run_evaluation.py` / `utils.py` 源码确认：
-
-- **daemon 指向**：harness 用 `docker.from_env()` 建 client，通过环境变量
-  `DOCKER_HOST=unix:///run/docker-swegym/docker.sock` 指向专用 daemon，
-  不修改任何 daemon 配置；
-- **数据集离线**：`load_swebench_dataset` 直接接受本地 `.json/.jsonl/.parquet`
-  路径，`--dataset_name` 传 §6 的固定 parquet 绝对路径即可全程离线，不访问
-  Hugging Face；
-- **镜像复用**：`run_instances` 对本地已存在的 instance image 打印
-  "Found N existing instance images. Will reuse them."并跳过 pull；image key
-  必须与 official 规则逐字符一致（`swebench/sweb.eval.x86_64.<id小写、__→_1776_>:latest`），
-  §7 的 retag 已按此规则完成并经 500/500 核对；
-- **镜像保留**：`--cache_level instance --clean false`。源码语义：clean=False
-  时只删除"本次新建且高于 cache level"的镜像，已存在镜像一律保留；
-  cache_level=instance 时 instance image 处于保留层级。该组合不删除任何
-  已有镜像，与 OpenHands `eval_infer.sh` 用法一致；
-- **空 patch 排除**：`model_patch` 为 `""` 或 `None` 的 prediction 会被
-  `get_dataset_from_preds` 静默排除出评测并计入未解决。predictions.jsonl
-  生成时必须保证 patch 提取兜底（finish 未触发或 patch 为空时仍写出记录并
-  显式计数），空 patch 数量写入 metadata.json；
-- **predictions 格式**：每行 JSON，字段 `instance_id`、
-  `model_name_or_path`、`model_patch`；
-- **grading 断点续跑**：已有 `report.json` 的实例默认跳过
-  （exclude_completed），grading 中断后重跑不重复已完成的实例；
-- **资源参数**：`--max_workers` 默认 4（官方建议 ≤ 75% CPU 核数），
-  `--timeout` 默认 1800s/instance；500 实例 grading 的墙钟时间按
-  `500 × 平均测试时长 / workers` 估算，实施时按机器核数设定 workers；
-- grading 本身（log 解析 + 容器内跑 eval.sh）完全离线。
-
-## 7. Docker 资产准备与缓存
-
-### 7.1 指定 daemon 和实际存储位置
-
-唯一允许使用的 daemon：
-
-```text
-socket: unix:///run/docker-swegym/docker.sock
-Docker Root Dir: /home/2025user/zyp/.docker-swegym
-storage driver: overlay2
-backing filesystem: /home/2025user 所在大容量 ext4 磁盘
-```
-
-`/run/docker-swegym/docker.sock` 只是 socket；镜像 layer 实际写入
-`/home/2025user/zyp/.docker-swegym`，不会进入系统默认 `/var/lib/docker`。
-
-不得使用默认 Docker daemon。所有 Docker 命令都必须显式带：
-
-```bash
-docker -H unix:///run/docker-swegym/docker.sock ...
-```
-
-official harness 通过 `DOCKER_HOST` 环境变量指向同一 daemon（§6.1）。
-
-### 7.2 smoke task 与准确镜像
-
-smoke task：
-
-```text
-instance_id: astropy__astropy-14539
-repo: astropy/astropy
-base_commit: c0a24c1dc957a3b565294213f435fefb2ec99714
-TestSpec image:
-swebench/sweb.eval.x86_64.astropy_1776_astropy-14539:latest
-platform: linux/x86_64
-```
-
-镜像名由固定版本 official `make_test_spec()` 实际生成，不手工推导。
-
-### 7.3 镜像站下载
-
-使用大陆 Docker Hub 镜像中转站。专用 Docker daemon 的 `docker info` 未显示
-HTTP/HTTPS proxy，Docker CLI 通过 Unix socket 请求该 daemon，因此全量下载不修改、
-不清除用户 shell 中的代理变量，由无代理 daemon 直接访问镜像站。
-
-实测情况：
-
-- `docker.1panel.live`：smoke 镜像下载成功，但后续任务差异层反复超时；
-- `dockerproxy.net`：同一失败任务实测完整下载成功，作为全量下载源；
-- 两者均采用显式改写后的完整 Docker Hub namespace/path，不修改 daemon 配置。
-
-文档来源：[1Panel 镜像加速说明](https://1panel.cn/docs/v2/user_manual/containers/setting/)；
-[Docker Proxy 使用文档](https://dockerproxy.net/docs)。
-
-全量下载命令使用：
-
-```bash
-docker -H unix:///run/docker-swegym/docker.sock pull \
-  dockerproxy.net/swebench/sweb.eval.x86_64.astropy_1776_astropy-14539:latest
-```
-
-下载完成后添加 official tag，避免 harness 再访问 Docker Hub：
-
-```bash
-docker -H unix:///run/docker-swegym/docker.sock tag \
-  dockerproxy.net/swebench/sweb.eval.x86_64.astropy_1776_astropy-14539:latest \
-  swebench/sweb.eval.x86_64.astropy_1776_astropy-14539:latest
-```
-
-保留 mirror tag 和 official tag；二者引用同一 image layers，不会复制一份镜像数据。
-
-2026-07-30 实测结果：
-
-```text
-首次 smoke pull source:
-docker.1panel.live/swebench/sweb.eval.x86_64.astropy_1776_astropy-14539:latest
-
-pull digest:
-sha256:a8d0f9829ec24dfb23a2f0097a245ee60faf1b396b33b3af5c22d7ac5f3c00ab
-
-local image ID:
-sha256:290a743498af81faf833324ccb3dfaf877e1d4fdd60594efc1a5f4835601316e
-
-local uncompressed size:
-2,695,538,814 bytes（约 2.70 GB）
-```
-
-mirror tag 与 official tag 已通过 `docker image inspect` 确认为同一 image ID。
-第一次 1Panel smoke pull 曾使用命令级 `env -u`，其作用域仅限该子进程，没有修改用户
-shell 或任何代理配置。后续 Verified 500 全量 pull 不再操作这些变量；专用 daemon
-的 `docker info` 未显示 daemon 级 HTTP/HTTPS proxy。
-
-使用 official tag 运行 `--network none --rm` 容器成功：
-
-```text
-Python 3.9.20
-/testbed exists
-image initial HEAD: c06bee2ac1f505eb6530511662ce4695a69003eb
-HEAD parent: c0a24c1dc957a3b565294213f435fefb2ec99714
-```
-
-初始 HEAD 是镜像内名为 `SWE-bench` 的单独 commit，只修改 `pyproject.toml`
-两行中的一行；它的父提交正是任务 `base_commit`。因此镜像内容包含准确任务基线，
-但 gold patch 和官方 eval script 尚未实际执行，不能只凭容器启动宣称 grading
-已闭环。（该 HEAD 形态与 `docker.py` base-commit 校验的冲突及适配见 §4.3。）
-
-### 7.4 全量 Verified 资产
-
-本阶段直接下载 Verified 500 个 TestSpec instance image，不再采用 smoke 后惰性下载。
-
-镜像名按固定 official harness 的 `TestSpec.instance_image_key` 生成：
-
-```text
-swebench/sweb.eval.x86_64.<lowercase-instance-id>:latest
-并将 instance ID 中的 "__" 替换为 "_1776_"
-```
-
-本地 Verified parquet 实测为 500 个任务、500 个唯一 official image key。
-
-固定 image manifest：
-
-```text
-path:
-data/swegym/verified_pull/images-x86_64.txt
-
-lines:
-500
-
-sha256:
-b69e618cfcfd2a59c3897e3f4856dbd88c4eeb921a5b24467a90bff6fa48581a
-```
-
-每个任务执行：
-
-```text
-1. 从 dockerproxy.net/swebench/... pull；
-2. 在专用 daemon 中保留 mirror tag；
-3. 添加 swebench/... official tag；
-4. 已存在 official tag 时跳过，以便中断后继续；
-5. 使用 12 路并发；单个镜像失败最多重试 5 次；
-6. 批次失败后从已有 official tag 继续，不重复下载完成项。
-```
-
-不修改 daemon 配置，不使用默认 Docker daemon，不删除已有 SWE-Gym 镜像。
-
-2026-07-30 全量下载运行状态：
-
-```text
-tmux session:
-swebench_verified_pull
-
-log:
-data/swegym/verified_pull/pull.log
-
-pass-end count:
-data/swegym/verified_pull/ready_count.txt
-
-final status:
-data/swegym/verified_pull/status.txt
-
-启动 detached session 时:
-21/500 official tags ready
-```
-
-普通 `nohup` 子进程会被当前受管执行环境回收，因此最终改用 detached tmux。
-
-**2026-07-31 完成确认（已核实）**：下载于 2026-07-31 04:04 (+0800) 在第 1 个
-pass 即全部拉齐，`status.txt=complete`、`ready_count.txt=500`；manifest sha256
-与上述固定值一致；manifest 500 行与本地 official tag 逐一比对零缺失；下载
-进程已正常退出（tmux session 已不存在）。
-
-### 7.5 本地镜像保留方式
-
-这里没有额外缓存目录或新管理器。"缓存"就是：
-
-1. 镜像通过专用 daemon 下载一次；
-2. layer 保留在 `/home/2025user/zyp/.docker-swegym`；
-3. base/final 每次创建 fresh container，但复用本地只读 image layers；
-4. official harness 使用 `--cache_level instance --clean false`，不在每次 grading 后
-   删除 instance image（语义已按源码核实，§6.1）；
-5. 不自动 prune，不删除已有 SWE-Gym 镜像。
-
-这与本地 SWE-Gym 的基本使用方式一致：镜像常驻，任务运行时创建/销毁容器。
-
-本阶段已下载全部 500 个 Verified instance image。后续所有 final，以及显式
-`--eval-base True` 的 base，共用这些本地镜像。
-
-mirror tag 清理：daemon 中残留 498 个 `dockerproxy.net/swebench/...` 别名
-tag，与 official tag 共享 layer。允许（但不要求）用 `docker rmi` 仅删除这些
-mirror 别名 tag——删 tag 不删 layer，不影响 official tag 与 SWE-Gym 镜像；
-磁盘余量充足（分区剩余约 3.1T），不紧急。
-
-### 7.6 资产确认清单
-
-- [x] 专用 daemon Root Dir 已确认；
-- [x] daemon 未显示 HTTP/HTTPS proxy 配置；
-- [x] TestSpec 和准确镜像名已确认；
-- [x] Verified 500-row parquet 已持久化并通过 SHA256 校验；
-- [x] 镜像站 pull 完整成功；
-- [x] mirror tag 已添加 official tag；
-- [x] image inspect 确认两个 tag 指向同一 image ID；
-- [x] `--network none` 容器启动，并确认 `/testbed` HEAD 的父提交为任务 base commit；
-- [x] 500/500 个 mirror image 下载完成（2026-07-31 04:04）；
-- [x] 500/500 个 official tag 存在（与 manifest 零缺失比对）；
-- [x] 核对缺失、失败和本地总占用（缺失 0；daemon 总占用约 280GB，含 498 个
-  可回收 mirror 别名 tag；分区剩余约 3.1T）；
-- [ ] official gold-patch 单任务 grading 成功。
-
-## 8. 论文和发布基线备忘
-
-### 8.1 SWE-Gym 论文
-
-来源：[Training Software Engineering Agents and Verifiers with SWE-Gym](https://arxiv.org/html/2412.21139v2)
-
-统一条件：
-
-- benchmark：完整 SWE-bench Verified 500；
-- scaffold：OpenHands CodeActAgent 2.1；
-- 工具：bash + editor，browser disabled；
-- evaluation temperature：0；
-- 上限：100 interaction turns 或 32k context；
-- SFT 数据：491 条 SWE-Gym 成功轨迹；
-- base：Qwen2.5-Coder-Instruct；
-- 下表普通 zero-shot/fine-tuned 是首次单 rollout resolve rate，不是 verifier best-of-N。
-
-| 模型大小 | zero-shot | SWE-Gym SFT | 绝对提升 |
-|---|---:|---:|---:|
-| 7B | 1.8% ± 1.1 | 10.6% ± 2.1 | +8.8 |
-| 14B | 4.0% ± 1.6 | 16.4% ± 2.0 | +12.4 |
-| 32B | 7.0% ± 1.3 | 20.6% ± 2.1 | +13.6 |
-
-论文另报：
-
-| 系统 | Verified |
-|---|---:|
-| 32B SWE-Gym Agent + learned verifier | 32.0% |
-
-32.0% 使用多候选和 verifier 进行 inference-time scaling，不能与单 rollout 的
-10.6%、11.0%、14.6% 或本项目 pass@1 直接比较。
-
-`SWE-Gym/OpenHands-7B-Agent` Hugging Face 仓库存在，但当前模型卡没有记录成绩；
-10.6% 的原始成绩证据来自论文，不来自模型卡。
-
-### 8.2 SkyRL-v0
-
-来源：[SkyRL 固定发布 README](https://raw.githubusercontent.com/NovaSky-AI/SkyRL/a0d50c482436af7fac8caffa4533616a78431d66/README.md)
-
-| SkyRL 模型 | Base | Base Performance | RL 后 |
-|---|---|---:|---:|
-| SkyRL-Agent-7B-v0 | OpenHands-7B-Agent | 11.0% | 14.6% |
-| SkyRL-Agent-8B-v0 | Qwen3-8B no thinking | 3.6% | 9.4% |
-| SkyRL-Agent-14B-v0 | Qwen3-14B thinking | 18.0% | 21.6% |
-
-README 声称 benchmark 为 SWE-Bench Verified。固定 OpenHands 子模块默认
-CodeActAgent、`N_RUNS=1`、最大 100 iterations，但发布结果的完整执行命令、
-decoding 参数和精确模型 revision 没有充分归档。因此：
-
-- 11.0% → 14.6% 可作为 SkyRL 作者发布内的 RL 对照；
-- 对本项目只能作为端到端系统参考；
-- 不能把 14.6%-10.6% 解释为 SkyRL RL 相对 SWE-Gym SFT 的纯权重提升；
-- 目前未在 SWE-bench official experiments tree 中确认相应公开 submission。
-
-### 8.3 官方排行榜
-
-[SWE-bench Verified 官方页面](https://www.swebench.com/verified.html) 明确说明：
-
-- Full leaderboard 混合任意 agent、RAG、multi-rollout、review 等系统；
-- Bash Only 使用统一 mini-SWE-agent，才更接近模型横向比较；
-- 即使同为 mini-SWE-agent，不同 major release 也不一定可比。
-
-因此官方榜单值可作为系统级参考，但每个引用都必须记录 agent/scaffold、版本、
-rollout 数、预算和 selection/verifier 规则。不得只抄百分比。
-
-## 9. 最小文件改动预算
-
-预计第一阶段最多：
-
-| 文件 | 动作 | 用途 |
-|---|---|---|
-| `scripts/eval.sh` | 创建 | 薄 Bash 入口（`exec .venv/bin/python -m swe_agent.eval "$@"`） |
-| `src/swe_agent/eval.py` | 创建 | candidate 解析、Verified 任务装载、sandbox base-contract 适配、纯 inference、prediction 输出、official harness 调用、vLLM server 生命周期与 raw token 客户端 |
-| `tests/test_eval.py` | 创建 | CLI 默认值、candidate、Loop characterization 和 smoke |
-| `src/swe_agent/environment.py` | 尽量不改；必要时只加一个接口 | 关闭 eval rollout 并取得快照 |
-
-对 eval.py 体量的现实预期：它单文件承载四块新逻辑（§4.3 的 sandbox 适配、
-Verified 任务装载——`swegym.py` 的 TaskContext 是 SWE-Gym 专用无法复用、
-harness 调用、vLLM serving/客户端），不会很"薄"，预计数百行量级。保持单文件
-是为了克制模块数量，不为守住"薄"砍功能。
-
-明确不创建 `eval/` 多模块目录、`docker_assets.py`、`verifier.py`、
-`reporting.py`、`prepare_eval.sh` 或共享 `agent_loop.py`。
-
-## 10. 实施顺序与门禁
-
-1. ~~完成 Verified 500 个镜像及 official tag~~（已完成，§7.6）。做一个离线
-   容器/gold smoke。
-2. 实现薄 evaluator（含 §4.3 sandbox 适配与 §4.4 vLLM serving），并锁定
-   Loop messages/token/mask/termination 等价性。
-3. 默认只评测目标 run 的 final 或预指定 checkpoint。
-4. 进行正式 Verified inference 和 official grading，输出 final 与外部参考表。
-5. 仅当用户传入 `--eval-base True` 时，在同一次命令中额外评测 base 并输出差值。
-
-进入完整 Verified 500 前必须满足：
-
-- smoke gold patch resolved（official harness 对 gold prediction 判 resolved）；
-- smoke task 容器经 eval 适配路径 `open()` 成功（§4.3 base-contract）；
-- LoRA 数值一致性 smoke 通过：adapter-serve 与 HF+PEFT merge 参考系在
-  temperature=0、同一组固定 prompt 下输出一致，或已改用 merge-serve 并在
-  metadata 中记录（§4.4）；
-- `--eval-base` 未提供时不运行 base；
-- `--eval-base True` 时 base/final 使用同一 server、同一评测配置（§4.4）；
-- 模型输入无 private grader 字段；
-- predictions.jsonl 无静默空 patch：空 patch 显式计数并写入 metadata（§6.1）；
-- harness 全程离线：本地 parquet + `DOCKER_HOST` 指向专用 daemon + 本地镜像
-  复用（§6.1）；
-- 不从 Verified 选择 checkpoint；
-- official harness 直接产生 report；
-- 评测使用 1 张空闲 GPU，不抢占训练卡；专用 Docker daemon 得到确认；
-- 不影响训练进程和其他人的 GPU/Docker 容器。
-
-## 11. 当前阻塞项
-
-- ~~Verified 500 个 Docker 镜像下载~~：已完成（2026-07-31 04:04，500/500，
-  manifest 零缺失，§7.6）；
-- 当前服务器上 official gold-patch grading 尚未成功（§10 门禁第一条）；
-- 单 GPU 原生 vLLM base + LoRA adapter 的 raw-token Loop 尚未 smoke（§4.4，
-  含数值一致性门禁）；
-- §4.3 的 base-commit 校验适配尚未实现，官方镜像按现状无法通过
-  `DockerSandbox.open()`；
-- 必须指定一个已完成、可作为正式目标的 run：现有 `_archive/` 中全部已完成
-  run（含 `20260726T130807Z-b5db`）的 base 均为 Qwen2.5-Coder-7B-Instruct，
-  不是 OpenHands-7B-Agent；首批 OpenHands-7B-Agent base 的 run 仍在训练中。
-  b5db 可用于全流程管线 smoke；
-- base model 预训练污染无法由本项目本地数据审计排除；
-- 评测时间表受训练排队约束：四张 GPU 均可能被训练占用，评测需等待空闲卡
-  （§3 GPU 使用约束）。
+official harness 必须：
+
+- 使用本地 parquet，禁止在线漂移到其他 dataset revision；
+- 使用 `DOCKER_HOST=unix:///run/docker-swegym/docker.sock`；
+- 复用本地 official instance tags，`--cache_level instance --clean false`；
+- predictions 每行只写 `instance_id`、`model_name_or_path`、`model_patch`；
+- 每个任务都写 prediction；空 patch 显式计数，不能因 harness 静默过滤而改变分母；
+- 直接保存 pinned harness 产生的 report，不实现自定义 Verified verifier；
+- grading 可复用 harness 的 completed-instance 跳过能力，不建设另一套复杂调度平台。
+
+进入模型 inference 前，先用 gold patch 完成一个离线 official grading smoke；这验证
+数据、镜像、harness 和 daemon，而不是模型能力。
+
+当前可见 SWE-Gym、SkyRL 训练任务和 491 条本地 SFT trajectory 与 Verified 未发现
+精确任务/文本交集；这只排除当前可见数据直接泄漏，不声称排除 base model 预训练污染。
+
+## 6. baseline 对比输出
+
+### 6.1 主 baseline
+
+`EVAL_BASE=True` 时，主 baseline 是同一次正式 evaluator 得到的 local base。只有
+该结果和 final 都完成 500/500 official grading，才输出正式百分点差。
+`EVAL_BASE=False` 时不声称存在本地同协议 baseline，只输出 final，并将此前记录的
+baseline 作为带协议差异说明的外部参考。
+
+### 6.2 已记录的外部参考
+
+`comparison.json` 保留以下参考，但必须附带协议标签：
+
+| 来源 | 模型/系统 | Verified | 对比性质 |
+|---|---|---:|---|
+| [SWE-Gym 论文](https://arxiv.org/html/2412.21139v2) | Qwen2.5-Coder-7B-Instruct zero-shot | 1.8% | 外部系统参考 |
+| [SWE-Gym 论文](https://arxiv.org/html/2412.21139v2) | SWE-Gym OpenHands-7B-Agent SFT | 10.6% | 外部系统参考 |
+| [SkyRL README](https://raw.githubusercontent.com/NovaSky-AI/SkyRL/a0d50c482436af7fac8caffa4533616a78431d66/README.md) | OpenHands-7B-Agent base | 11.0% | 发布内 baseline；外部参考 |
+| [SkyRL README](https://raw.githubusercontent.com/NovaSky-AI/SkyRL/a0d50c482436af7fac8caffa4533616a78431d66/README.md) | SkyRL-Agent-7B-v0 | 14.6% | 发布结果；外部参考 |
+
+SWE-Gym 的 7B 结果使用 OpenHands CodeActAgent 2.1、temperature=0、最多 100 turns/
+32k context；SkyRL 发布记录没有完整保存所有 decoding 和精确模型 revision。本项目
+必须在输出中列出自身 scaffold commit、turn/context 预算和 rollout 数，不能只把
+百分比并排后声称严格优于这些模型。
+
+不纳入主比较：SWE-Gym 32B + learned verifier 的 32.0%、排行榜中的 multi-rollout、
+RAG、review 或 best-of-N 系统，因为它们不是本项目单 rollout final/local-base 的同类
+结果。
+
+## 7. 实施顺序与验收门禁
+
+实施顺序：
+
+1. official gold-patch 单任务 smoke；
+2. 新增 eval 入口、evaluator 和测试，不修改训练文件；
+3. 单任务 final Agent Loop smoke；`EVAL_BASE=True` 时同次增加 local base smoke；
+4. adapter parity 资格检查；
+5. 预先指定唯一 run，执行 final 的 Verified 500 inference；`EVAL_BASE=True` 时先执行
+   local base；
+6. official grading，生成 comparison.json。
+
+进入完整 500 前必须全部满足：
+
+- gold prediction 被 pinned official harness 判为 resolved；
+- eval-only image/base-commit 适配成功且没有放宽训练 sandbox；
+- Agent Loop characterization 覆盖消息、工具、终止、长度和 patch；
+- adapter parity 通过，或按 §4.4 明确进入 fallback；
+- vLLM/ninja preflight 通过，sampler backend 已记录；
+- `EVAL_BASE` 只接受 `True`/`False`，默认 `False`；
+- `EVAL_BASE=True` 时 base/final 使用同一 greedy 协议、任务顺序、并发度和预算；
+- 模型输入不含 private grader 字段；
+- 空 patch 和 infrastructure failure 不被静默丢弃；
+- harness 使用 pinned 本地数据、专用 daemon 和本地镜像；
+- 只使用一张确认空闲 GPU，不抢占训练；
+- smoke 后没有 eval label 的残留容器或 vLLM 子进程；
+- 新增 eval 测试和全部既有训练测试通过；
+- `git diff` 除三个新增 eval 文件和本计划外不包含其他实现变化。
+
+## 8. 已具备资产与剩余阻塞
+
+已具备：
+
+- Verified parquet 已固定并校验 SHA256；
+- 500/500 official image tags 已存在于专用 daemon；
+- image manifest：`data/swegym/verified_pull/images-x86_64.txt`，500 行，
+  SHA256 `b69e618cfcfd2a59c3897e3f4856dbd88c4eeb921a5b24467a90bff6fa48581a`；
+- daemon Root Dir 为 `/home/2025user/zyp/.docker-swegym`，镜像与训练容器通过 run
+  label 隔离；
+- vLLM 0.22.1 的 base/runtime-LoRA 路由已做小规模 GPU smoke；
+- `ninja==1.13.0` 已在 lock 和项目环境中，依赖检查通过，无需环境变更。
+
+剩余阻塞：
+
+- official gold-patch grading 尚未成功闭环；
+- eval-only base-commit checkout 尚未实现；
+- 正式 SWE prompt 的 adapter parity 尚未执行；
+- evaluator 尚未实现；
+- 正式目标 run 尚需在执行前由用户唯一指定；
+- 评测需等待一张不被训练占用的 GPU。
+
+### 8.1 必须由实测决定、不得预先写死的三处缺口
+
+以下三点计划在实施到对应步骤时用实测结果回填本文件；回填前不得进入下一步，
+也不得以猜测值实现：
+
+1. **turn/context 上限的读取来源与缺失行为**（§3.1）。实施步骤 2 时，对目标 run
+   目录做实际盘点：确认 turn/context 上限能从 run 内哪个文件（如 `config.yaml`、
+   `run.json`）以哪个字段解析；文件缺失或字段缺失时是 fail closed 还是报错退出，
+   以真实 run 目录的盘点结果为准写入本计划。不允许实现时临时猜测路径或静默回退
+   默认值。
+2. **fallback 的资源与协议后果**（§4.4）。实施步骤 4 的 adapter parity 实测
+   同时回答：parity 是否通过；若失败，merged model server 与 base-only server 在
+   一张空闲 GPU 上是否能同时放下 7B 权重（以实测显存为准），放不下时串行执行
+   还是 abort；fallback 下 base server 不带 `--enable-lora` 与 §3.1"同一 engine
+   参数"的偏差是否仍允许输出正式百分点差，还是降级为参考比较。结论按实测写入
+   §4.4 与 metadata 模板。
+3. **Verified 500 的吞吐与时长预算**（§7 步骤 5）。单任务 smoke 与 adapter
+   parity 完成后，用实测单任务 rollout + grading 时长推算 500 任务在固定并发度
+   下的 wall-time 和磁盘占用，写入本计划；若推算超出可接受窗口，先与用户确认
+   再进入完整 500。
+
+## 9. 明确删除或不实施的冗余逻辑
+
+以下内容不属于“保证 eval 正常”的优秀设计，第一阶段不实施：
+
+- checkpoint-N 通用解析、自动发现、自动选优和多 checkpoint sweep；
+- canonical base registry；
+- 动态 LoRA 加载 API 和未来 RL 迭代 serving 预留；
+- 通用 eval 平台、插件化 verifier、独立 Docker asset manager；
+- 自定义 Verified grader；
+- 为 eval 复制训练 logprob、reward、advantage、tool mask 记录；
+- 为恢复历史训练 scaffold 修改或回滚工作区；
+- 镜像下载器、镜像站重试、tmux 下载流程、mirror tag 清理等已完成资产阶段逻辑；
+- 自动 Docker prune、镜像所有权数据库；
+- 复杂任务调度、自动重跑选优、排行榜抓取或发布流水线；
+- 把外部 10.6%/11.0%/14.6% 当成严格同协议 local baseline；
+- 为规避 PATH 问题新增/重装 ninja，或静默切换 sampler backend。
+
+以下设计虽然增加检查，但直接保障结果有效，不视为冗余：gold-patch smoke、固定
+dataset/harness revision、private grader 隔离、base-commit 适配、Agent Loop
+characterization、adapter parity、空 patch/infra 分类、资源清理、
+metadata 协议记录以及全部训练回归测试。
