@@ -12,6 +12,7 @@ def test_only_planned_launcher_exists() -> None:
     scripts = sorted(path.name for path in (PROJECT_ROOT / "scripts").iterdir())
     assert scripts == [
         "dry_run.sh",
+        "eval.sh",
         "grpo.sh",
         "prepare.sh",
         "qualify.sh",

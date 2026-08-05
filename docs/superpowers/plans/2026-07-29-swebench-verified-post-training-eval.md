@@ -381,16 +381,41 @@ RAG、review 或 best-of-N 系统，因为它们不是本项目单 rollout final
    `run.json`）以哪个字段解析；文件缺失或字段缺失时是 fail closed 还是报错退出，
    以真实 run 目录的盘点结果为准写入本计划。不允许实现时临时猜测路径或静默回退
    默认值。
+
+   **实测回填（2026-08-04）**：倒数两个已完成 run
+   `outputs/20260801T235407Z-149b` 和 `outputs/20260802T065312Z-b873` 均从各自
+   `config.yaml` 的 `chat.max_prompt_length=8192`、
+   `generation.max_completion_length=24576`、
+   `generation.max_tool_calling_iterations=40` 与 `vllm.max_model_length=32768` 解析
+   turn/context 预算。文件或任一必需字段缺失时 evaluator 报错退出（fail closed），
+   不使用默认值。
 2. **fallback 的资源与协议后果**（§4.4）。实施步骤 4 的 adapter parity 实测
    同时回答：parity 是否通过；若失败，merged model server 与 base-only server 在
    一张空闲 GPU 上是否能同时放下 7B 权重（以实测显存为准），放不下时串行执行
    还是 abort；fallback 下 base server 不带 `--enable-lora` 与 §3.1"同一 engine
    参数"的偏差是否仍允许输出正式百分点差，还是降级为参考比较。结论按实测写入
    §4.4 与 metadata 模板。
+
+   **实测回填（2026-08-04）**：上述两个 run 在同一张 A100-SXM4-80GB 上分别执行
+   正式 SWE prompt 的 HF+PEFT 与 vLLM runtime LoRA 32-token greedy parity，两个 run
+   均逐 token 完全一致，因此都使用 runtime LoRA，未进入 merged fallback。
+   `EVAL_BASE=False`，未运行 local base。由于 fallback 条件没有发生，merged model
+   与 base-only server 的同时显存占用、串行/abort 选择及 fallback 下正式百分点差
+   资格均无实测结论，不据此预填。
 3. **Verified 500 的吞吐与时长预算**（§7 步骤 5）。单任务 smoke 与 adapter
    parity 完成后，用实测单任务 rollout + grading 时长推算 500 任务在固定并发度
    下的 wall-time 和磁盘占用，写入本计划；若推算超出可接受窗口，先与用户确认
    再进入完整 500。
+
+   **实测回填（2026-08-04）**：固定并发度 1 下，同一任务
+   `astropy__astropy-14539` 的两个 final rollout 分别为 64.711 秒和 64.135 秒；对应
+   gold official grading 分别为 28.48 秒和 28.65 秒。两次候选均为空 patch，official
+   harness 按协议计入分母但跳过候选测试，因此这里的 grading 时间来自 gold patch。
+   按两次均值线性外推，500 个 rollout 加 500 次同量级 grading 约 46,494 秒
+   （12.92 小时）/run，不含一次性模型加载与 parity；两份单任务结果目录分别为
+   307,632 B 和 306,620 B，线性磁盘外推约 153.6 MB/run。由于任务难度和非空 patch
+   grader 日志会变化，该值仅是单任务实测外推；12.92 小时超出短时 smoke 窗口，完整
+   500 必须先取得用户确认。
 
 ## 9. 明确删除或不实施的冗余逻辑
 
