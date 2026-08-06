@@ -38,7 +38,7 @@ def test_real_two_table_assets_and_runtime_boundary(loaded) -> None:
     assert sample.task.base_commit == "447710c6a68e7d5ea7ad6d7df93c663de32ac7f1"
     assert sample.environment.image_name.endswith("getmoto_s_moto-7023:latest")
     assert sample.environment.expected_image_id.startswith("sha256:")
-    assert set(Evaluation.model_fields) == {"offline_eval_script"}
+    assert set(Evaluation.model_fields) == {"offline_eval_script", "fail_to_pass", "pass_to_pass"}
     assert "PIP_NO_INDEX=1" in evaluation.offline_eval_script
 
 
@@ -72,6 +72,55 @@ def test_dataset_and_prompt_contain_only_public_fields(loaded) -> None:
     ):
         assert secret not in public_payload
     assert "Qwen XML" not in public_payload
+
+
+def test_load_task_instance_carries_test_lists(loaded) -> None:
+    _, _, _, evaluation = loaded
+    assert evaluation.fail_to_pass == [
+        "tests/test_lakeformation/test_lakeformation.py::test_deregister_resource"
+    ]
+    assert evaluation.pass_to_pass == [
+        "tests/test_lakeformation/test_lakeformation.py::test_list_data_cells_filter",
+        "tests/test_lakeformation/test_lakeformation.py::test_revoke_permissions",
+        "tests/test_lakeformation/test_lakeformation.py::test_list_resources",
+        "tests/test_lakeformation/test_lakeformation.py::test_list_permissions",
+        "tests/test_lakeformation/test_lakeformation.py::test_describe_resource",
+        "tests/test_lakeformation/test_lakeformation.py::test_batch_revoke_permissions",
+        "tests/test_lakeformation/test_lakeformation.py::test_register_resource",
+        "tests/test_lakeformation/test_lakeformation.py::test_data_lake_settings",
+    ]
+
+
+def test_load_task_instance_rejects_non_list_test_field(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
+    # official 行的 FAIL_TO_PASS 不是 JSON 字符串列表时必须拒绝。
+    config, project_root, _, _ = loaded
+    real_read = swegym._read_exact_row
+
+    def fake_read(path: Path, instance_id: str):
+        row = real_read(path, instance_id)
+        if "FAIL_TO_PASS" in row:
+            row = dict(row, FAIL_TO_PASS={"not": "a list"})
+        return row
+
+    monkeypatch.setattr(swegym, "_read_exact_row", fake_read)
+    with pytest.raises(SWEGymContractError, match="FAIL_TO_PASS"):
+        load_task_instance(config, project_root, TASK_ID)
+
+
+def test_load_task_instance_rejects_invalid_json_test_field(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
+    # FAIL_TO_PASS 是字符串但不是合法 JSON 时也必须拒绝。
+    config, project_root, _, _ = loaded
+    real_read = swegym._read_exact_row
+
+    def fake_read(path: Path, instance_id: str):
+        row = real_read(path, instance_id)
+        if "FAIL_TO_PASS" in row:
+            row = dict(row, FAIL_TO_PASS="not-json{")
+        return row
+
+    monkeypatch.setattr(swegym, "_read_exact_row", fake_read)
+    with pytest.raises(SWEGymContractError, match="FAIL_TO_PASS"):
+        load_task_instance(config, project_root, TASK_ID)
 
 
 def test_exactly_one_parquet_row_is_required(tmp_path: Path) -> None:

@@ -8,6 +8,8 @@ from typing import Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from swe_agent.scoring import DEFAULT_LAMBDA, DEFAULT_MU
+
 
 LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
@@ -98,7 +100,9 @@ class GenerationConfig(StrictConfig):
 
 
 class GRPOConfigValues(StrictConfig):
-    reward_type: Literal["binary_verifier"]
+    reward_type: Literal["binary", "layered"]
+    layered_lambda: float = Field(default=DEFAULT_LAMBDA, gt=0.0)
+    layered_mu: float = Field(default=DEFAULT_MU, gt=0.0)
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
     loss_type: Literal["grpo", "dapo", "bnpo", "dr_grpo"]

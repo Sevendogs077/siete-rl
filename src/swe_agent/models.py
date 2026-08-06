@@ -47,6 +47,8 @@ class Evaluation(StrictModel):
     """只在进程内交给 verifier 的私有运行时事实。"""
 
     offline_eval_script: str = Field(min_length=1)
+    fail_to_pass: list[str] = Field(default_factory=list)
+    pass_to_pass: list[str] = Field(default_factory=list)
 
 
 class Sample(StrictModel):

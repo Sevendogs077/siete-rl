@@ -31,7 +31,7 @@ EXPECTED_FIELDS = {
         "exec_timeout_sec",
         "verifier_timeout_sec",
     },
-    Evaluation: {"offline_eval_script"},
+    Evaluation: {"offline_eval_script", "fail_to_pass", "pass_to_pass"},
     Sample: {"task", "environment"},
     Action: {"tool_name", "arguments"},
     Observation: {"text", "exit_code", "error_type", "timed_out", "truncated"},

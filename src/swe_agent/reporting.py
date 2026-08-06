@@ -78,6 +78,7 @@ def load_group_rows(output_dir: str | Path) -> list[dict[str, Any]]:
                 "rollouts_cumulative": rollouts_cumulative,
                 "reward_mean_group": reward_mean,
                 "reward_mean_ema": reward_ema,
+                # 累计平均奖励；二元奖励下等价于 resolved 通过率，layered 奖励下为部分得分的均值
                 "train_pass_rate_cumulative": fmean(rewards_seen),
                 "group_degenerate": degenerate,
                 "nondegenerate_group_rate_cumulative": (
@@ -171,7 +172,7 @@ def render_training_summary(
         edgecolor="#2563eb",
         linewidth=0.8,
         s=34,
-        label="Group pass rate",
+        label="Group mean reward",
         zorder=3,
     )
     axes[0].plot(
@@ -187,11 +188,11 @@ def render_training_summary(
         color="#d97706",
         linewidth=1.8,
         linestyle="--",
-        label="Cumulative pass rate",
+        label="Cumulative mean reward",
     )
     axes[0].set_ylim(-0.04, 1.04)
-    axes[0].set_ylabel("Pass rate")
-    axes[0].set_title("Train reward / pass rate", loc="left", fontweight="bold")
+    axes[0].set_ylabel("Mean reward")
+    axes[0].set_title("Train reward", loc="left", fontweight="bold")
     axes[0].legend(loc="upper right", frameon=False, ncol=3)
 
     axes[1].step(

@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
-from swe_agent.config import LORA_TARGET_MODULES, ProjectConfig, load_config
+from swe_agent.config import (
+    GRPOConfigValues,
+    LORA_TARGET_MODULES,
+    ProjectConfig,
+    load_config,
+)
+
+
+def _minimal_grpo_values(**overrides: object) -> GRPOConfigValues:
+    """以 7B yaml 的 grpo 段为底，覆盖指定字段后重新校验。"""
+
+    config, _, _ = load_config(CONFIG_7B)
+    payload = config.model_dump(mode="python")["grpo"]
+    payload.update(overrides)
+    return GRPOConfigValues.model_validate(payload)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -257,6 +272,18 @@ def test_vllm_is_mode_accepts_trl_supported_values(mode: str) -> None:
     validated = ProjectConfig.model_validate(payload)
 
     assert validated.grpo.vllm_importance_sampling_mode == mode
+
+
+def test_grpo_config_accepts_layered_reward_type() -> None:
+    values = _minimal_grpo_values(reward_type="layered")
+    assert values.reward_type == "layered"
+    assert values.layered_lambda == 8.0
+    assert values.layered_mu == pytest.approx(math.log(2))
+
+
+def test_grpo_config_rejects_nonpositive_lambda() -> None:
+    with pytest.raises(ValidationError):
+        _minimal_grpo_values(reward_type="layered", layered_lambda=0.0)
 
 
 @pytest.mark.parametrize("mode", ["token", "sequence", "token_level", ""])

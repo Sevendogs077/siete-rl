@@ -19,6 +19,7 @@ from swe_agent.models import (
     Trajectory,
     Verification,
 )
+from swe_agent.scoring import DEFAULT_LAMBDA, DEFAULT_MU, layered_score
 from swe_agent.swegym import TaskContext
 from swe_agent.tools import ToolContractError, ToolExecutor, validate_tool_arguments
 from swe_agent.verifier import SWEGymVerifier
@@ -39,12 +40,18 @@ class SWEEnvironment:
         verifier_factory: VerifierFactory,
         output_limit_chars: int,
         max_timeout_sec: int,
+        reward_type: Literal["binary", "layered"] = "binary",
+        layered_lambda: float = DEFAULT_LAMBDA,
+        layered_mu: float = DEFAULT_MU,
     ) -> None:
         self._task_context = task_context
         self._sandbox_factory = sandbox_factory
         self._verifier_factory = verifier_factory
         self._output_limit_chars = output_limit_chars
         self._max_timeout_sec = max_timeout_sec
+        self._reward_type = reward_type
+        self._layered_lambda = layered_lambda
+        self._layered_mu = layered_mu
         self._sample: Sample | None = None
         self._evaluation: Evaluation | None = None
         self._sandbox: DockerSandbox | None = None
@@ -234,7 +241,16 @@ class SWEEnvironment:
             self._verification = self._verifier.verify(self._frozen_patch)
         finally:
             self._events.extend(self._verifier.drain_cleanup_events())
-        self._reward = 1.0 if self._verification.result == "resolved" else 0.0
+        if self._reward_type == "layered":
+            self._reward = layered_score(
+                verification=self._verification,
+                fail_to_pass=self._evaluation.fail_to_pass,
+                pass_to_pass=self._evaluation.pass_to_pass,
+                lambda_=self._layered_lambda,
+                mu=self._layered_mu,
+            )
+        else:
+            self._reward = 1.0 if self._verification.result == "resolved" else 0.0
         self._finalized = True
         return self._reward
 

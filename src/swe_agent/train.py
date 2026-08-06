@@ -495,11 +495,14 @@ def _run_once(
                 verifier_factory=verifier_factory,
                 output_limit_chars=config.chat.max_observation_chars,
                 max_timeout_sec=config.docker.exec_timeout_sec,
+                reward_type=config.grpo.reward_type,
+                layered_lambda=config.grpo.layered_lambda,
+                layered_mu=config.grpo.layered_mu,
             )
             environments.append(environment)
             return environment
 
-        reward_func = _recording_reward(recorder, binary_reward)
+        reward_func = _recording_reward(recorder, binary_reward, config.grpo.reward_type)
         stage = "tokenizer"
         tokenizer = build_processing_class(config)
         stage = "trainer_construct"
@@ -692,7 +695,7 @@ def _run_once(
     }
 
 
-def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]]):
+def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]], reward_type: str = "binary"):
     def reward(
         prompts: list[object],
         completions: list[object],
@@ -755,7 +758,7 @@ def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]])
             for environment in environments:
                 recorder.merge_cleanup_events(environment._drain_events())
 
-    reward.__name__ = "binary_reward"
+    reward.__name__ = f"{reward_type}_reward"
     return reward
 
 
@@ -1410,7 +1413,7 @@ def _native_policy_path_reached(environments: list[Any]) -> bool:
             and isinstance(patch, str)
             and bool(patch.strip())
             and verification is not None
-            and reward in (0.0, 1.0)
+            and isinstance(reward, float) and 0.0 <= reward <= 1.0
         ):
             return True
     return False

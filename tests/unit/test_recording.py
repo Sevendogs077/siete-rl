@@ -298,6 +298,54 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     ] == 1
 
 
+def test_complete_group_accepts_fractional_rewards(tmp_path: Path) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=7)
+    recorder.begin_group(
+        [{"role": "user", "content": "repair it"}], 3, task_id="getmoto__moto-7023"
+    )
+    recorder.complete_group(
+        episode_ids=["e0", "e1", "e2"],
+        rewards=[0.0, 0.018, 1.0],
+        verifications=[
+            verification("unresolved"),
+            verification("unresolved"),
+            verification(),
+        ],
+    )
+
+    group = load_json(recorder.output_dir / "rollouts/batch-0000/group-0000/group.json")
+    assert group["rewards"] == [0.0, 0.018, 1.0]
+    assert group["reward_mean"] == pytest.approx(1.018 / 3)
+    assert group["degenerate"] is False
+
+    reward = load_json(recorder.output_dir / "run.json")["results"]["reward"]
+    # 部分得分不算成功，只有 reward == 1.0 计入 successes
+    assert reward["successes"] == 1
+    assert reward["attempts"] == 3
+    assert reward["mean"] == pytest.approx(1.018 / 3)
+    assert reward["last_group_mean"] == pytest.approx(1.018 / 3)
+
+
+@pytest.mark.parametrize(
+    "rewards",
+    [[0.0, 1.2, 1.0], [0.0, -0.1, 1.0]],
+    ids=["above-one", "below-zero"],
+)
+def test_complete_group_rejects_out_of_range_rewards(
+    tmp_path: Path, rewards: list[float]
+) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=7)
+    recorder.begin_group(
+        [{"role": "user", "content": "repair it"}], 3, task_id="getmoto__moto-7023"
+    )
+    with pytest.raises(ValueError, match=r"group rewards must be within \[0, 1\]"):
+        recorder.complete_group(
+            episode_ids=["e0", "e1", "e2"],
+            rewards=rewards,
+            verifications=[None, None, None],
+        )
+
+
 def test_native_policy_path_is_internal_only(tmp_path: Path) -> None:
     recorder = RunRecorder(
         config=configured_for(tmp_path), seed=1, run_id="native-path-run"

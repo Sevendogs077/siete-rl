@@ -107,7 +107,11 @@ def load_task_instance(
         exec_timeout_sec=config.docker.exec_timeout_sec,
         verifier_timeout_sec=config.docker.verifier_timeout_sec,
     )
-    return Sample(task=task, environment=environment), Evaluation(offline_eval_script=offline)
+    return Sample(task=task, environment=environment), Evaluation(
+        offline_eval_script=offline,
+        fail_to_pass=_load_test_list(official, "FAIL_TO_PASS", task_id),
+        pass_to_pass=_load_test_list(official, "PASS_TO_PASS", task_id),
+    )
 
 
 def load_task_context(config: ProjectConfig, project_root: Path) -> TaskContext:
@@ -151,6 +155,20 @@ def transform_eval_script_offline(script: str) -> str:
         replacement = replacement.replace("\n", "\r\n")
     lines[index : index + 1] = [replacement]
     return "".join(lines)
+
+
+def _load_test_list(row: dict[str, Any], field: str, task_id: str) -> list[str]:
+    """解析官方行中的测试清单字段：JSON 字符串或已解析的字符串列表。"""
+
+    raw = row[field]
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SWEGymContractError(f"{task_id}: {field} is not valid JSON: {exc}") from exc
+    if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
+        raise SWEGymContractError(f"{task_id}: {field} must be a JSON list of test ids")
+    return list(raw)
 
 
 def _resolve(project_root: Path, value: str) -> Path:

@@ -321,21 +321,22 @@ class RunRecorder:
         expected = len(self.group["rollout_dirs"])
         if len(episode_ids) != expected or len(rewards) != expected or len(verifications) != expected:
             raise ValueError("completed group requires aligned rollouts")
-        integer_rewards = []
+        # 支持 [0, 1] 内的浮点奖励（layered 模式），仅校验取值范围
+        float_rewards = []
         for reward in rewards:
-            if reward not in (0, 0.0, 1, 1.0):
-                raise ValueError("binary group rewards must be zero or one")
-            integer_rewards.append(int(reward))
+            if not 0.0 <= reward <= 1.0:
+                raise ValueError("group rewards must be within [0, 1]")
+            float_rewards.append(float(reward))
         resolved = sum(v is not None and v.result == "resolved" for v in verifications)
         unresolved = sum(v is not None and v.result == "unresolved" for v in verifications)
-        reward_mean = fmean(integer_rewards)
-        reward_std = pstdev(integer_rewards) if len(integer_rewards) > 1 else 0.0
+        reward_mean = fmean(float_rewards)
+        reward_std = pstdev(float_rewards) if len(float_rewards) > 1 else 0.0
         degenerate = math.isclose(reward_std, 0.0)
         self.group.update(
             {
                 "state": "completed",
                 "episode_ids": list(episode_ids),
-                "rewards": integer_rewards,
+                "rewards": float_rewards,
                 "reward_mean": reward_mean,
                 "reward_std": reward_std,
                 "degenerate": degenerate,
@@ -351,7 +352,7 @@ class RunRecorder:
         result = self.run["results"]["reward"]
         train["groups_generated"] += 1
         train["rollouts_generated"] += expected
-        self._all_rewards.extend(integer_rewards)
+        self._all_rewards.extend(float_rewards)
         self._degenerate_groups += int(degenerate)
         self._reward_ema = (
             reward_mean
@@ -362,7 +363,8 @@ class RunRecorder:
         nondegenerate_groups = train["groups_generated"] - self._degenerate_groups
         result.update(
             {
-                "successes": sum(self._all_rewards),
+                # successes 只统计 reward == 1.0（完全解决），部分得分不算成功
+                "successes": sum(reward == 1.0 for reward in self._all_rewards),
                 "attempts": len(self._all_rewards),
                 "mean": fmean(self._all_rewards),
                 "last_group_mean": reward_mean,
@@ -400,6 +402,7 @@ class RunRecorder:
             "rollouts_cumulative": train["rollouts_generated"],
             "groups_cumulative": train["groups_generated"],
             "train_successes_cumulative": reward["successes"],
+            # 累计平均奖励；二元奖励下等价于 resolved 通过率
             "train_pass_rate_cumulative": reward["mean"],
             "reward_mean_group": group_reward_mean,
             "reward_std_group_population": group_reward_std,

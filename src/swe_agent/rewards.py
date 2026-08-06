@@ -1,4 +1,4 @@
-"""唯一 custom binary reward adapter。"""
+"""唯一的 custom reward adapter（binary / layered 共用，分层逻辑在环境 _finalize 内）。"""
 
 from __future__ import annotations
 
