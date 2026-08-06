@@ -22,7 +22,7 @@ FAILED="$STATE_DIR/pull_failed.txt"
 mapfile -t tags < <(.venv/bin/python - "$PARQUET" <<'EOF'
 import sys
 import pyarrow.parquet as pq
-from swe_agent.asset_generation import image_tag_for
+from siete_rl.asset_generation import image_tag_for
 t = pq.read_table(sys.argv[1])
 for i in t.column('instance_id').to_pylist():
     print(image_tag_for(i))
@@ -60,9 +60,6 @@ printf '%s\n' "${tags[@]}" | xargs -P "$CONCURRENCY" -I{} bash -c 'pull_one "$@"
 ok=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^xingyaoww/sweb.eval.x86_64\.' || true)
 echo "[$(date -Is)] done: $ok/${#tags[@]} images present; failures listed in $FAILED" | tee -a "$LOG"
 
-# SWE-Gym 官方旧版 mypy 规格会用 sed 修改 tracked requirements；从锁定源码重建这五个镜像。
-scripts/rebuild_swegym_mypy_images.sh
-
 echo "[$(date -Is)] generating task assets" | tee -a "$LOG"
 .venv/bin/python - "$PARQUET" "$MIRROR" <<'EOF'
 import sys
@@ -70,9 +67,9 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from swe_agent.asset_generation import fetch_registry_digest, generate_task_assets, image_tag_for
-from swe_agent.docker import SubprocessDockerClient
-from swe_agent.swegym import OFFICIAL_REVISION, SUBSET_REVISION
+from siete_rl.asset_generation import fetch_registry_digest, generate_task_assets, image_tag_for
+from siete_rl.docker import SubprocessDockerClient
+from siete_rl.swegym import OFFICIAL_REVISION, SUBSET_REVISION
 
 parquet = sys.argv[1]
 mirror = sys.argv[2]

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent.reporting import (
+from siete_rl.reporting import (
     load_group_rows,
     load_metric_rows,
     render_training_summary,

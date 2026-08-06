@@ -7,8 +7,8 @@ import re
 from typing import Any, Literal
 from uuid import uuid4
 
-from swe_agent.docker import ContainerCleanupError, DockerRuntimeError, DockerSandbox
-from swe_agent.models import (
+from siete_rl.docker import ContainerCleanupError, DockerRuntimeError, DockerSandbox
+from siete_rl.models import (
     Action,
     Evaluation,
     LoopExit,
@@ -19,10 +19,10 @@ from swe_agent.models import (
     Trajectory,
     Verification,
 )
-from swe_agent.scoring import DEFAULT_LAMBDA, DEFAULT_MU, layered_score
-from swe_agent.swegym import TaskContext
-from swe_agent.tools import ToolContractError, ToolExecutor, validate_tool_arguments
-from swe_agent.verifier import SWEGymVerifier
+from siete_rl.scoring import DEFAULT_LAMBDA, DEFAULT_MU, layered_score
+from siete_rl.swegym import TaskContext
+from siete_rl.tools import ToolContractError, ToolExecutor, validate_tool_arguments
+from siete_rl.verifier import SWEGymVerifier
 
 
 SandboxFactory = Callable[[Sample, str, Literal["rollout", "verifier"]], DockerSandbox]

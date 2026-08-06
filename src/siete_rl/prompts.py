@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from swe_agent.models import Task
-from swe_agent.tool_protocol import render_system_suffix
+from siete_rl.models import Task
+from siete_rl.tool_protocol import render_system_suffix
 
 
 # 该 base 与训练轨迹的固定 system message 相同；工具 blocks 由本地 schema 追加。

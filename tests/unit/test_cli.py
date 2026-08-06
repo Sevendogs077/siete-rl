@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent import cli, train
+from siete_rl import cli, train
 
 
 def test_cli_forwards_complete_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

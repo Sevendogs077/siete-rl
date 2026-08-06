@@ -1,4 +1,4 @@
-"""swe_agent 唯一正式命令行入口。"""
+"""siete_rl 唯一正式命令行入口。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import signal
 import sys
 from pathlib import Path
 
-from swe_agent import train
+from siete_rl import train
 
 
 class WorkflowTermination(BaseException):
@@ -51,7 +51,7 @@ class SignalBoundary:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="swe_agent")
+    parser = argparse.ArgumentParser(prog="siete-rl")
     subparsers = parser.add_subparsers(dest="command", required=True)
     grpo = subparsers.add_parser("grpo", help="运行固定 SWE-Gym GRPO 作业")
     grpo.add_argument("--config", type=Path, required=True)

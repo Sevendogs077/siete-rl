@@ -6,13 +6,13 @@ import argparse
 import signal
 from pathlib import Path
 
-from swe_agent import train
-from swe_agent.cli import SignalBoundary, WorkflowTermination
-from swe_agent.launcher import VLLMEndpoints
+from siete_rl import train
+from siete_rl.cli import SignalBoundary, WorkflowTermination
+from siete_rl.launcher import VLLMEndpoints
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="swe_agent.worker")
+    parser = argparse.ArgumentParser(prog="siete_rl.worker")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--server-host", required=True)

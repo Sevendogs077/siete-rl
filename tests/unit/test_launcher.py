@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent.config import load_config
-from swe_agent.launcher import (
+from siete_rl.config import load_config
+from siete_rl.launcher import (
     LauncherError,
     VLLMEndpoints,
     VLLMServer,
@@ -69,7 +69,7 @@ def test_resolve_gpu_topology_does_not_mutate_environment(monkeypatch) -> None:
 def test_run_endpoints_are_distinct_and_override_fixed_config_port(monkeypatch) -> None:
     config = load_project_config()
     ports = iter((18421, 18422))
-    monkeypatch.setattr("swe_agent.launcher._reserve_ephemeral_port", lambda host, excluded=None: next(ports))
+    monkeypatch.setattr("siete_rl.launcher._reserve_ephemeral_port", lambda host, excluded=None: next(ports))
     endpoints = allocate_vllm_endpoints(config)
     assert endpoints.host == "127.0.0.1"
     assert endpoints.server_port != endpoints.group_port
@@ -96,9 +96,9 @@ def make_server(monkeypatch, tmp_path: Path, polls: list[int | None], probe_resu
         spawned.update(kwargs)
         return FakePopen(polls)
 
-    monkeypatch.setattr("swe_agent.launcher.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("siete_rl.launcher.subprocess.Popen", fake_popen)
     monkeypatch.setattr(
-        "swe_agent.launcher.os.killpg",
+        "siete_rl.launcher.os.killpg",
         lambda pid, signum: signals.append((pid, signal.Signals(signum))),
     )
     server = VLLMServer(
@@ -133,7 +133,7 @@ def test_server_start_and_clean_close(monkeypatch, tmp_path) -> None:
 
 
 def test_server_close_escalates_to_kill(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr("swe_agent.launcher.TERM_GRACE_SEC", 0.05)
+    monkeypatch.setattr("siete_rl.launcher.TERM_GRACE_SEC", 0.05)
     server, _, signals = make_server(monkeypatch, tmp_path, polls=[None])
 
     server.start()

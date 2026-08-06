@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from swe_agent.docker import CommandResult, DockerSandbox
-from swe_agent.models import Action, Observation
-from swe_agent.openhands_editor import ContainerFileBackend, OpenHandsEditor, ToolError
-from swe_agent.tool_protocol import OPENHANDS_TOOL_SCHEMAS
+from siete_rl.docker import CommandResult, DockerSandbox
+from siete_rl.models import Action, Observation
+from siete_rl.openhands_editor import ContainerFileBackend, OpenHandsEditor, ToolError
+from siete_rl.tool_protocol import OPENHANDS_TOOL_SCHEMAS
 
 
 class ToolContractError(ValueError):

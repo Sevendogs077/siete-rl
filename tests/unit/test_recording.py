@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from swe_agent.config import load_config
-from swe_agent.models import Action, Observation, Step, Trajectory, Verification
-from swe_agent.recording import RunRecorder, generate_run_id
+from siete_rl.config import load_config
+from siete_rl.models import Action, Observation, Step, Trajectory, Verification
+from siete_rl.recording import RunRecorder, generate_run_id
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

@@ -7,8 +7,8 @@ from typing import Sequence
 
 import pytest
 
-from swe_agent.config import load_config
-from swe_agent.docker import (
+from siete_rl.config import load_config
+from siete_rl.docker import (
     CommandResult,
     ContainerCleanupError,
     ContainerCreateError,
@@ -20,7 +20,7 @@ from swe_agent.docker import (
     inspect_image,
     sweep_run_containers,
 )
-from swe_agent.swegym import load_task_instance
+from siete_rl.swegym import load_task_instance
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -115,6 +115,8 @@ def make_sandbox(client: FakeClient, task, environment) -> DockerSandbox:
     )
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_create_command_has_fixed_isolation_and_no_mount(domain) -> None:
     task, environment = domain
     sandbox = make_sandbox(FakeClient([]), task, environment)
@@ -131,6 +133,8 @@ def test_create_command_has_fixed_isolation_and_no_mount(domain) -> None:
     assert environment.image_name in command
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_open_saves_id_before_start_and_closes_by_id(domain) -> None:
     task, environment = domain
     client = FakeClient([*ready_responses(task, environment), result([], stdout=CONTAINER_ID)])
@@ -143,6 +147,8 @@ def test_open_saves_id_before_start_and_closes_by_id(domain) -> None:
     assert sandbox.container_id is None
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_start_failure_preserves_primary_and_runs_cleanup(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -160,6 +166,8 @@ def test_start_failure_preserves_primary_and_runs_cleanup(domain) -> None:
     assert sandbox.container_id is None
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_base_mismatch_is_primary_and_container_is_removed(domain) -> None:
     task, environment = domain
     responses = ready_responses(task, environment)
@@ -171,6 +179,8 @@ def test_base_mismatch_is_primary_and_container_is_removed(domain) -> None:
     assert sandbox.container_id is None
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_cleanup_failure_retains_handle_and_next_close_retries(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -194,6 +204,8 @@ def test_cleanup_failure_retains_handle_and_next_close_retries(domain) -> None:
     assert len(client.calls) == calls_after_success
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_ambiguous_create_recovers_exact_id_then_cleans(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -211,6 +223,8 @@ def test_ambiguous_create_recovers_exact_id_then_cleans(domain) -> None:
     assert client.calls[-1][0] == ["docker", "rm", "-f", CONTAINER_ID]
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_image_identity_mismatch_fails_before_create(domain) -> None:
     task, environment = domain
     client = FakeClient([image_inspect(environment, Id="sha256:" + "0" * 64)])
@@ -219,6 +233,8 @@ def test_image_identity_mismatch_fails_before_create(domain) -> None:
     assert len(client.calls) == 1
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_get_diff_registers_untracked_files_before_diff(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -239,6 +255,8 @@ def test_get_diff_registers_untracked_files_before_diff(domain) -> None:
     assert "diff" in client.calls[1][0]
 
 
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
 def test_get_diff_fails_when_untracked_registration_fails(domain) -> None:
     task, environment = domain
     client = FakeClient([result([], exit_code=1, stderr="index lock")])
@@ -262,7 +280,7 @@ def test_subprocess_client_pins_dedicated_docker_host(monkeypatch) -> None:
         captured.update(kwargs)
         return FakeCompleted()
 
-    monkeypatch.setattr("swe_agent.docker.subprocess.run", fake_run)
+    monkeypatch.setattr("siete_rl.docker.subprocess.run", fake_run)
     client = SubprocessDockerClient()
     outcome = client.run(["docker", "ps"], timeout_sec=5)
 

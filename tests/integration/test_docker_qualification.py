@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent.config import load_config
-from swe_agent.docker import DockerSandbox, SubprocessDockerClient, inspect_image
-from swe_agent.environment import SWEEnvironment
-from swe_agent.models import Environment, Evaluation, Sample, Task
-from swe_agent.swegym import load_task_instance
+from siete_rl.config import load_config
+from siete_rl.docker import DockerSandbox, SubprocessDockerClient, inspect_image
+from siete_rl.environment import SWEEnvironment
+from siete_rl.models import Environment, Evaluation, Sample, Task
+from siete_rl.swegym import load_task_instance
 
 
 pytestmark = pytest.mark.docker

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from swe_agent.trainer import SWEGRPOTrainer
+from siete_rl.trainer import SWEGRPOTrainer
 
 
 class Environment:
@@ -38,7 +38,7 @@ def test_finish_keeps_model_tokens_and_adds_no_observation() -> None:
 def test_plain_message_gets_fake_user_and_continues_to_finish(monkeypatch) -> None:
     env = Environment(); value = trainer(); value.environments = [env]; value._sync_tool_dicts = [{"finish": lambda: setattr(env, "terminated", True) or ""}]; value._async_tool_dicts = [{}]
     value._generate_single_turn = lambda ids, *args: ([[91]], None)
-    monkeypatch.setattr("swe_agent.trainer.parse_response", lambda *args, **kwargs: call("finish"))
+    monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: call("finish"))
     mask, completions, ids, *_ = run(value, {"role": "assistant", "content": "I will inspect this."})
     assert "Please continue working" in completions[0][1]["content"]
     assert completions[0][-1] == call("finish")

@@ -30,18 +30,18 @@ import yaml
 from transformers import AutoTokenizer
 from trl.chat_template_utils import parse_response
 
-from swe_agent.docker import (
+from siete_rl.docker import (
     ContainerCreateError,
     DockerSandbox,
     SubprocessDockerClient,
     sweep_run_containers,
 )
-from swe_agent.environment import SWEEnvironment
-from swe_agent.launcher import VLLMServer
-from swe_agent.models import Environment, Evaluation, Sample, Task
-from swe_agent.prompts import build_prompt
-from swe_agent.tool_protocol import install_openhands_tool_protocol
-from swe_agent.trainer import SWEGRPOTrainer
+from siete_rl.environment import SWEEnvironment
+from siete_rl.launcher import VLLMServer
+from siete_rl.models import Environment, Evaluation, Sample, Task
+from siete_rl.prompts import build_prompt
+from siete_rl.tool_protocol import install_openhands_tool_protocol
+from siete_rl.trainer import SWEGRPOTrainer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -60,8 +60,7 @@ VERIFIED_PARQUET = (
     / "data/test-00000-of-00001.parquet"
 )
 IMAGE_MANIFEST = PROJECT_ROOT / "data/swegym/verified_pull/images-x86_64.txt"
-DEFAULT_HARNESS_ROOT = Path("/home/2025user/zyp/work/2606_swe_agent/.external/swe-bench")
-DEFAULT_HARNESS_PYTHON = Path("/home/2025user/zyp/work/2606_swe_agent/.venv/bin/python")
+DEFAULT_HARNESS_ROOT = PROJECT_ROOT / ".external" / "swe-bench"
 EXTERNAL_REFERENCES = (
     {
         "source": "SWE-Gym paper",
@@ -530,8 +529,14 @@ def build_comparison(
 
 def resolve_harness() -> tuple[Path, Path]:
     root = Path(os.environ.get("EVAL_HARNESS_ROOT", DEFAULT_HARNESS_ROOT)).expanduser().resolve()
+    # harness Python 无默认值：必须由 EVAL_HARNESS_PYTHON 显式指定，缺失即失败关闭。
+    harness_python_env = os.environ.get("EVAL_HARNESS_PYTHON", "").strip()
+    if not harness_python_env:
+        raise EvalError(
+            "EVAL_HARNESS_PYTHON is not set; point it at a Python with swebench installed"
+        )
     # 不能 resolve venv 的 Python symlink；解引用会丢失该 venv 的 site-packages。
-    python = Path(os.environ.get("EVAL_HARNESS_PYTHON", DEFAULT_HARNESS_PYTHON)).expanduser()
+    python = Path(harness_python_env).expanduser()
     if not python.is_absolute():
         python = (PROJECT_ROOT / python).absolute()
     if not (root / "swebench/harness/run_evaluation.py").is_file():
@@ -1334,7 +1339,7 @@ def _atexit_sweep(client: SubprocessDockerClient, run_id: str) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) != 1:
-        print("usage: scripts/eval.sh /absolute/path/to/run", file=sys.stderr)
+        print("usage: scripts/eval.sh <run-dir>   # outputs/ 或 _archive/ 下的 run 目录", file=sys.stderr)
         return 2
     try:
         output = execute(arguments[0])

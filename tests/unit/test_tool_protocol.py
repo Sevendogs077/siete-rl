@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from swe_agent.tool_protocol import (
+from siete_rl.tool_protocol import (
     FIXED_FAKE_USER,
     OPENHANDS_TOOL_SCHEMAS,
     install_openhands_tool_protocol,

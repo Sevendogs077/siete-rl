@@ -125,3 +125,7 @@ adapter_model.safetensors
 *.temp
 *.orig
 *.rej
+
+# Internal local documents (kept on disk, excluded from public tree)
+/docs/notes.md
+/docs/superpowers/

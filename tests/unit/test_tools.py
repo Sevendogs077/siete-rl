@@ -4,9 +4,9 @@ from collections import deque
 
 import pytest
 
-from swe_agent.docker import CommandResult
-from swe_agent.models import Action
-from swe_agent.tools import TOOL_SPECS, ToolExecutor, validate_tool_arguments
+from siete_rl.docker import CommandResult
+from siete_rl.models import Action
+from siete_rl.tools import TOOL_SPECS, ToolExecutor, validate_tool_arguments
 
 
 class FakeSandbox:

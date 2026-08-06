@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent.config import load_config
-from swe_agent.train import _require_single_visible_gpu
+from siete_rl.config import load_config
+from siete_rl.train import _require_single_visible_gpu
 
 
 pytestmark = pytest.mark.gpu
@@ -35,7 +35,7 @@ def test_openhands_7b_bf16_lora_forward_backward_save_reload(tmp_path: Path) -> 
     from peft import PeftModel, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from swe_agent.train import build_peft_config
+    from siete_rl.train import build_peft_config
 
     config, _, _ = load_config(CONFIG_PATH)
     assert config.quantization.load_in_4bit is False

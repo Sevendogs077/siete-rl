@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from swe_agent.scoring import DEFAULT_LAMBDA, DEFAULT_MU
+from siete_rl.scoring import DEFAULT_LAMBDA, DEFAULT_MU
 
 
 LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
@@ -267,6 +268,9 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
 
     config = ProjectConfig.model_validate(payload)
     project_root = find_project_root(config_path)
+    # MODEL_PATH / TOKENIZER_PATH 环境变量优先于 yaml，便于部署时覆盖模型路径。
+    model_path = os.environ.get("MODEL_PATH", "").strip() or config.model.model_path
+    tokenizer_path = os.environ.get("TOKENIZER_PATH", "").strip() or config.model.tokenizer_path
     resolved = config.model_copy(
         update={
             "dataset": config.dataset.model_copy(
@@ -278,8 +282,8 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
             ),
             "model": config.model.model_copy(
                 update={
-                    "model_path": resolve_path(project_root, config.model.model_path),
-                    "tokenizer_path": resolve_path(project_root, config.model.tokenizer_path),
+                    "model_path": resolve_path(project_root, model_path),
+                    "tokenizer_path": resolve_path(project_root, tokenizer_path),
                 }
             ),
             "output": config.output.model_copy(

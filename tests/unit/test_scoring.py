@@ -4,8 +4,8 @@ import math
 
 import pytest
 
-from swe_agent.models import Verification
-from swe_agent.scoring import layered_score, parse_pytest_summary
+from siete_rl.models import Verification
+from siete_rl.scoring import layered_score, parse_pytest_summary
 
 LAMBDA = 8.0
 MU = math.log(2)

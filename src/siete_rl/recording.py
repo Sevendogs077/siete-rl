@@ -16,8 +16,8 @@ from typing import Any, Literal
 
 import yaml
 
-from swe_agent.config import ProjectConfig
-from swe_agent.models import Trajectory, Verification
+from siete_rl.config import ProjectConfig
+from siete_rl.models import Trajectory, Verification
 
 
 RunState = Literal["running", "completed", "failed", "interrupted"]

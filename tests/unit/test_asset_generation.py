@@ -7,8 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from swe_agent.asset_generation import fetch_registry_digest, generate_task_assets
-from swe_agent.swegym import SWEGymContractError
+from siete_rl.asset_generation import fetch_registry_digest, generate_task_assets
+from siete_rl.swegym import SWEGymContractError
 
 
 def _rows(instance_id: str) -> list[dict]:

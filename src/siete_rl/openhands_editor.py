@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
-from swe_agent.docker import DockerSandbox
+from siete_rl.docker import DockerSandbox
 
 MAX_RESPONSE_LEN_CHAR = 16_000
 SNIPPET_CONTEXT_WINDOW = 4

@@ -7,10 +7,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from swe_agent import swegym
-from swe_agent.config import load_config
-from swe_agent.models import Evaluation
-from swe_agent.swegym import (
+from siete_rl import swegym
+from siete_rl.config import load_config
+from siete_rl.models import Evaluation
+from siete_rl.swegym import (
     SWEGymContractError,
     build_training_dataset,
     load_task_context,
@@ -31,6 +31,8 @@ def loaded():
     return config, project_root, sample, evaluation
 
 
+# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
+@pytest.mark.external_assets
 def test_real_two_table_assets_and_runtime_boundary(loaded) -> None:
     _, _, sample, evaluation = loaded
     assert sample.task.task_id == TASK_ID
@@ -42,6 +44,8 @@ def test_real_two_table_assets_and_runtime_boundary(loaded) -> None:
     assert "PIP_NO_INDEX=1" in evaluation.offline_eval_script
 
 
+# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
+@pytest.mark.external_assets
 def test_task_context_covers_all_selected_tasks_and_is_read_only(loaded) -> None:
     config, project_root, sample, evaluation = loaded
     context = load_task_context(config, project_root)
@@ -54,6 +58,8 @@ def test_task_context_covers_all_selected_tasks_and_is_read_only(loaded) -> None
         context["other"] = (sample, evaluation)  # type: ignore[index]
 
 
+# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
+@pytest.mark.external_assets
 def test_dataset_and_prompt_contain_only_public_fields(loaded) -> None:
     config, project_root, sample, evaluation = loaded
     dataset = build_training_dataset(load_task_context(config, project_root))
@@ -74,6 +80,8 @@ def test_dataset_and_prompt_contain_only_public_fields(loaded) -> None:
     assert "Qwen XML" not in public_payload
 
 
+# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
+@pytest.mark.external_assets
 def test_load_task_instance_carries_test_lists(loaded) -> None:
     _, _, _, evaluation = loaded
     assert evaluation.fail_to_pass == [
@@ -91,6 +99,8 @@ def test_load_task_instance_carries_test_lists(loaded) -> None:
     ]
 
 
+# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
+@pytest.mark.external_assets
 def test_load_task_instance_rejects_non_list_test_field(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
     # official 行的 FAIL_TO_PASS 不是 JSON 字符串列表时必须拒绝。
     config, project_root, _, _ = loaded
@@ -107,6 +117,8 @@ def test_load_task_instance_rejects_non_list_test_field(loaded, monkeypatch: pyt
         load_task_instance(config, project_root, TASK_ID)
 
 
+# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
+@pytest.mark.external_assets
 def test_load_task_instance_rejects_invalid_json_test_field(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
     # FAIL_TO_PASS 是字符串但不是合法 JSON 时也必须拒绝。
     config, project_root, _, _ = loaded
@@ -138,6 +150,8 @@ def test_exactly_one_parquet_row_is_required(tmp_path: Path) -> None:
         swegym._read_exact_row(path, "x")
 
 
+# 依赖私有 data/assets（读取 assets 下真实 eval_script）。
+@pytest.mark.external_assets
 def test_offline_transform_is_exact_and_fail_closed(loaded) -> None:
     config, _, _, _ = loaded
     assets = Path(config.dataset.tasks_dir) / TASK_ID

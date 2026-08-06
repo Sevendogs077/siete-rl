@@ -6,11 +6,14 @@ from typing import Sequence
 
 import pytest
 
-from swe_agent.config import load_config
-from swe_agent.docker import CommandResult, ContainerCleanupError, DockerRuntimeError
-from swe_agent.models import Evaluation
-from swe_agent.swegym import load_task_instance
-from swe_agent.verifier import SWEGymVerifier, VerificationInfrastructureError
+from siete_rl.config import load_config
+from siete_rl.docker import CommandResult, ContainerCleanupError, DockerRuntimeError
+from siete_rl.models import Evaluation
+from siete_rl.swegym import load_task_instance
+from siete_rl.verifier import SWEGymVerifier, VerificationInfrastructureError
+
+# 整个文件都依赖私有 data/assets 下的真实数据集资产（domain fixture）。
+pytestmark = pytest.mark.external_assets
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol, Sequence
 from uuid import uuid4
 
-from swe_agent.models import Environment, Task
+from siete_rl.models import Environment, Task
 
 
 DEFAULT_DOCKER_HOST = "unix:///run/docker-swegym/docker.sock"

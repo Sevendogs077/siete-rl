@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 import pytest
 
-from swe_agent.eval import (
+from siete_rl.eval import (
     EvalDockerSandbox,
     EvalError,
     EvalOutcome,
@@ -22,7 +22,7 @@ from swe_agent.eval import (
     resolve_harness,
     run_agent_loop,
 )
-from swe_agent.docker import CommandResult
+from siete_rl.docker import CommandResult
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +88,8 @@ def test_sampler_fallback_is_explicit_and_session_scoped(monkeypatch: pytest.Mon
         configure_sampler_backend()
 
 
+# 依赖私有 outputs/ 下的真实评测运行目录。
+@pytest.mark.external_assets
 def test_last_two_real_runs_supply_budget_without_defaults() -> None:
     for name in ("20260801T235407Z-149b", "20260802T065312Z-b873"):
         run = load_eval_run(PROJECT_ROOT / "outputs" / name)
@@ -97,6 +99,16 @@ def test_last_two_real_runs_supply_budget_without_defaults() -> None:
         assert run.protocol.max_model_length == 32768
 
 
+def test_harness_resolver_fails_closed_without_eval_harness_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EVAL_HARNESS_PYTHON", raising=False)
+    with pytest.raises(EvalError, match="EVAL_HARNESS_PYTHON"):
+        resolve_harness()
+
+
+# 依赖 .external 下的真实评测 harness 检出。
+@pytest.mark.external_assets
 def test_harness_resolver_accepts_clean_checkout() -> None:
     root, python = resolve_harness()
     assert root.name == "swe-bench"
@@ -105,6 +117,8 @@ def test_harness_resolver_accepts_clean_checkout() -> None:
     assert python.parent.parent.name == ".venv"
 
 
+# 依赖私有 outputs/ 下的真实评测运行目录。
+@pytest.mark.external_assets
 def test_missing_budget_fails_closed(tmp_path: Path) -> None:
     source = PROJECT_ROOT / "outputs/20260801T235407Z-149b"
     run = PROJECT_ROOT / "outputs" / f"pytest-eval-missing-{tmp_path.name}"
@@ -190,7 +204,7 @@ def test_eval_sandbox_accepts_prep_parent_then_checks_out(sample_factory) -> Non
 
 @pytest.fixture
 def sample_factory():
-    from swe_agent.models import Environment, Sample, Task
+    from siete_rl.models import Environment, Sample, Task
 
     def make():
         task = Task(
@@ -272,13 +286,13 @@ def test_eval_agent_loop_calls_the_existing_trainer_state_machine(
         seen["tools"] = set(self._sync_tool_dicts[0])
         return [], [[{"role": "assistant", "content": "done"}]], [], None, 0, 0, []
 
-    from swe_agent.trainer import SWEGRPOTrainer
+    from siete_rl.trainer import SWEGRPOTrainer
 
-    monkeypatch.setattr("swe_agent.eval.parse_response", lambda *args, **kwargs: {"role": "assistant", "content": "start"})
-    monkeypatch.setattr("swe_agent.eval.EvalEnvironment.reset", reset)
-    monkeypatch.setattr("swe_agent.eval.SWEGRPOTrainer._tool_call_loop", fake_loop)
+    monkeypatch.setattr("siete_rl.eval.parse_response", lambda *args, **kwargs: {"role": "assistant", "content": "start"})
+    monkeypatch.setattr("siete_rl.eval.EvalEnvironment.reset", reset)
+    monkeypatch.setattr("siete_rl.eval.SWEGRPOTrainer._tool_call_loop", fake_loop)
     monkeypatch.setattr(
-        "swe_agent.eval.EvalEnvironment.finalize_eval",
+        "siete_rl.eval.EvalEnvironment.finalize_eval",
         lambda self, messages, started: EvalOutcome(
             sample.task.task_id, "patch", "submitted", None, messages, 0.0
         ),

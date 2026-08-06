@@ -4,9 +4,9 @@ import json
 import signal
 from pathlib import Path
 
-from swe_agent.config import load_config
-from swe_agent.launcher import VLLMEndpoints
-from swe_agent import supervisor
+from siete_rl.config import load_config
+from siete_rl.launcher import VLLMEndpoints
+from siete_rl import supervisor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

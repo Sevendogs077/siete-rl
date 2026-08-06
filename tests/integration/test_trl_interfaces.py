@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from swe_agent.config import load_config
-from swe_agent.models import Task
-from swe_agent.prompts import build_prompt
-from swe_agent.train import build_processing_class
-from swe_agent.trainer import SWEGRPOTrainer
+from siete_rl.config import load_config
+from siete_rl.models import Task
+from siete_rl.prompts import build_prompt
+from siete_rl.train import build_processing_class
+from siete_rl.trainer import SWEGRPOTrainer
 
 
 CONFIG_PATH = "configs/grpo_swegym_openhands_7b_lora.yaml"

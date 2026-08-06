@@ -4,9 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent import qualify
-from swe_agent.config import load_config
-from swe_agent.swegym import select_task_ids
+from siete_rl import qualify
+
+# 整个文件都依赖私有 data/assets 下的真实数据集资产。
+pytestmark = pytest.mark.external_assets
+from siete_rl.config import load_config
+from siete_rl.swegym import select_task_ids
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

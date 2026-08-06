@@ -19,8 +19,8 @@ docker:
   verifier_timeout_sec: 3600
 model:
   provenance_id: NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
-  model_path: /home/2025user/zyp/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
-  tokenizer_path: /home/2025user/zyp/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
+  model_path: ~/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
+  tokenizer_path: ~/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
   architecture: Qwen2ForCausalLM
   context_length: 32768
   trust_remote_code: true

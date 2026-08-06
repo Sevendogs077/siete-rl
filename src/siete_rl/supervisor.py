@@ -12,8 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from swe_agent.config import load_config
-from swe_agent.launcher import (
+from siete_rl.config import load_config
+from siete_rl.launcher import (
     TERM_GRACE_SEC,
     LauncherError,
     VLLMServer,
@@ -22,8 +22,8 @@ from swe_agent.launcher import (
     build_server_command,
     resolve_gpu_topology,
 )
-from swe_agent.recording import generate_run_id
-from swe_agent.train import TrainingNotReadyError, preflight
+from siete_rl.recording import generate_run_id
+from siete_rl.train import TrainingNotReadyError, preflight
 
 
 WORKER_TERM_GRACE_SEC = 30.0
@@ -174,7 +174,7 @@ def _start_worker(
     command = [
         sys.executable,
         "-m",
-        "swe_agent.worker",
+        "siete_rl.worker",
         "--config",
         config_path.as_posix(),
         "--run-id",
@@ -221,7 +221,7 @@ def _terminate_process_group(
 
 def _sweep_run_containers(run_id: str, state: dict[str, Any]) -> None:
     try:
-        from swe_agent.docker import SubprocessDockerClient, sweep_run_containers
+        from siete_rl.docker import SubprocessDockerClient, sweep_run_containers
 
         state["cleanup"]["containers_removed"] = sweep_run_containers(
             SubprocessDockerClient(), run_id

@@ -1,7 +1,7 @@
 """SWE-Gym 任务加载器：从锁定数据集与资产构造公开 Sample 和私有 Evaluation。
 
 设计边界：本模块只负责"加载"——深度一致性校验（跨表字段一致、资产哈希、
-镜像指纹、离线化正确性）集中在 `swe_agent.qualify`，由 scripts/qualify.sh
+镜像指纹、离线化正确性）集中在 `siete_rl.qualify`，由 scripts/qualify.sh
 单次运行，不在训练启动路径上把守。
 """
 
@@ -15,9 +15,9 @@ from typing import Any, Mapping
 
 from datasets import Dataset
 
-from swe_agent.config import ProjectConfig
-from swe_agent.models import Environment, Evaluation, Sample, Task
-from swe_agent.prompts import build_prompt
+from siete_rl.config import ProjectConfig
+from siete_rl.models import Environment, Evaluation, Sample, Task
+from siete_rl.prompts import build_prompt
 
 
 OFFICIAL_REVISION = "bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb"

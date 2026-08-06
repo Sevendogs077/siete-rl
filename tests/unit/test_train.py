@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent.config import ProjectConfig, load_config
-from swe_agent.train import (
+from siete_rl.config import ProjectConfig, load_config
+from siete_rl.train import (
     RecordingRuntimeError,
     RuntimeNotQualifiedError,
     _apply_liger_runtime_flags,
@@ -26,7 +26,7 @@ from swe_agent.train import (
     preflight,
     run,
 )
-from swe_agent.launcher import VLLMEndpoints
+from siete_rl.launcher import VLLMEndpoints
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -72,7 +72,7 @@ def test_entry_delegates_to_the_supervisor(
         "interrupted_signum": None,
     }
 
-    monkeypatch.setattr("swe_agent.supervisor.run", lambda path: outcome)
+    monkeypatch.setattr("siete_rl.supervisor.run", lambda path: outcome)
     result = run(CONFIG_7B)
     assert result == outcome
 
@@ -202,7 +202,7 @@ def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.Monk
         "Trainer", (), {"vllm_generation": type("Generation", (), {"vllm_client": client})()}
     )()
     recorder = type("Recorder", (), {"log": lambda self, message: events.append(message)})()
-    monkeypatch.setattr("swe_agent.train.atexit.unregister", lambda callback: events.append("unregister"))
+    monkeypatch.setattr("siete_rl.train.atexit.unregister", lambda callback: events.append("unregister"))
 
     detached = _detach_vllm_client_atexit(trainer, recorder)
     handle = _close_vllm_communicator(detached, recorder)
@@ -419,7 +419,7 @@ def test_trainer_release_shuts_down_inprocess_vllm_and_moves_model_to_cpu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[object] = []
-    monkeypatch.setattr("swe_agent.train._clear_vllm_cuda_graphs", lambda llm: None)
+    monkeypatch.setattr("siete_rl.train._clear_vllm_cuda_graphs", lambda llm: None)
 
     class EngineCore:
         def shutdown(self):
@@ -564,7 +564,7 @@ def test_locked_vllm_engine_detach_removes_executor_object_chain() -> None:
 
 
 def test_atexit_sweep_removes_orphans_and_stays_quiet(capsys: pytest.CaptureFixture) -> None:
-    from swe_agent.docker import CommandResult
+    from siete_rl.docker import CommandResult
 
     class FakeClient:
         def __init__(self) -> None:

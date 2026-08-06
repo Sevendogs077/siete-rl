@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import re
 
-from swe_agent.models import Verification
+from siete_rl.models import Verification
 
 _SUMMARY_LINE = re.compile(r"(?m)^(PASSED|FAILED|ERROR)\s+(\S+)")
 

@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from swe_agent.config import ProjectConfig, load_config
+from siete_rl.config import ProjectConfig, load_config
 
 
 class TrainingNotReadyError(RuntimeError):
@@ -88,7 +88,7 @@ def preflight(config: ProjectConfig, project_root: Path) -> dict[str, Any]:
             f"expected={config.model.architecture}, actual={architectures}"
         )
 
-    package_root = project_root / "src" / "swe_agent"
+    package_root = project_root / "src" / "siete_rl"
     missing_modules = [
         name for name in REQUIRED_DOMAIN_MODULES if not (package_root / name).is_file()
     ]
@@ -253,7 +253,7 @@ def build_trainer(
 ) -> Any:
     """构造 SWEGRPOTrainer（GRPOTrainer 子类，加入环境信号终止）。"""
 
-    from swe_agent.trainer import SWEGRPOTrainer
+    from siete_rl.trainer import SWEGRPOTrainer
 
     return SWEGRPOTrainer(
         model=config.model.model_path,
@@ -274,7 +274,7 @@ def build_processing_class(config: ProjectConfig) -> Any:
     """构造只渲染本地 OpenHands scaffold 的 tokenizer。"""
 
     from transformers import AutoTokenizer
-    from swe_agent.tool_protocol import install_openhands_tool_protocol
+    from siete_rl.tool_protocol import install_openhands_tool_protocol
 
     tokenizer = AutoTokenizer.from_pretrained(
         config.model.tokenizer_path,
@@ -372,7 +372,7 @@ def _close_vllm_communicator(client: Any | None, recorder: Any) -> dict[str, Any
 def run(config_path: str | Path) -> dict[str, Any]:
     """以无 CUDA supervisor 执行一次可终止的真实训练 run。"""
 
-    from swe_agent.supervisor import run as supervise_run
+    from siete_rl.supervisor import run as supervise_run
 
     return supervise_run(config_path)
 
@@ -426,12 +426,12 @@ def _run_once(
 ) -> dict[str, Any]:
     """创建并终结唯一 output_dir；所有项目 JSON 只由本函数驱动。"""
 
-    from swe_agent.docker import DockerSandbox, SubprocessDockerClient, sweep_run_containers
-    from swe_agent.environment import SWEEnvironment
-    from swe_agent.recording import RunRecorder
-    from swe_agent.rewards import binary_reward
-    from swe_agent.swegym import build_training_dataset, load_task_context
-    from swe_agent.verifier import SWEGymVerifier
+    from siete_rl.docker import DockerSandbox, SubprocessDockerClient, sweep_run_containers
+    from siete_rl.environment import SWEEnvironment
+    from siete_rl.recording import RunRecorder
+    from siete_rl.rewards import binary_reward
+    from siete_rl.swegym import build_training_dataset, load_task_context
+    from siete_rl.verifier import SWEGymVerifier
 
     commit, dirty = _code_provenance(project_root)
     recorder = RunRecorder(
@@ -666,7 +666,7 @@ def _run_once(
         recorder.complete()
 
     try:
-        from swe_agent.reporting import render_training_summary
+        from siete_rl.reporting import render_training_summary
 
         plot = render_training_summary(recorder.output_dir, recorder.run)
         if plot is None:
@@ -1035,7 +1035,7 @@ def _sweep_orphans_at_exit(docker_client: Any, run_id: str) -> None:
 
     import sys
 
-    from swe_agent.docker import sweep_run_containers
+    from siete_rl.docker import sweep_run_containers
 
     try:
         swept = sweep_run_containers(docker_client, run_id)
@@ -1435,9 +1435,9 @@ def _validate_rendered_prompt_length(trainer: Any, prompt: object, limit: int) -
 
 
 def _failure_category(exc: BaseException, stage: str) -> str:
-    from swe_agent.docker import DockerRuntimeError
-    from swe_agent.swegym import SWEGymContractError
-    from swe_agent.verifier import VerificationInfrastructureError
+    from siete_rl.docker import DockerRuntimeError
+    from siete_rl.swegym import SWEGymContractError
+    from siete_rl.verifier import VerificationInfrastructureError
 
     if isinstance(exc, RecordingRuntimeError):
         return "recording"

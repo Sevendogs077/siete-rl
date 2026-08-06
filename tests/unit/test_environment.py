@@ -3,9 +3,9 @@ from __future__ import annotations
 import inspect
 from collections import deque
 
-from swe_agent.docker import CommandResult, ContainerCleanupError
-from swe_agent.environment import SWEEnvironment
-from swe_agent.models import Environment, Evaluation, Sample, Task, Verification
+from siete_rl.docker import CommandResult, ContainerCleanupError
+from siete_rl.environment import SWEEnvironment
+from siete_rl.models import Environment, Evaluation, Sample, Task, Verification
 
 
 class Sandbox:

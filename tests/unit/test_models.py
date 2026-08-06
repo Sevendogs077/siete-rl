@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from swe_agent.models import (
+from siete_rl.models import (
     Action,
     Environment,
     Evaluation,

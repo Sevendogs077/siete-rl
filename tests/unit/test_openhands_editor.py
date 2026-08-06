@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from swe_agent.openhands_editor import OpenHandsEditor, ToolError
+from siete_rl.openhands_editor import OpenHandsEditor, ToolError
 
 
 class Backend:

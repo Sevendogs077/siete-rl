@@ -25,7 +25,7 @@ import asyncio
 from trl import GRPOTrainer
 from trl.chat_template_utils import parse_response
 
-from swe_agent.models import LoopExit
+from siete_rl.models import LoopExit
 
 
 _PARSE_ERROR_SENTINEL = "swe_agent_parse_error"
@@ -129,7 +129,7 @@ class SWEGRPOTrainer(GRPOTrainer):
                     continue
                 if tool_call_list == [_PLAIN_MESSAGE_SENTINEL]:
                     # 普通消息不是工具失败，也不写领域 Step。
-                    from swe_agent.tool_protocol import FIXED_FAKE_USER
+                    from siete_rl.tool_protocol import FIXED_FAKE_USER
                     prompt_completion_tool.append({"role": "user", "content": FIXED_FAKE_USER})
                     completions[idx_with_tool].append({"role": "user", "content": FIXED_FAKE_USER})
                     format_error_counts[idx_with_tool] = 0
@@ -182,7 +182,7 @@ class SWEGRPOTrainer(GRPOTrainer):
                     # pass them through directly so _tokenize_prompts can extract images for VLMs.
                     content = result if isinstance(result, list) else str(result)
                     # OpenHands observation 是普通 user turn，而不是 Qwen role=tool。
-                    from swe_agent.tool_protocol import render_observation
+                    from siete_rl.tool_protocol import render_observation
                     tool_message = {"role": "user", "content": render_observation(name, str(content), error=isinstance(result, dict) and "error" in result)}
                     # Collect images from multimodal tool responses
                     if isinstance(content, list):

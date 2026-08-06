@@ -9,7 +9,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from swe_agent.swegym import (
+from siete_rl.swegym import (
     COMPARE_FIELDS,
     SWEGymContractError,
     _read_exact_row,

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from swe_agent.config import ProjectConfig
+from siete_rl.config import ProjectConfig
 
 
 HEALTH_TIMEOUT_SEC = 1200

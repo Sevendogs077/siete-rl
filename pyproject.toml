@@ -3,9 +3,11 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "swe_agent"
+name = "siete-rl"
 version = "0.1.0"
 description = "基于 TRL 的 SWE-Gym GRPO 训练项目"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "accelerate==1.14.0",
@@ -27,20 +29,25 @@ dependencies = [
   "vllm==0.22.1+cu129",
 ]
 
+[project.urls]
+Repository = "https://github.com/Sevendogs077/siete-rl"
+Issues = "https://github.com/Sevendogs077/siete-rl/issues"
+
 [project.scripts]
-swe_agent = "swe_agent.cli:main"
+siete-rl = "siete_rl.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/swe_agent"]
+packages = ["src/siete_rl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -m 'not gpu and not docker and not vllm and not system'"
+addopts = "-q -m 'not gpu and not docker and not vllm and not system and not external_assets'"
 markers = [
   "gpu: 需要显式选择 GPU 的测试",
   "docker: 访问固定 SWE-Gym Docker 镜像的测试",
   "vllm: 启动真实 vLLM 后端的测试",
   "system: 执行真实 SWE/GRPO 系统闭环的测试",
+  "external_assets: 依赖本地私有资产（data/assets/outputs/.external）的测试",
 ]
 
 [tool.uv]

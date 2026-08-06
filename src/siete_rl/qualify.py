@@ -1,7 +1,7 @@
 """唯一全套资格检查：config / dataset / assets / docker / tokenizer / GPU。
 
 由 scripts/qualify.sh 单次运行；训练启动路径不重复这些检查。
-设计原则：不变量在此验证，运行路径只做加载（见 swe_agent.swegym）。
+设计原则：不变量在此验证，运行路径只做加载（见 siete_rl.swegym）。
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from swe_agent.config import ProjectConfig, load_config
-from swe_agent.swegym import (
+from siete_rl.config import ProjectConfig, load_config
+from siete_rl.swegym import (
     COMPARE_FIELDS,
     OFFICIAL_REVISION,
     SUBSET_REVISION,
@@ -205,8 +205,8 @@ def _check_assets_one(
 
 
 def check_docker(config: ProjectConfig, project_root: Path) -> list[Check]:
-    from swe_agent.docker import DockerRuntimeError, SubprocessDockerClient, inspect_image
-    from swe_agent.models import Environment
+    from siete_rl.docker import DockerRuntimeError, SubprocessDockerClient, inspect_image
+    from siete_rl.models import Environment
 
     try:
         client = SubprocessDockerClient()
@@ -247,10 +247,10 @@ def check_tokenizer(config: ProjectConfig) -> list[Check]:
     try:
         import inspect as _inspect
 
-        from swe_agent.environment import SWEEnvironment
-        from swe_agent.models import Task
-        from swe_agent.prompts import build_prompt
-        from swe_agent.train import build_processing_class
+        from siete_rl.environment import SWEEnvironment
+        from siete_rl.models import Task
+        from siete_rl.prompts import build_prompt
+        from siete_rl.train import build_processing_class
 
         tokenizer = build_processing_class(config)
         environment = SWEEnvironment(
@@ -301,7 +301,7 @@ def check_gpu() -> list[Check]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="swe_agent.qualify", description="单次全套资格检查")
+    parser = argparse.ArgumentParser(prog="siete_rl.qualify", description="单次全套资格检查")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--no-docker", action="store_true", help="跳过 docker daemon/镜像检查")
     args = parser.parse_args(argv)

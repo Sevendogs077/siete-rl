@@ -1,5 +1,5 @@
-from swe_agent.models import Task
-from swe_agent.prompts import build_prompt, safe_task_id
+from siete_rl.models import Task
+from siete_rl.prompts import build_prompt, safe_task_id
 import hashlib
 
 

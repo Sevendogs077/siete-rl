@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from swe_agent.environment import SWEEnvironment
+from siete_rl.environment import SWEEnvironment
 
 
 def binary_reward(

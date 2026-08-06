@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from swe_agent.config import load_config
-from swe_agent.models import Task
-from swe_agent.prompts import build_prompt
-from swe_agent.tool_protocol import parse_openhands_text
-from swe_agent.train import build_processing_class
+from siete_rl.config import load_config
+from siete_rl.models import Task
+from siete_rl.prompts import build_prompt
+from siete_rl.tool_protocol import parse_openhands_text
+from siete_rl.train import build_processing_class
 
 
 pytestmark = [pytest.mark.gpu, pytest.mark.vllm]

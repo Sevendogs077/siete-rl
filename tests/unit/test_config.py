@@ -7,7 +7,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from swe_agent.config import (
+from siete_rl.config import (
     GRPOConfigValues,
     LORA_TARGET_MODULES,
     ProjectConfig,
@@ -27,6 +27,18 @@ def _minimal_grpo_values(**overrides: object) -> GRPOConfigValues:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "configs"
 CONFIG_7B = CONFIG_DIR / "grpo_swegym_openhands_7b_lora.yaml"
+
+
+def test_model_and_tokenizer_path_env_overrides_take_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL_PATH", "~/models/override-model")
+    monkeypatch.setenv("TOKENIZER_PATH", "~/models/override-tokenizer")
+    config, _, _ = load_config(CONFIG_7B)
+    assert config.model.model_path == (Path.home() / "models/override-model").resolve().as_posix()
+    assert config.model.tokenizer_path == (
+        Path.home() / "models/override-tokenizer"
+    ).resolve().as_posix()
 
 
 def test_complete_config_parses_independently() -> None:

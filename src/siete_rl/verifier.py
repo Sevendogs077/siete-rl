@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from swe_agent.docker import CommandResult, DockerRuntimeError, DockerSandbox
-from swe_agent.models import Evaluation, Verification
+from siete_rl.docker import CommandResult, DockerRuntimeError, DockerSandbox
+from siete_rl.models import Evaluation, Verification
 
 
 class VerificationInfrastructureError(DockerRuntimeError):
