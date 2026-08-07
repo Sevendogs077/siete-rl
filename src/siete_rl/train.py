@@ -498,6 +498,7 @@ def _run_once(
                 reward_type=config.grpo.reward_type,
                 layered_lambda=config.grpo.layered_lambda,
                 layered_mu=config.grpo.layered_mu,
+                max_repeat_action=config.generation.max_repeat_action,
             )
             environments.append(environment)
             return environment

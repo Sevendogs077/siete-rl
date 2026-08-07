@@ -53,6 +53,7 @@ def protocol() -> EvalProtocol:
         max_tool_calling_iterations=4,
         max_consecutive_protocol_errors=2,
         max_observation_chars=100,
+        max_repeat_action=None,
         exec_timeout_sec=30,
         grader_timeout_sec=60,
         cpus=1.0,

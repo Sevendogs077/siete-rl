@@ -43,6 +43,7 @@ class SWEEnvironment:
         reward_type: Literal["binary", "layered"] = "binary",
         layered_lambda: float = DEFAULT_LAMBDA,
         layered_mu: float = DEFAULT_MU,
+        max_repeat_action: int | None = None,
     ) -> None:
         self._task_context = task_context
         self._sandbox_factory = sandbox_factory
@@ -52,6 +53,7 @@ class SWEEnvironment:
         self._reward_type = reward_type
         self._layered_lambda = layered_lambda
         self._layered_mu = layered_mu
+        self._max_repeat_action = max_repeat_action
         self._sample: Sample | None = None
         self._evaluation: Evaluation | None = None
         self._sandbox: DockerSandbox | None = None
@@ -117,11 +119,13 @@ class SWEEnvironment:
             sandbox.open()
             workspace = _workspace_for_task(task_id)
             _install_workspace_aliases(sandbox, workspace)
+            _activate_testbed_on_login(sandbox)
             self._executor = ToolExecutor(
                 sandbox,
                 output_limit_chars=self._output_limit_chars,
                 max_timeout_sec=self._max_timeout_sec,
                 workspace=workspace,
+                max_repeat_action=self._max_repeat_action,
             )
         except DockerRuntimeError as exc:
             # 单样本基础设施失败不传播：episode 在第 0 步终止，由 _finalize 统一降级。
@@ -326,6 +330,24 @@ def _without_none(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _workspace_for_task(task_id: str) -> str:
     return "/workspace/" + re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)
+
+
+def _activate_testbed_on_login(sandbox: DockerSandbox) -> None:
+    """让登录 shell 自动激活 conda testbed 环境，与 SFT 轨迹的 shell 形态对齐。
+
+    SWE-bench 镜像默认 PATH 只含 /opt/miniconda3/bin，pytest 等测试工具装在
+    testbed env 内；`bash -lc`（execute_bash 的执行方式）会读取
+    /etc/profile.d，借此让每条命令自带 testbed 环境。无 conda env 的镜像跳过。
+    """
+    result = sandbox.exec([
+        "/bin/bash",
+        "-c",
+        "if [ -d /opt/miniconda3/envs/testbed ]; then "
+        "echo 'source /opt/miniconda3/bin/activate testbed' > /etc/profile.d/zz-siete-rl-testbed.sh; "
+        "fi",
+    ])
+    if result.timed_out or result.exit_code != 0:
+        raise DockerRuntimeError((result.stderr or result.stdout or "failed to activate testbed env on login shell").strip())
 
 
 def _install_workspace_aliases(sandbox: DockerSandbox, workspace: str) -> None:

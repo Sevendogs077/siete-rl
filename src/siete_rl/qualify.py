@@ -259,6 +259,7 @@ def check_tokenizer(config: ProjectConfig) -> list[Check]:
             verifier_factory=lambda *args, **kwargs: None,
             output_limit_chars=config.chat.max_observation_chars,
             max_timeout_sec=config.docker.exec_timeout_sec,
+            max_repeat_action=config.generation.max_repeat_action,
         )
         tools = [
             name

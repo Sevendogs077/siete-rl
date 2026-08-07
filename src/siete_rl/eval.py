@@ -101,6 +101,7 @@ class EvalProtocol:
     max_tool_calling_iterations: int
     max_consecutive_protocol_errors: int
     max_observation_chars: int
+    max_repeat_action: int | None
     exec_timeout_sec: int
     grader_timeout_sec: int
     cpus: float
@@ -179,6 +180,7 @@ def load_eval_run(path: str | Path) -> EvalRun:
             config, "generation", "max_consecutive_protocol_errors"
         ),
         max_observation_chars=_positive_int(config, "chat", "max_observation_chars"),
+        max_repeat_action=_optional_repeat_threshold(config),
         exec_timeout_sec=_positive_int(config, "docker", "exec_timeout_sec"),
         grader_timeout_sec=_positive_int(config, "docker", "verifier_timeout_sec"),
         cpus=_positive_number(config, "docker", "cpus"),
@@ -432,6 +434,7 @@ def run_agent_loop(
         verifier_factory=forbidden_verifier,
         output_limit_chars=protocol.max_observation_chars,
         max_timeout_sec=protocol.exec_timeout_sec,
+        max_repeat_action=protocol.max_repeat_action,
     )
     started = time.monotonic()
     try:
@@ -1239,6 +1242,18 @@ def _field(config: Mapping[str, Any], section: str, name: str, *, expected: type
     value = group[name]
     if not isinstance(value, expected) or isinstance(value, bool):
         raise EvalError(f"run config field {section}.{name} has the wrong type")
+    return value
+
+
+def _optional_repeat_threshold(config: Mapping[str, Any]) -> int | None:
+    """老 run 的冻结 config 没有该键：缺失或 null 都视为关闭循环检测。"""
+
+    group = config.get("generation")
+    if not isinstance(group, dict) or group.get("max_repeat_action") is None:
+        return None
+    value = group["max_repeat_action"]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 2:
+        raise EvalError("run config field generation.max_repeat_action must be null or an integer >= 2")
     return value
 
 

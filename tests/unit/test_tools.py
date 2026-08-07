@@ -58,3 +58,48 @@ def test_editor_errors_are_tool_errors_without_host_filesystem() -> None:
 def test_argument_validation_rejects_invalid_contract(name, args) -> None:
     with pytest.raises(ValueError):
         validate_tool_arguments(name, args)
+
+
+def test_repeat_guard_warns_once_at_threshold() -> None:
+    sandbox = FakeSandbox()
+    for _ in range(4):
+        sandbox.responses.append(result(stdout="same output"))
+    executor = ToolExecutor(sandbox, output_limit_chars=30_000, max_timeout_sec=12, workspace="/workspace/task", max_repeat_action=3)
+    action = Action(tool_name="execute_bash", arguments={"command": "cat x"})
+
+    first = executor.execute(action)
+    second = executor.execute(action)
+    third = executor.execute(action)
+    fourth = executor.execute(action)
+
+    assert "<NOTE>" not in first.text
+    assert "<NOTE>" not in second.text
+    assert "repeated this exact action 3 times" in third.text
+    assert "<NOTE>" not in fourth.text  # 只在达到阈值时警告一次，不刷屏
+
+
+def test_repeat_guard_disabled_by_default() -> None:
+    sandbox = FakeSandbox()
+    for _ in range(5):
+        sandbox.responses.append(result(stdout="same output"))
+    executor = ToolExecutor(sandbox, output_limit_chars=30_000, max_timeout_sec=12, workspace="/workspace/task")
+    action = Action(tool_name="execute_bash", arguments={"command": "cat x"})
+
+    for _ in range(5):
+        assert "<NOTE>" not in executor.execute(action).text
+
+
+def test_repeat_guard_distinguishes_signatures() -> None:
+    """不同命令、或同命令但 old_str 不同的编辑，各自独立计数。"""
+
+    sandbox = FakeSandbox()
+    for _ in range(4):
+        sandbox.responses.append(result(stdout="same output"))
+    executor = ToolExecutor(sandbox, output_limit_chars=30_000, max_timeout_sec=12, workspace="/workspace/task", max_repeat_action=3)
+
+    assert "<NOTE>" not in executor.execute(Action(tool_name="execute_bash", arguments={"command": "cat a"})).text
+    assert "<NOTE>" not in executor.execute(Action(tool_name="execute_bash", arguments={"command": "cat a"})).text
+    # 另一条命令的第 1 次：不触发
+    assert "<NOTE>" not in executor.execute(Action(tool_name="execute_bash", arguments={"command": "cat b"})).text
+    # 第一条命令的第 3 次：触发
+    assert "<NOTE>" in executor.execute(Action(tool_name="execute_bash", arguments={"command": "cat a"})).text

@@ -94,6 +94,7 @@ class GenerationConfig(StrictConfig):
     use_liger_kernel: bool
     max_tool_calling_iterations: int = Field(ge=1)
     max_consecutive_protocol_errors: int = Field(ge=1)
+    max_repeat_action: int | None = Field(default=None, ge=2)
     temperature: float = Field(gt=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
     top_k: int = Field(ge=0)
