@@ -21,13 +21,9 @@ class Sandbox:
     def __init__(self, sample, episode_id, scope) -> None:
         self.environment = sample.environment; self.episode_id = episode_id; self.scope = scope
         self.container_id = "a" * 64; self.container_name = "fake"; self.responses = deque(); self.diff = ""; self.closed = 0
-        self.exec_calls = []
     def open(self): return self
     def exec(self, command, *, input_text=None, timeout_sec=None):
-        self.exec_calls.append(command)
         if command[:2] == ["python", "-c"] and len(command) == 4:
-            return CommandResult(argv=[], exit_code=0, stdout="", stderr="", duration_sec=0, timed_out=False)
-        if command[:2] == ["/bin/bash", "-c"] and "profile.d/zz-siete-rl-testbed.sh" in command[2]:
             return CommandResult(argv=[], exit_code=0, stdout="", stderr="", duration_sec=0, timed_out=False)
         return self.responses.popleft()
     def get_diff(self): return self.diff
@@ -175,40 +171,6 @@ def test_reset_infra_failure_terminates_episode_without_raising(monkeypatch: pyt
     env, task_id, _, _ = harness()
 
     assert env.reset(task_id) is None
-    assert env.terminated
-    assert env._finalize([]) == 0.0
-    assert env.trajectory.termination == "infra_error"
-
-
-def test_reset_activates_testbed_env_on_login_shell() -> None:
-    """reset 时向 /etc/profile.d 写入 testbed 激活脚本（SFT 环境的 shell 形态）。"""
-
-    env, task_id, sandboxes, _ = harness()
-    env.reset(task_id)
-
-    activation = [
-        call for call in sandboxes[0].exec_calls
-        if call[:2] == ["/bin/bash", "-c"] and "profile.d/zz-siete-rl-testbed.sh" in call[2]
-    ]
-    assert len(activation) == 1
-    assert "source /opt/miniconda3/bin/activate testbed" in activation[0][2]
-
-
-def test_reset_testbed_activation_failure_is_infra_error() -> None:
-    """激活脚本写入失败：与容器创建失败同等处理，episode 降级为 infra_error。"""
-
-    original_exec = Sandbox.exec
-
-    def failing_exec(self, command, *, input_text=None, timeout_sec=None):
-        if command[:2] == ["/bin/bash", "-c"]:
-            return CommandResult(argv=[], exit_code=1, stdout="", stderr="permission denied", duration_sec=0, timed_out=False)
-        return original_exec(self, command, input_text=input_text, timeout_sec=timeout_sec)
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Sandbox, "exec", failing_exec)
-        env, task_id, _, _ = harness()
-        env.reset(task_id)
-
     assert env.terminated
     assert env._finalize([]) == 0.0
     assert env.trajectory.termination == "infra_error"

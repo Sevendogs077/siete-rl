@@ -61,7 +61,7 @@ def run_label(run_dir: Path) -> str:
             return "+ Repeat Guard"
         if config.get("grpo", {}).get("reward_type") == "layered":
             return "+ Layered Reward"
-        return "GRPO"
+        return "Vanilla GRPO"
     except Exception:
         return run_dir.name
 

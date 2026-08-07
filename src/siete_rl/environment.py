@@ -117,7 +117,6 @@ class SWEEnvironment:
             sandbox.open()
             workspace = _workspace_for_task(task_id)
             _install_workspace_aliases(sandbox, workspace)
-            _activate_testbed_on_login(sandbox)
             self._executor = ToolExecutor(
                 sandbox,
                 output_limit_chars=self._output_limit_chars,
@@ -327,24 +326,6 @@ def _without_none(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _workspace_for_task(task_id: str) -> str:
     return "/workspace/" + re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)
-
-
-def _activate_testbed_on_login(sandbox: DockerSandbox) -> None:
-    """让登录 shell 自动激活 conda testbed 环境，与 SFT 轨迹的 shell 形态对齐。
-
-    SWE-bench 镜像默认 PATH 只含 /opt/miniconda3/bin，pytest 等测试工具装在
-    testbed env 内；`bash -lc`（execute_bash 的执行方式）会读取
-    /etc/profile.d，借此让每条命令自带 testbed 环境。无 conda env 的镜像跳过。
-    """
-    result = sandbox.exec([
-        "/bin/bash",
-        "-c",
-        "if [ -d /opt/miniconda3/envs/testbed ]; then "
-        "echo 'source /opt/miniconda3/bin/activate testbed' > /etc/profile.d/zz-siete-rl-testbed.sh; "
-        "fi",
-    ])
-    if result.timed_out or result.exit_code != 0:
-        raise DockerRuntimeError((result.stderr or result.stdout or "failed to activate testbed env on login shell").strip())
 
 
 def _install_workspace_aliases(sandbox: DockerSandbox, workspace: str) -> None:
