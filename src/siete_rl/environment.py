@@ -43,7 +43,6 @@ class SWEEnvironment:
         reward_type: Literal["binary", "layered"] = "binary",
         layered_lambda: float = DEFAULT_LAMBDA,
         layered_mu: float = DEFAULT_MU,
-        max_repeat_action: int | None = None,
     ) -> None:
         self._task_context = task_context
         self._sandbox_factory = sandbox_factory
@@ -53,7 +52,6 @@ class SWEEnvironment:
         self._reward_type = reward_type
         self._layered_lambda = layered_lambda
         self._layered_mu = layered_mu
-        self._max_repeat_action = max_repeat_action
         self._sample: Sample | None = None
         self._evaluation: Evaluation | None = None
         self._sandbox: DockerSandbox | None = None
@@ -125,7 +123,6 @@ class SWEEnvironment:
                 output_limit_chars=self._output_limit_chars,
                 max_timeout_sec=self._max_timeout_sec,
                 workspace=workspace,
-                max_repeat_action=self._max_repeat_action,
             )
         except DockerRuntimeError as exc:
             # 单样本基础设施失败不传播：episode 在第 0 步终止，由 _finalize 统一降级。

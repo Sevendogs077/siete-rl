@@ -21,6 +21,9 @@
 
 SieteRL 用 GRPO 强化学习训练能修真实 bug 的软件工程 Agent。基座模型为 Qwen2.5-Coder-7B（SWE-Gym OpenHands-7B-Agent SFT）。Agent 在隔离容器中多轮修复 SWE-Gym 任务，补丁由真实测试评分并直接作为奖励；最终在 SWE-bench Verified 上评测。
 
+> [!CAUTION]
+> SieteRL 仍在积极开发中，项目结构、接口与实验配置可能频繁变动。
+
 ## 项目核心
 
 **OpenHands scaffold** — 实现与 SWE-Gym OpenHands-7B-Agent 相匹配的三工具交互协议。Agent 在隔离的任务容器中通过 `execute_bash` 运行命令、通过 `str_replace_editor` 浏览和修改仓库，并以 `finish` 提交当前 patch；训练与 SWE-bench Verified 评测共用同一套 prompt、工具解析器和多轮状态机。

@@ -23,6 +23,9 @@ SieteRL trains software-engineering agents to fix real bugs with GRPO reinforcem
 
 Starting from Qwen2.5-Coder-7B (the SWE-Gym OpenHands-7B-Agent SFT policy), the agent repairs SWE-Gym tasks through multi-turn interaction in isolated containers, and real test results directly become the reward. The trained policy is evaluated on SWE-bench Verified.
 
+> [!CAUTION]
+> SieteRL is under active development. Project structure, APIs, and experimental configurations may change frequently.
+
 ## Core components
 
 **OpenHands scaffold** — a three-tool interaction protocol matching SWE-Gym OpenHands-7B-Agent. The agent runs commands via `execute_bash`, browses and edits the repository via `str_replace_editor`, and submits the current patch with `finish`, all inside isolated task containers. Training and SWE-bench Verified evaluation share the same prompts, tool parser, and multi-turn state machine.

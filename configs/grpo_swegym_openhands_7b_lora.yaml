@@ -48,7 +48,6 @@ generation:
   use_liger_kernel: true
   max_tool_calling_iterations: 40
   max_consecutive_protocol_errors: 5
-  max_repeat_action: 3
   temperature: 1.0
   top_p: 1.0
   top_k: 20

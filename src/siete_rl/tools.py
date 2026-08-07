@@ -48,34 +48,13 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
         if "enum" in schema and value not in schema["enum"]: raise ToolContractError(f"{key} is not an allowed value")
 
 
-# 循环检测：措辞沿用 SFT 轨迹中 <NOTE> 的形态（参照 openhands_editor.CONTENT_TRUNCATED_NOTICE）
-_REPEAT_NOTE = (
-    "\n<NOTE>You have repeated this exact action {count} times without making progress. "
-    "Try a different approach, or call finish if you believe the task is complete.</NOTE>"
-)
-
-
-def _action_signature(action: Action) -> tuple[object, ...] | None:
-    """重复判定的动作签名；finish 不参与（同一 episode 只会成功执行一次）。"""
-
-    a = action.arguments
-    if action.tool_name == "execute_bash":
-        return ("execute_bash", a.get("command", ""))
-    if action.tool_name == "str_replace_editor":
-        return ("str_replace_editor", a.get("command", ""), a.get("path", ""), (a.get("old_str") or "")[:200])
-    return None
-
-
 class ToolExecutor:
-    def __init__(self, sandbox: DockerSandbox, *, output_limit_chars: int, max_timeout_sec: int, workspace: str, max_repeat_action: int | None = None) -> None:
+    def __init__(self, sandbox: DockerSandbox, *, output_limit_chars: int, max_timeout_sec: int, workspace: str) -> None:
         self.sandbox, self.output_limit_chars, self.max_timeout_sec, self.workspace = sandbox, output_limit_chars, max_timeout_sec, workspace
-        self.max_repeat_action = max_repeat_action
-        self._repeat_counts: dict[tuple[object, ...], int] = {}
         self.submitted_patch: str | None = None
         self.editor = OpenHandsEditor(ContainerFileBackend(sandbox, timeout_sec=max_timeout_sec))
 
     def execute(self, action: Action) -> Observation:
-        repeat_count = self._count_repeat(action)
         try:
             if action.tool_name == "execute_bash": code, text, timed_out = self._execute_bash(action.arguments)
             elif action.tool_name == "str_replace_editor": code, text, timed_out = 0, self.editor(**action.arguments), False
@@ -85,19 +64,7 @@ class ToolExecutor:
         except (ToolError, ValueError) as exc:
             code, text, timed_out, error_type = 1, str(exc), False, "tool_error"
         text, truncated = self._bounded(text)
-        if repeat_count == self.max_repeat_action:
-            text += _REPEAT_NOTE.format(count=repeat_count)
         return Observation(text=text, exit_code=code, error_type=error_type, timed_out=timed_out, truncated=truncated)
-
-    def _count_repeat(self, action: Action) -> int:
-        if self.max_repeat_action is None:
-            return 0
-        signature = _action_signature(action)
-        if signature is None:
-            return 0
-        count = self._repeat_counts.get(signature, 0) + 1
-        self._repeat_counts[signature] = count
-        return count
 
     def _execute_bash(self, arguments: dict[str, Any]) -> tuple[int, str, bool]:
         command = arguments["command"]
