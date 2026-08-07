@@ -6,6 +6,8 @@
   </picture>
 </p>
 
+<p align="center">中文 | <a href="README_EN.md">EN</a></p>
+
 <p align="center"><i>Reinforcement learning for verifiable software-engineering agents.</i></p>
 
 <p align="center">
@@ -37,14 +39,14 @@ SieteRL 面向可验证的软件工程 Agent 强化学习，以 Qwen2.5-Coder-7B
 
 ## 复现运行
 
-开始前需额外准备 SWE-Gym parquet 数据与任务镜像、[SWE-Gym OpenHands-7B-Agent](https://huggingface.co/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent) 模型及 tokenizer，以及固定版本的 SWE-bench harness。
+训练需要 2 张 GPU，评测需要 1 张。数据、模型、专用 Docker daemon、任务镜像与评测 harness 的准备步骤见 [docs/asset_preparation.md](docs/asset_preparation.md)。
 
 ```bash
 uv sync
-bash scripts/prepare.sh          # 数据就绪后拉取任务镜像并生成 assets
+bash scripts/prepare.sh          # 拉取任务镜像并生成 assets
 bash scripts/qualify.sh          # 检查配置、数据、镜像、模型与 GPU
-bash scripts/grpo.sh             # 启动训练
-bash scripts/eval.sh outputs/<run-id>
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # 启动训练
+CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # 需 EVAL_HARNESS_PYTHON
 ```
 
 > **安全提示：** Agent 会执行模型生成的代码，请仅连接专用的非生产 Docker daemon。

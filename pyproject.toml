@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "siete-rl"
 version = "0.1.0"
-description = "基于 TRL 的 SWE-Gym GRPO 训练项目"
+description = "GRPO reinforcement learning for verifiable software-engineering agents"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
