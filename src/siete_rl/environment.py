@@ -20,7 +20,7 @@ from siete_rl.models import (
     Verification,
 )
 from siete_rl.process_mask import TurnRecord
-from siete_rl.scoring import DEFAULT_LAMBDA, DEFAULT_MU, layered_score
+from siete_rl.scoring import DEFAULT_LAMBDA, layered_score
 from siete_rl.swegym import TaskContext
 from siete_rl.tools import ToolContractError, ToolExecutor, validate_tool_arguments
 from siete_rl.verifier import SWEGymVerifier
@@ -43,7 +43,6 @@ class SWEEnvironment:
         max_timeout_sec: int,
         reward_type: Literal["binary", "layered"] = "binary",
         layered_lambda: float = DEFAULT_LAMBDA,
-        layered_mu: float = DEFAULT_MU,
     ) -> None:
         self._task_context = task_context
         self._sandbox_factory = sandbox_factory
@@ -52,7 +51,6 @@ class SWEEnvironment:
         self._max_timeout_sec = max_timeout_sec
         self._reward_type = reward_type
         self._layered_lambda = layered_lambda
-        self._layered_mu = layered_mu
         self._sample: Sample | None = None
         self._evaluation: Evaluation | None = None
         self._sandbox: DockerSandbox | None = None
@@ -263,7 +261,6 @@ class SWEEnvironment:
                 fail_to_pass=self._evaluation.fail_to_pass,
                 pass_to_pass=self._evaluation.pass_to_pass,
                 lambda_=self._layered_lambda,
-                mu=self._layered_mu,
             )
         else:
             self._reward = 1.0 if self._verification.result == "resolved" else 0.0

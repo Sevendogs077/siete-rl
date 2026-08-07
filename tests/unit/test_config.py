@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import pytest
@@ -290,7 +289,6 @@ def test_grpo_config_accepts_layered_reward_type() -> None:
     values = _minimal_grpo_values(reward_type="layered")
     assert values.reward_type == "layered"
     assert values.layered_lambda == 8.0
-    assert values.layered_mu == pytest.approx(math.log(2))
 
 
 def test_grpo_config_rejects_nonpositive_lambda() -> None:

@@ -56,7 +56,6 @@ generation:
 grpo:
   reward_type: layered
   layered_lambda: 8.0
-  layered_mu: 0.6931471805599453
   num_generations: 16
   num_iterations: 1
   loss_type: grpo

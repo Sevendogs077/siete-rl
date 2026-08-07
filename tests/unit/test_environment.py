@@ -60,7 +60,7 @@ def _make_submitted_env(reward_type="binary"):
         patch_apply_status="applied",
         pytest_started=True,
         exit_code=1,
-        stdout="PASSED test_a\nFAILED test_b - assert 1 == 2\n",
+        stdout="PASSED test_a\nPASSED test_c\nFAILED test_b - assert 1 == 2\n",
         stderr="",
     )
     evaluation = Evaluation(

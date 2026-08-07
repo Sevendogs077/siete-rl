@@ -498,7 +498,6 @@ def _run_once(
                 max_timeout_sec=config.docker.exec_timeout_sec,
                 reward_type=config.grpo.reward_type,
                 layered_lambda=config.grpo.layered_lambda,
-                layered_mu=config.grpo.layered_mu,
             )
             environments.append(environment)
             return environment
