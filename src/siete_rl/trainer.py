@@ -12,7 +12,16 @@
    TRL 自身的 overlong 回滚模式撤出循环；格式上限样本保留其最后一条
    assistant 输出以便记录；
 4. overlong 撤出归因 ``context_overlong``，真实 tool call 重置连续计数；
-5. 循环出口为迭代耗尽的样本归因 ``iteration_cap``，并把全部归因写回环境。
+5. 循环出口为迭代耗尽的样本归因 ``iteration_cap``，并把全部归因写回环境；
+6. process mask：首段生成与每次 post-tool 生成各记录一条
+   ``TurnRecord``（token 区间 + step/invalid_call/plain_message 分类）到
+   ``environment.turn_records``；真实工具执行前快照 ``len(env._steps)``，
+   执行后按是否追加 Step 回填 ``step_index`` 或降级为 ``invalid_call``。
+
+另覆写 ``_generate_and_score_completions``：process mask 开启时按
+``assemble_token_weights`` 组装 per-token 权重（base_mask × α 后质量保持归一；
+infra_error/context_overlong 整轨迹置零）注入 ``output["token_weights"]``，
+并记录 ``process_mask/*`` 指标。
 
 TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
 人工同步本方法（镜像一致性由测试守护）。
@@ -21,11 +30,14 @@ TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
+import torch
 from trl import GRPOTrainer
 from trl.chat_template_utils import parse_response
 
 from siete_rl.models import LoopExit
+from siete_rl.process_mask import TurnRecord, build_alpha, resolve_rules
 
 
 _PARSE_ERROR_SENTINEL = "swe_agent_parse_error"
@@ -38,14 +50,113 @@ _FORMAT_FEEDBACK_TEMPLATE = (
 _PLAIN_MESSAGE_SENTINEL = "swe_agent_plain_message"
 
 
+# >>> swe_agent: process mask 的 turn 分类与记录 helper
+def _classify_turn(tool_calls: list) -> str:
+    if tool_calls == [_PARSE_ERROR_SENTINEL]:
+        return "invalid_call"
+    if tool_calls == [_PLAIN_MESSAGE_SENTINEL]:
+        return "plain_message"
+    return "step"
+
+
+def _record_turn(environment, start: int, end: int, kind: str, step_index: int | None) -> None:
+    """空区间不记录；step 类 turn 的 step_index 在工具执行后回填。"""
+    if end <= start:
+        return
+    environment.turn_records.append(TurnRecord(start, end, kind, step_index))
+# <<< swe_agent
+
+
+# >>> swe_agent: process mask 组装层
+_GOVERNANCE_MASKED_TERMINATIONS = frozenset({"infra_error", "context_overlong"})
+
+
+def assemble_token_weights(environment, *, base_mask: list[float], n_tokens: int, rules: list) -> tuple[list[float], dict]:
+    """base_mask × α，再做质量保持归一 c = Σbase/Σ(base×α)；governance 终止或全 mask 轨迹保持全 0。
+
+    返回 (weights, stats)；stats = {"masked_turns": int, "masked_frac": float}，
+    masked_frac 是归一前被 mask 掉的 base token 比例（1 - Σ(base×α)/Σbase）。
+    governance 终止整轨迹置零：masked_turns 记 0（非规则命中），masked_frac 记 1.0
+    （base_sum == 0 时 0.0）。
+    """
+    base_sum = sum(base_mask)
+    if environment.trajectory.termination in _GOVERNANCE_MASKED_TERMINATIONS:
+        return [0.0] * n_tokens, {
+            "masked_turns": 0,
+            "masked_frac": 1.0 if base_sum > 0 else 0.0,
+        }
+    alpha, masked_turns = build_alpha(environment.turn_records, environment._steps, n_tokens, rules)
+    masked = [b * a for b, a in zip(base_mask, alpha, strict=True)]
+    masked_sum = sum(masked)
+    masked_frac = 1.0 - masked_sum / base_sum if base_sum > 0 else 0.0
+    if base_sum == 0 or masked_sum == 0:
+        return [0.0] * n_tokens, {"masked_turns": masked_turns, "masked_frac": masked_frac}
+    c = base_sum / masked_sum
+    return [m * c for m in masked], {"masked_turns": masked_turns, "masked_frac": masked_frac}
+# <<< swe_agent
+
+
 class SWEGRPOTrainer(GRPOTrainer):
     """在官方 GRPOTrainer 上加入环境信号终止；其余行为与 TRL 完全一致。"""
 
-    def __init__(self, *args, max_consecutive_protocol_errors: int, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        max_consecutive_protocol_errors: int,
+        process_mask_rules: list[str] | None = None,
+        **kwargs,
+    ) -> None:
         if max_consecutive_protocol_errors < 1:
             raise ValueError("max_consecutive_protocol_errors must be positive")
         self.max_consecutive_protocol_errors = max_consecutive_protocol_errors
+        self._process_mask_rules = resolve_rules(process_mask_rules or [])
         super().__init__(*args, **kwargs)
+        if self._process_mask_rules and not self.use_liger_kernel:
+            raise ValueError(
+                "process mask requires use_liger_kernel=true (non-Liger loss path not implemented)"
+            )
+
+    def _generate_and_score_completions(self, inputs):
+        output = super()._generate_and_score_completions(inputs)
+        if not self._process_mask_rules:
+            return output
+        environments = self.environments
+        completion_mask = output["completion_mask"]
+        tool_mask = output.get("tool_mask")
+        if not environments or len(environments) != completion_mask.size(0) or tool_mask is None:
+            raise RuntimeError("process mask requires aligned environments and tool_mask")
+        base_mask = (completion_mask * tool_mask).float()
+        weights = torch.zeros_like(base_mask)
+        masked_turns_total = 0
+        masked_frac_sum = 0.0
+        governance_masked = 0
+        for i, environment in enumerate(environments):
+            n_tokens = int(completion_mask[i].sum().item())
+            row, stats = assemble_token_weights(
+                environment,
+                base_mask=base_mask[i, :n_tokens].tolist(),
+                n_tokens=n_tokens,
+                rules=self._process_mask_rules,
+            )
+            weights[i, :n_tokens] = torch.tensor(row, dtype=weights.dtype, device=weights.device)
+            masked_turns_total += stats["masked_turns"]
+            masked_frac_sum += stats["masked_frac"]
+            # governance 口径直接看终止原因，与全零判定解耦；与 assemble_token_weights 一致 fail-loud
+            governance_masked += int(environment.trajectory.termination in _GOVERNANCE_MASKED_TERMINATIONS)
+        output["token_weights"] = weights
+        mode = "train" if self.model.training else "eval"
+        n_rows = completion_mask.size(0)
+        self._metrics[mode]["process_mask/masked_token_frac"].append(masked_frac_sum / n_rows)
+        self._metrics[mode]["process_mask/masked_turns"].append(float(masked_turns_total))
+        self._metrics[mode]["process_mask/governance_masked"].append(float(governance_masked))
+        return output
+
+    def compute_liger_loss(self, unwrapped_model, inputs):
+        # token_weights 的支撑集已在 completion_mask×tool_mask 内，替换后父类的
+        # loss_mask = completion_mask * token_weights ≡ token_weights。
+        if self._process_mask_rules and "token_weights" in inputs:
+            inputs = dict(inputs, tool_mask=inputs["token_weights"])
+        return super().compute_liger_loss(unwrapped_model, inputs)
 
     @staticmethod
     def _next_action(completion):
@@ -92,6 +203,13 @@ class SWEGRPOTrainer(GRPOTrainer):
         # <<< swe_agent
         idxs_with_tool = [idx for idx, tool_call in enumerate(tool_calls) if tool_call]
         tool_calls = [tool_calls[idx] for idx in idxs_with_tool]
+        # >>> swe_agent: 首段生成记录为 turn，token 区间为 [0, len(completion_ids[idx]))
+        if self.environments:
+            for idx, calls in zip(idxs_with_tool, tool_calls, strict=True):
+                environment = self.environments[idx]
+                if environment is not None:
+                    _record_turn(environment, 0, len(completion_ids[idx]), _classify_turn(calls), None)
+        # <<< swe_agent
         # >>> swe_agent: 仅由项目终止语义写回循环退出原因
         loop_exit_reasons: dict[int, LoopExit] = {}
         # <<< swe_agent
@@ -134,6 +252,11 @@ class SWEGRPOTrainer(GRPOTrainer):
                     completions[idx_with_tool].append({"role": "user", "content": FIXED_FAKE_USER})
                     format_error_counts[idx_with_tool] = 0
                     continue
+                # <<< swe_agent
+                # >>> swe_agent: 记录执行前 step 数，用于 step_index 回填与契约错误降级
+                environment = self.environments[idx_with_tool] if self.environments else None
+                # 刻意的跨模块契约：_steps 是 SWEEnvironment 的私有属性，此处只读长度
+                steps_before = len(environment._steps) if environment is not None else 0
                 # <<< swe_agent
                 async_coros = []
                 tool_call_results = []
@@ -191,6 +314,17 @@ class SWEGRPOTrainer(GRPOTrainer):
                                 tool_images[idx_with_tool].append(part["image"])
                     prompt_completion_tool.append(tool_message)
                     completions[idx_with_tool].append(tool_message)
+
+                # >>> swe_agent: 回填 step_index；契约错误（未追加 Step）降级为 invalid_call
+                if environment is not None and environment.turn_records:
+                    last = environment.turn_records[-1]
+                    if last.kind == "step":
+                        if len(environment._steps) > steps_before:
+                            environment.turn_records[-1] = replace(last, step_index=len(environment._steps) - 1)
+                        else:
+                            # infra 错误（DockerRuntimeError 未追加 Step）也走此降级，归类 invalid_call 是保守处理
+                            environment.turn_records[-1] = replace(last, kind="invalid_call", step_index=None)
+                # <<< swe_agent
 
             # >>> swe_agent: 轮询环境终止信号与格式上限；上限样本保留最终无效输出以供记录
             if self.environments:
@@ -353,7 +487,7 @@ class SWEGRPOTrainer(GRPOTrainer):
             tool_calls = [completion.get("tool_calls") for completion in post_tool_completions]
             # >>> swe_agent: 空生成归因 context_overlong；其余无 tool call 输出进入格式恢复
             tool_calls = []
-            for idx, completion in zip(idxs_with_tool, post_tool_completions, strict=True):
+            for pos, (idx, completion) in enumerate(zip(idxs_with_tool, post_tool_completions, strict=True)):
                 if not completion:
                     # 生成被预算截断为空：长度耗尽而非格式错误，不进格式恢复
                     loop_exit_reasons[idx] = "context_overlong"
@@ -363,6 +497,13 @@ class SWEGRPOTrainer(GRPOTrainer):
                 if calls != [_PARSE_ERROR_SENTINEL]:
                     format_error_counts[idx] = 0
                 tool_calls.append(calls)
+                # >>> swe_agent: post-tool 生成记录为 turn，区间接在 prompt+completion+suffix 之后
+                if self.environments and self.environments[idx] is not None:
+                    start = len(prompt_completion_tool_ids[pos]) - len(prompt_ids[idx])
+                    _record_turn(
+                        self.environments[idx], start, start + len(post_tool_ids[pos]), _classify_turn(calls), None
+                    )
+                # <<< swe_agent
             # <<< swe_agent
             idxs_with_tool = [idx for idx, tool_call in zip(idxs_with_tool, tool_calls, strict=True) if tool_call]
             tool_calls = [tool_call for tool_call in tool_calls if tool_call]

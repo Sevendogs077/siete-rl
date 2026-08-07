@@ -19,6 +19,7 @@ from siete_rl.models import (
     Trajectory,
     Verification,
 )
+from siete_rl.process_mask import TurnRecord
 from siete_rl.scoring import DEFAULT_LAMBDA, DEFAULT_MU, layered_score
 from siete_rl.swegym import TaskContext
 from siete_rl.tools import ToolContractError, ToolExecutor, validate_tool_arguments
@@ -69,6 +70,8 @@ class SWEEnvironment:
         self._trajectory: Trajectory | None = None
         self._verification: Verification | None = None
         self.episode_id: str | None = None
+        # rollout turn 记录：trainer 逐段写入，process mask 组装读取
+        self.turn_records: list[TurnRecord] = []
 
     @property
     def trajectory(self) -> Trajectory | None:
@@ -102,6 +105,7 @@ class SWEEnvironment:
         self._evaluation = evaluation
         self.episode_id = uuid4().hex
         self._steps = []
+        self.turn_records = []
         self._terminal_event = None
         self._loop_exit = None
         self._infrastructure_error = None

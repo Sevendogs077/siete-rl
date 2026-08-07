@@ -161,6 +161,18 @@ def test_finalize_degrades_verifier_infra_error() -> None:
     assert env.trajectory.termination == "infra_error"
 
 
+def test_turn_records_reset_clears_list() -> None:
+    """turn_records 由 trainer 逐段写入：reset 必须清空，避免跨 episode 串台。"""
+    from siete_rl.process_mask import TurnRecord
+
+    env, task_id, _, _ = harness()
+    env.reset(task_id)
+    assert env.turn_records == []
+    env.turn_records.append(TurnRecord(0, 1, "plain_message", None))
+    env.reset(task_id)
+    assert env.turn_records == []
+
+
 def test_reset_infra_failure_terminates_episode_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
     """rollout 容器创建失败：episode 在第 0 步终止并降级，不向 trainer 传播。"""
 
