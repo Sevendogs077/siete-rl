@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from siete_rl.config import load_config
 from siete_rl.models import Task
 from siete_rl.prompts import build_prompt
 from siete_rl.train import build_processing_class
 from siete_rl.trainer import SWEGRPOTrainer
+
+# 需要本地模型 tokenizer，CI/无资产环境下默认不跑
+pytestmark = pytest.mark.external_assets
 
 
 CONFIG_PATH = "configs/grpo_swegym_openhands_7b_lora.yaml"

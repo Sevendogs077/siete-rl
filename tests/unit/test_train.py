@@ -33,7 +33,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_7B = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 
 
-def test_preflight_is_read_only_and_reports_complete_stage_modules(tmp_path: Path) -> None:
+def test_preflight_is_read_only_and_reports_complete_stage_modules(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 不依赖真实模型文件（CI 无本地资产）：注入最小假模型目录
+    fake_model = tmp_path_factory.mktemp("fake-model")
+    (fake_model / "config.json").write_text('{"architectures": ["Qwen2ForCausalLM"]}', encoding="utf-8")
+    (fake_model / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("MODEL_PATH", str(fake_model))
+    monkeypatch.setenv("TOKENIZER_PATH", str(fake_model))
+
     config, project_root, _ = load_config(CONFIG_7B)
     output_root = Path(config.output.output_root)
     before = sorted(path.name for path in output_root.iterdir()) if output_root.exists() else []

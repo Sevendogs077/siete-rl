@@ -12,6 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://github.com/Sevendogs077/siete-rl/actions/workflows/ci.yml"><img src="https://github.com/Sevendogs077/siete-rl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.12-blue.svg" alt="Python 3.12">
   <img src="https://img.shields.io/badge/TRL-1.8.0-orange.svg" alt="TRL 1.8.0">
   <a href="https://github.com/SWE-Gym/SWE-Gym"><img src="https://img.shields.io/badge/training-SWE--Gym-2ea44f.svg" alt="Training on SWE-Gym"></a>

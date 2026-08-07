@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import deque
 from pathlib import Path
 from typing import Sequence
@@ -281,6 +282,8 @@ def test_subprocess_client_pins_dedicated_docker_host(monkeypatch) -> None:
         return FakeCompleted()
 
     monkeypatch.setattr("siete_rl.docker.subprocess.run", fake_run)
+    # CI 等无 daemon 环境：绕过 socket 存在性检查（本测试只断言 DOCKER_HOST 钉死行为）
+    monkeypatch.setattr(os.path, "exists", lambda path: True)
     client = SubprocessDockerClient()
     outcome = client.run(["docker", "ps"], timeout_sec=5)
 
