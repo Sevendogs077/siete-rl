@@ -102,6 +102,7 @@ class GenerationConfig(StrictConfig):
 
 class GRPOConfigValues(StrictConfig):
     reward_type: Literal["binary", "layered"]
+    max_infra_error_ratio: float = Field(default=0.5, gt=0.0, le=1.0)
     layered_lambda: float = Field(default=DEFAULT_LAMBDA, gt=0.0)
     layered_mu: float = Field(default=DEFAULT_MU, gt=0.0)
     num_generations: int = Field(ge=2)

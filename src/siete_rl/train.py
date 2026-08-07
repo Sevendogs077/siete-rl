@@ -502,7 +502,12 @@ def _run_once(
             environments.append(environment)
             return environment
 
-        reward_func = _recording_reward(recorder, binary_reward, config.grpo.reward_type)
+        reward_func = _recording_reward(
+            recorder,
+            binary_reward,
+            config.grpo.reward_type,
+            max_infra_error_ratio=config.grpo.max_infra_error_ratio,
+        )
         stage = "tokenizer"
         tokenizer = build_processing_class(config)
         stage = "trainer_construct"
@@ -695,7 +700,12 @@ def _run_once(
     }
 
 
-def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]], reward_type: str = "binary"):
+def _recording_reward(
+    recorder: Any,
+    reward_adapter: Callable[..., list[float]],
+    reward_type: str = "binary",
+    max_infra_error_ratio: float = 0.5,
+):
     def reward(
         prompts: list[object],
         completions: list[object],
@@ -707,6 +717,19 @@ def _recording_reward(recorder: Any, reward_adapter: Callable[..., list[float]],
         rewards: list[float] = []
         try:
             rewards = reward_adapter(completions=completions, environments=environments, **kwargs)
+            # 熔断：零星 infra 错误已被 environment 降级为零分样本；占比达到阈值
+            # 说明是系统性故障（如 docker daemon 挂掉），继续训练只会产出垃圾梯度。
+            infra_errors = sum(
+                1
+                for environment in environments
+                if environment.trajectory is not None
+                and environment.trajectory.termination == "infra_error"
+            )
+            if infra_errors / len(environments) >= max_infra_error_ratio:
+                raise RecordingRuntimeError(
+                    f"infra_error rollouts dominate group: {infra_errors}/{len(environments)} "
+                    f">= max_infra_error_ratio {max_infra_error_ratio}"
+                )
             task_ids = {
                 environment.trajectory.task_id
                 for environment in environments

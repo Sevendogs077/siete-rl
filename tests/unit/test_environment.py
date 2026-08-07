@@ -3,9 +3,18 @@ from __future__ import annotations
 import inspect
 from collections import deque
 
-from siete_rl.docker import CommandResult, ContainerCleanupError
+import pytest
+
+from siete_rl.docker import (
+    CommandResult,
+    ContainerCleanupError,
+    ContainerCreateError,
+    ContainerExecError,
+    DockerRuntimeError,
+)
 from siete_rl.environment import SWEEnvironment
 from siete_rl.models import Environment, Evaluation, Sample, Task, Verification
+from siete_rl.verifier import VerificationInfrastructureError
 
 
 class Sandbox:
@@ -32,14 +41,14 @@ class Verifier:
     def drain_cleanup_events(self): return []
 
 
-def harness(verification=None, evaluation=None, **env_kwargs):
+def harness(verification=None, evaluation=None, verifier_cls=None, **env_kwargs):
     task = Task(task_id="owner/repo", repo_name="owner/repo", base_commit="0" * 40, problem_statement="fix")
     environment = Environment(environment_id="id", task_id=task.task_id, image_name="image", expected_image_id="sha256:" + "0" * 64, expected_registry_digest="sha256:" + "0" * 64, workdir="/testbed", cpus=1, memory="1g", pids_limit=1, exec_timeout_sec=1, verifier_timeout_sec=1)
     sandboxes = []; verifiers = []
     def make_sandbox(*args):
         value = Sandbox(*args); sandboxes.append(value); return value
     def make_verifier(*args):
-        value = Verifier(verification); verifiers.append(value); return value
+        value = (verifier_cls or Verifier)(verification); verifiers.append(value); return value
     return SWEEnvironment(task_context={task.task_id: (Sample(task=task, environment=environment), evaluation or Evaluation(offline_eval_script="echo"))}, sandbox_factory=make_sandbox, verifier_factory=make_verifier, output_limit_chars=30000, max_timeout_sec=10, **env_kwargs), task.task_id, sandboxes, verifiers
 
 
@@ -117,3 +126,51 @@ def test_close_rollout_cleanup_failure_is_not_fatal() -> None:
     assert env._finalize([]) == 0.0
     event = env._events[-1]
     assert event["scope"] == "rollout" and event["residual"] is True
+
+
+def test_finalize_degrades_tool_infra_error_to_zero_reward() -> None:
+    """finish 时 get_diff 失败（如容器内 gitlink 状态）：单样本记 infra_error，不再传播杀 run。"""
+    env, task_id, sandboxes, _ = harness()
+    env.reset(task_id)
+
+    def failing_diff() -> str:
+        raise ContainerExecError("failed to register untracked files (exit=128)")
+
+    sandboxes[0].get_diff = failing_diff
+    with pytest.raises(DockerRuntimeError):
+        env.finish()  # 生成循环（trainer）会接住此异常并继续轮询 terminated
+
+    assert env.terminated
+    assert env._finalize([]) == 0.0
+    assert env.trajectory.termination == "infra_error"
+
+
+def test_finalize_degrades_verifier_infra_error() -> None:
+    """verifier 基础设施失败（如离线 pytest 超时）：记 infra_error + reward 0，不传播。"""
+
+    class FailingVerifier(Verifier):
+        def verify(self, patch):
+            raise VerificationInfrastructureError("offline pytest evaluation timed out")
+
+    env, task_id, sandboxes, _ = harness(verifier_cls=FailingVerifier)
+    env.reset(task_id)
+    sandboxes[0].diff = "diff --git a/x b/x\n"
+    env.finish()
+
+    assert env._finalize([]) == 0.0
+    assert env.trajectory.termination == "infra_error"
+
+
+def test_reset_infra_failure_terminates_episode_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rollout 容器创建失败：episode 在第 0 步终止并降级，不向 trainer 传播。"""
+
+    def failing_open(self):
+        raise ContainerCreateError("failed to start container (exit=125)")
+
+    monkeypatch.setattr(Sandbox, "open", failing_open)
+    env, task_id, _, _ = harness()
+
+    assert env.reset(task_id) is None
+    assert env.terminated
+    assert env._finalize([]) == 0.0
+    assert env.trajectory.termination == "infra_error"

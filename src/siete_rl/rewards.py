@@ -12,7 +12,11 @@ def binary_reward(
     environments: list[SWEEnvironment],
     **kwargs: Any,
 ) -> list[float]:
-    """同位置 finalize；策略失败映射零，基础设施异常原样传播。"""
+    """同位置 finalize；基础设施异常已由 environment 降级为零分 infra_error 样本。
+
+    此处不再做错误政策：契约错误（计数不匹配）照样抛出，单样本 infra 降级
+    由 SWEEnvironment._finalize 统一收口，系统性故障由 _recording_reward 熔断。
+    """
 
     del kwargs
     if len(completions) != len(environments):

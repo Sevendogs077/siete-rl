@@ -123,7 +123,8 @@ class SWEEnvironment:
                 max_timeout_sec=self._max_timeout_sec,
                 workspace=workspace,
             )
-        except BaseException as exc:
+        except DockerRuntimeError as exc:
+            # 单样本基础设施失败不传播：episode 在第 0 步终止，由 _finalize 统一降级。
             self._infrastructure_error = exc
             self._terminal_event = TerminalEvent(kind="infra_error", step_index=0)
             try:
@@ -133,7 +134,6 @@ class SWEEnvironment:
                     "rollout cleanup failed during reset: "
                     f"{type(cleanup_exc).__name__}: {cleanup_exc}"
                 )
-            raise
         return None
 
     def execute_bash(self, command: str) -> str:
@@ -203,8 +203,6 @@ class SWEEnvironment:
             if self._reward is None:
                 raise RuntimeError("finalized environment is missing its reward")
             return self._reward
-        if self._infrastructure_error is not None:
-            raise self._infrastructure_error
         if self._sample is None or self._evaluation is None or self.episode_id is None:
             raise RuntimeError("environment was finalized before reset")
 
@@ -212,6 +210,8 @@ class SWEEnvironment:
             termination = self._terminal_event.kind
         elif self._loop_exit is not None:
             termination = self._loop_exit
+        elif self._infrastructure_error is not None:
+            termination = "infra_error"
         else:
             raise RuntimeError("environment finalized without a terminal event or loop exit")
         self._trajectory = Trajectory(
@@ -239,6 +239,18 @@ class SWEEnvironment:
             )
         try:
             self._verification = self._verifier.verify(self._frozen_patch)
+        except DockerRuntimeError as exc:
+            # verifier 基础设施失败（容器、apply/pytest 超时等）降级为单样本 infra_error。
+            self._infrastructure_error = exc
+            self._trajectory = Trajectory(
+                task_id=self._sample.task.task_id,
+                environment_id=self._sample.environment.environment_id,
+                steps=list(self._steps),
+                termination="infra_error",
+            )
+            self._reward = 0.0
+            self._finalized = True
+            return self._reward
         finally:
             self._events.extend(self._verifier.drain_cleanup_events())
         if self._reward_type == "layered":

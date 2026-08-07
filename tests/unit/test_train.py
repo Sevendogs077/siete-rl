@@ -376,7 +376,7 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
 
     class FakeEnvironment:
         def __init__(self, task_id: str) -> None:
-            self.trajectory = type("Trajectory", (), {"task_id": task_id})()
+            self.trajectory = type("Trajectory", (), {"task_id": task_id, "termination": "format_exhausted"})()
 
         def _drain_events(self):
             return []
@@ -393,6 +393,62 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
             ],
         )
     assert recorder.begun == []
+
+
+class _InfraRecorder:
+    def begin_group(self, *args, **kwargs):
+        del args, kwargs
+
+    def write_rollout(self, *args, **kwargs):
+        del args, kwargs
+
+    def complete_group(self, *args, **kwargs):
+        del args, kwargs
+
+    def observe_native_policy_path(self, reached):
+        del reached
+
+    def merge_cleanup_events(self, events):
+        del events
+
+
+class _InfraEnvironment:
+    def __init__(self, termination: str) -> None:
+        self.episode_id = "episode"
+        self.trajectory = type(
+            "Trajectory",
+            (),
+            {"task_id": "getmoto__moto-7023", "termination": termination, "steps": []},
+        )()
+        self.frozen_patch = None
+        self.verification = None
+
+    def _drain_events(self):
+        return []
+
+
+def test_recording_reward_aborts_when_infra_errors_dominate_group() -> None:
+    """系统性 docker 故障必须 fail-fast：group 内 infra_error 占比达到阈值即中止 run。"""
+    environments = [_InfraEnvironment("infra_error") for _ in range(3)] + [
+        _InfraEnvironment("format_exhausted")
+    ]
+    reward = _recording_reward(_InfraRecorder(), lambda **kwargs: [0.0] * 4)
+    with pytest.raises(RecordingRuntimeError, match="infra_error"):
+        reward(prompts=[[]] * 4, completions=[[]] * 4, environments=environments)
+
+
+def test_recording_reward_tolerates_scattered_infra_errors() -> None:
+    """零星 infra_error 降级为零分样本，不影响同组其他 rollout 与训练继续。"""
+    environments = [_InfraEnvironment("infra_error")] + [
+        _InfraEnvironment("submitted") for _ in range(3)
+    ]
+    reward = _recording_reward(_InfraRecorder(), lambda **kwargs: [0.0, 1.0, 1.0, 1.0])
+    assert reward(prompts=[[]] * 4, completions=[[]] * 4, environments=environments) == [
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+    ]
 
 
 def test_native_policy_path_requires_executed_edit_submit_patch_verifier_and_reward() -> None:
