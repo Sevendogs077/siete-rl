@@ -18,7 +18,7 @@
   <a href="https://github.com/SWE-bench/SWE-bench"><img src="https://img.shields.io/badge/evaluation-SWE--bench%20Verified-6f42c1.svg" alt="Evaluated on SWE-bench Verified"></a>
 </p>
 
-SieteRL 面向可验证的软件工程 Agent 强化学习，以 Qwen2.5-Coder-7B 为模型基座，并从 SWE-Gym OpenHands-7B-Agent 的 SFT 策略出发。Agent 通过由 `execute_bash`、`str_replace_editor` 与 `finish` 构成的 OpenHands scaffold，在 SWE-Gym 的可执行任务环境中生成多轮修复轨迹；提交的补丁随后进入隔离容器接受真实测试，测试结果被转换为 outcome reward，并由 TRL 的 `GRPOTrainer` 用于 LoRA 策略优化。训练所得策略最终在 SWE-bench Verified 上评估。
+SieteRL 用 GRPO 强化学习训练能修真实 bug 的软件工程 Agent。基座模型为 Qwen2.5-Coder-7B（SWE-Gym OpenHands-7B-Agent SFT）。Agent 在隔离容器中多轮修复 SWE-Gym 任务，补丁由真实测试评分并直接作为奖励；最终在 SWE-bench Verified 上评测。
 
 ## 项目核心
 
@@ -28,14 +28,15 @@ SieteRL 面向可验证的软件工程 Agent 强化学习，以 Qwen2.5-Coder-7B
 
 ## 实验结果
 
-| Run | Resolved | Empty Patch | Context Limit |
-|:---:|:---:|:---:|:---:|
-| GRPO | **56 / 500（11.2%）** | 152 / 500（30.4%） | 179 / 500（35.8%） |
-
-<p>
-  完整实验记录见
-  <a href="docs/experiment_log.md"><img src="https://img.shields.io/badge/docs-experiment_log-4b5563.svg?logo=readthedocs&logoColor=white" alt="Experiment log"></a>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/results-chart-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/results-chart-light.png">
+    <img src="docs/assets/results-chart-light.png" width="860" alt="SWE-bench Verified results">
+  </picture>
 </p>
+
+完整实验记录见 [docs/experiment_log.md](docs/experiment_log.md)。
 
 ## 复现运行
 

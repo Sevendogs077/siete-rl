@@ -18,7 +18,9 @@
   <a href="https://github.com/SWE-bench/SWE-bench"><img src="https://img.shields.io/badge/evaluation-SWE--bench%20Verified-6f42c1.svg" alt="Evaluated on SWE-bench Verified"></a>
 </p>
 
-SieteRL applies reinforcement learning to verifiable software-engineering agents. The model base is Qwen2.5-Coder-7B, starting from the SFT policy of SWE-Gym OpenHands-7B-Agent. Through an OpenHands scaffold composed of `execute_bash`, `str_replace_editor`, and `finish`, the agent generates multi-turn repair trajectories inside executable SWE-Gym task environments. Submitted patches are scored by real tests in isolated containers, the test outcomes are converted into outcome rewards, and TRL's `GRPOTrainer` optimizes a LoRA policy. The trained policy is evaluated on SWE-bench Verified.
+SieteRL trains software-engineering agents to fix real bugs with GRPO reinforcement learning.
+
+Starting from Qwen2.5-Coder-7B (the SWE-Gym OpenHands-7B-Agent SFT policy), the agent repairs SWE-Gym tasks through multi-turn interaction in isolated containers, and real test results directly become the reward. The trained policy is evaluated on SWE-bench Verified.
 
 ## Core components
 
@@ -28,14 +30,15 @@ SieteRL applies reinforcement learning to verifiable software-engineering agents
 
 ## Results
 
-| Run | Resolved | Empty Patch | Context Limit |
-|:---:|:---:|:---:|:---:|
-| GRPO | **56 / 500 (11.2%)** | 152 / 500 (30.4%) | 179 / 500 (35.8%) |
-
-<p>
-  Full experiment records:
-  <a href="docs/experiment_log.md"><img src="https://img.shields.io/badge/docs-experiment_log-4b5563.svg?logo=readthedocs&logoColor=white" alt="Experiment log"></a>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/results-chart-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/results-chart-light.png">
+    <img src="docs/assets/results-chart-light.png" width="860" alt="SWE-bench Verified results">
+  </picture>
 </p>
+
+Outcome distribution on SWE-bench Verified (500 tasks, one rollout per task). Full experiment records: [docs/experiment_log.md](docs/experiment_log.md).
 
 ## Reproduction
 
