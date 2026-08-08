@@ -23,6 +23,12 @@
 infra_error/context_overlong 整轨迹置零）注入 ``output["token_weights"]``，
 并记录 ``process_mask/*`` 指标。
 
+另新增 ``_generate_tool_loop_turn``：backport huggingface/trl#6673 —— tool loop
+post-tool 再生成的 K 条 entry 各自携带独立采样的 history，不满足 server 模式
+"num_generations 连续重复"的 stride 去重假设，必须 num_generations=1 逐条生成；
+首 turn 仍走 TRL ``_generate_single_turn``（去重优化不动）。TRL 合并该 PR 后删除
+此 helper，调用点改回 ``_generate_single_turn(..., 1)``。
+
 TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
 人工同步本方法（镜像一致性由测试守护）。
 """
@@ -35,6 +41,7 @@ from dataclasses import replace
 import torch
 from trl import GRPOTrainer
 from trl.chat_template_utils import parse_response
+from trl.extras.profiling import profiling_context
 
 from siete_rl.models import LoopExit
 from siete_rl.process_mask import TurnRecord, build_alpha, resolve_rules
@@ -115,6 +122,34 @@ class SWEGRPOTrainer(GRPOTrainer):
             raise ValueError(
                 "process mask requires use_liger_kernel=true (non-Liger loss path not implemented)"
             )
+
+    # >>> swe_agent: #6673 backport — tool loop 再生成禁止 server stride 去重
+    def _generate_tool_loop_turn(self, prompt_ids, images, multimodal_fields):
+        """Post-tool 再生成：每条 entry 携带各自独立采样的 history，必须 n=1 逐条生成。
+
+        TRL 1.8.0 server 模式 ``VLLMGeneration.generate`` 假设 prompts 为
+        ``num_generations`` 份连续重复并按 ``[::num_generations]`` 去重；tool loop
+        的 K 条 distinct history 不满足该假设，会被塌缩到第一条活跃 trajectory 的
+        lineage 再分发回所有 trajectory（见 run 20260807T034912Z-91b6 vllm.log：
+        全部 /generate/ 请求只 render 1 个 prompt）。显式 ``num_generations=1``：
+        server 下 ``[::1]`` 为恒等、n=1，K 进 K 出一一对应；colocate 本就 n=1，
+        行为不变。对应 huggingface/trl#6673；TRL 合并后删除本方法。
+        """
+        if not self.use_vllm:
+            return self._generate_single_turn(prompt_ids, images, multimodal_fields)
+        if self.state.global_step != self._last_loaded_step:
+            with profiling_context(self, "sync_weights"):
+                self.vllm_generation.sync_weights()
+            self._last_loaded_step = self.state.global_step
+        _, completion_ids, logprobs, _ = self.vllm_generation.generate(
+            prompts=prompt_ids,
+            images=images,
+            num_generations=1,
+            profiler=profiling_context(self, "vLLM.generate"),
+        )
+        logprobs = [[lp[0] for lp in seq] for seq in logprobs]
+        return completion_ids, logprobs
+    # <<< swe_agent
 
     def _generate_and_score_completions(self, inputs):
         output = super()._generate_and_score_completions(inputs)
@@ -434,9 +469,11 @@ class SWEGRPOTrainer(GRPOTrainer):
                 loop_multimodal_fields = {}
 
             # Generate new completions after tool execution (using concatenated IDs, no re-tokenization)
-            post_tool_ids, post_tool_logprobs = self._generate_single_turn(
+            # >>> swe_agent: #6673 backport — K 条 distinct history 必须 n=1 逐条生成（见 _generate_tool_loop_turn）
+            post_tool_ids, post_tool_logprobs = self._generate_tool_loop_turn(
                 prompt_completion_tool_ids, loop_images, loop_multimodal_fields
             )
+            # <<< swe_agent
 
             # Truncate so that pct[len(prompt_ids[idx]) :] + post_tool does not exceed max_completion_length.
             # The pre-regen check guarantees len(completion_tool_ids) <= max_completion_length, so any
