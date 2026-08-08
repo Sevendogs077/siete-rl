@@ -14,7 +14,7 @@ class Environment:
 
 def trainer(*, maximum=5, protocol_errors=2):
     value = object.__new__(SWEGRPOTrainer)
-    value.max_tool_calling_iterations = maximum; value.max_consecutive_protocol_errors = protocol_errors; value.max_completion_length = 64
+    value.max_tool_calling_iterations = maximum; value.max_consecutive_protocol_errors = protocol_errors; value.max_completion_length = 64; value._tool_parallel_workers = 1
     value.use_vllm = False; value.vllm_mode = "server"; value._is_vlm = False; value.model = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=512)); value._tokenizer = object(); value._get_tool_suffix_ids = lambda messages: [90] * len(messages)
     return value
 
@@ -146,3 +146,135 @@ def test_initial_turn_generation_path_is_not_overridden() -> None:
     from trl import GRPOTrainer
 
     assert SWEGRPOTrainer._generate_single_turn is GRPOTrainer._generate_single_turn
+
+
+def _run_parallel_scenario(
+    workers: int, bash_delays: list[float] | None = None
+):
+    """K 条 trajectory 各调一次 bash 后由空生成退出。"""
+    import time as _time
+
+    k = len(bash_delays) if bash_delays else 4
+    envs = [Environment() for _ in range(k)]
+    value = trainer()
+    value._tool_parallel_workers = workers
+    value.environments = envs
+
+    def make_bash(i):
+        def _bash():
+            if bash_delays:
+                _time.sleep(bash_delays[i])
+            envs[i]._steps.append(object())
+            return f"obs-{i}-{len(envs[i]._steps)}"
+
+        return _bash
+
+    value._sync_tool_dicts = [{"bash": make_bash(i)} for i in range(k)]
+    value._async_tool_dicts = [{} for _ in range(k)]
+    value._generate_single_turn = lambda ids, *args: (
+        [[91]] * len(ids),
+        [[0.5]] * len(ids),
+    )
+    started = _time.monotonic()
+    result = value._tool_call_loop(
+        prompts=[[{"role": "user", "content": "fix"}] for _ in range(k)],
+        prompt_ids=[[i + 1] for i in range(k)],
+        completion_ids=[[(i + 1) * 11] for i in range(k)],
+        completions=[[call("bash")] for _ in range(k)],
+        logprobs=[[0.0] for _ in range(k)],
+        images=None,
+        multimodal_fields={},
+    )
+    return result, envs, _time.monotonic() - started
+
+
+def test_parallel_tool_execution_matches_serial_byte_for_byte(monkeypatch) -> None:
+    """worker=1 与 worker=8 的全部状态转移结果逐项全等。"""
+    monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
+    serial, envs_s, _ = _run_parallel_scenario(1)
+    parallel, envs_p, _ = _run_parallel_scenario(8)
+    assert serial == parallel
+    for env_s, env_p in zip(envs_s, envs_p, strict=True):
+        assert env_s.turn_records == env_p.turn_records
+        assert len(env_s._steps) == len(env_p._steps) == 1
+        assert env_s.loop_exit == env_p.loop_exit
+
+
+def test_parallel_tool_failure_isolated_to_failing_sample(monkeypatch) -> None:
+    """单样本工具抛错时，仅该样本得到 error observation。"""
+    envs = [Environment() for _ in range(3)]
+    value = trainer()
+    value._tool_parallel_workers = 8
+    value.environments = envs
+
+    def ok(env):
+        def _ok():
+            env._steps.append(object())
+            return "ok"
+
+        return _ok
+
+    def bad():
+        raise RuntimeError("boom")
+
+    value._sync_tool_dicts = [
+        {"bash": ok(envs[0])},
+        {"bash": bad},
+        {"bash": ok(envs[2])},
+    ]
+    value._async_tool_dicts = [{} for _ in range(3)]
+    value._generate_single_turn = lambda ids, *args: (
+        [[91]] * len(ids),
+        [[0.5]] * len(ids),
+    )
+    monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
+    _, completions, _, _, count, failures, _ = value._tool_call_loop(
+        prompts=[[{"role": "user", "content": "fix"}] for _ in range(3)],
+        prompt_ids=[[1], [2], [3]],
+        completion_ids=[[11], [22], [33]],
+        completions=[[call("bash")] for _ in range(3)],
+        logprobs=[[0.0] for _ in range(3)],
+        images=None,
+        multimodal_fields={},
+    )
+    assert count == 3 and failures == 1
+    observations = [completion[1]["content"] for completion in completions]
+    assert (
+        "boom" not in observations[0]
+        and "boom" in observations[1]
+        and "boom" not in observations[2]
+    )
+    assert envs[1].turn_records[-1].kind == "invalid_call"
+    assert (
+        envs[0].turn_records[-1].step_index == 0
+        and envs[2].turn_records[-1].step_index == 0
+    )
+
+
+def test_single_worker_or_job_uses_serial_path_without_pool(monkeypatch) -> None:
+    """worker=1 或仅一个执行 job 时不得创建 ThreadPoolExecutor。"""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("串行路径不得创建 ThreadPoolExecutor")
+
+    monkeypatch.setattr("siete_rl.trainer.ThreadPoolExecutor", boom)
+    for workers in (1, 8):
+        env = Environment()
+        value = trainer()
+        value._tool_parallel_workers = workers
+        value.environments = [env]
+        value._sync_tool_dicts = [
+            {"finish": lambda: setattr(env, "terminated", True) or ""}
+        ]
+        value._async_tool_dicts = [{}]
+        _, _, ids, *_ = run(value, call("finish"))
+        assert ids == [[2]]
+
+
+def test_parallel_tool_execution_covers_slow_trajectories(monkeypatch) -> None:
+    """并行耗时应接近最慢单条 trajectory，而非所有延迟之和。"""
+    delays = [1.0] + [0.1] * 7
+    monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
+    _, _, serial_time = _run_parallel_scenario(1, delays)
+    _, _, parallel_time = _run_parallel_scenario(8, delays)
+    assert parallel_time < 0.75 * serial_time

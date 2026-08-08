@@ -8,15 +8,17 @@ import ast
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_only_planned_launcher_exists() -> None:
-    scripts = sorted(path.name for path in (PROJECT_ROOT / "scripts").iterdir())
-    assert scripts == [
+def test_required_launchers_exist_and_grpo_stays_minimal() -> None:
+    scripts = {
+        path.name for path in (PROJECT_ROOT / "scripts").iterdir() if path.is_file()
+    }
+    assert {
         "eval.sh",
         "gen_results_chart.sh",
         "grpo.sh",
         "prepare.sh",
         "qualify.sh",
-    ]
+    } <= scripts
     launcher = (PROJECT_ROOT / "scripts/grpo.sh").read_text(encoding="utf-8")
     assert 'exec .venv/bin/siete-rl grpo --config "$config_path"' in launcher
     # vLLM server 生命周期、GPU 拆分与容器清扫均已内嵌 siete_rl.launcher

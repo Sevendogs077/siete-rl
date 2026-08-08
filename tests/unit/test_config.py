@@ -7,6 +7,7 @@ import yaml
 from pydantic import ValidationError
 
 from siete_rl.config import (
+    GenerationConfig,
     GRPOConfigValues,
     LORA_TARGET_MODULES,
     ProjectConfig,
@@ -26,6 +27,41 @@ def _minimal_grpo_values(**overrides: object) -> GRPOConfigValues:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "configs"
 CONFIG_7B = CONFIG_DIR / "grpo_swegym_openhands_7b_lora.yaml"
+
+
+def _minimal_generation_values(**overrides: object) -> GenerationConfig:
+    """最小合法 GenerationConfig 载荷，覆盖指定字段后重新校验。"""
+    payload = {
+        "max_completion_length": 1024,
+        "context_safety_margin": 0,
+        "use_liger_kernel": True,
+        "max_tool_calling_iterations": 40,
+        "max_consecutive_protocol_errors": 5,
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 20,
+        "repetition_penalty": 1.1,
+    }
+    payload.update(overrides)
+    return GenerationConfig.model_validate(payload)
+
+
+def test_parallel_workers_default_to_serial() -> None:
+    cfg = _minimal_generation_values()
+    assert cfg.tool_parallel_workers == 1
+    assert cfg.verifier_parallel_workers == 1
+
+
+def test_parallel_workers_reject_zero() -> None:
+    for field in ("tool_parallel_workers", "verifier_parallel_workers"):
+        with pytest.raises(ValidationError):
+            _minimal_generation_values(**{field: 0})
+
+
+def test_experiment_config_enables_parallel_workers() -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    assert config.generation.tool_parallel_workers == 16
+    assert config.generation.verifier_parallel_workers == 16
 
 
 def test_model_and_tokenizer_path_env_overrides_take_precedence(

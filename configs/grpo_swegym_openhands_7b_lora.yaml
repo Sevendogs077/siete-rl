@@ -48,6 +48,8 @@ generation:
   use_liger_kernel: true
   max_tool_calling_iterations: 40
   max_consecutive_protocol_errors: 5
+  tool_parallel_workers: 16
+  verifier_parallel_workers: 16
   process_mask_rules: [invalid_call, duplicate_action]
   temperature: 1.0
   top_p: 1.0

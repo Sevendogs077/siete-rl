@@ -268,6 +268,7 @@ def build_trainer(
         quantization_config=build_quantization_config(config),
         max_consecutive_protocol_errors=config.generation.max_consecutive_protocol_errors,
         process_mask_rules=config.generation.process_mask_rules,
+        tool_parallel_workers=config.generation.tool_parallel_workers,
     )
 
 
@@ -507,6 +508,7 @@ def _run_once(
             binary_reward,
             config.grpo.reward_type,
             max_infra_error_ratio=config.grpo.max_infra_error_ratio,
+            verifier_parallel_workers=config.generation.verifier_parallel_workers,
         )
         stage = "tokenizer"
         tokenizer = build_processing_class(config)
@@ -705,6 +707,7 @@ def _recording_reward(
     reward_adapter: Callable[..., list[float]],
     reward_type: str = "binary",
     max_infra_error_ratio: float = 0.5,
+    verifier_parallel_workers: int = 1,
 ):
     def reward(
         prompts: list[object],
@@ -716,7 +719,12 @@ def _recording_reward(
             raise RecordingRuntimeError("reward requires aligned non-empty rollouts")
         rewards: list[float] = []
         try:
-            rewards = reward_adapter(completions=completions, environments=environments, **kwargs)
+            rewards = reward_adapter(
+                completions=completions,
+                environments=environments,
+                max_workers=verifier_parallel_workers,
+                **kwargs,
+            )
             # 熔断：零星 infra 错误已被 environment 降级为零分样本；占比达到阈值
             # 说明是系统性故障（如 docker daemon 挂掉），继续训练只会产出垃圾梯度。
             infra_errors = sum(

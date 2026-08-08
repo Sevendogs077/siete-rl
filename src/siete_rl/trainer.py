@@ -29,6 +29,11 @@ post-tool 再生成的 K 条 entry 各自携带独立采样的 history，不满�
 首 turn 仍走 TRL ``_generate_single_turn``（去重优化不动）。TRL 合并该 PR 后删除
 此 helper，调用点改回 ``_generate_single_turn(..., 1)``。
 
+另将 tool loop 单轮迭代内的跨样本工具执行并行化（``tool_parallel_workers``，
+默认 1 = 原串行）：仅真实工具执行段进线程池，每样本一个 worker 按原顺序执行其
+全部 tool calls；消息拼装、TurnRecord 回填、撤出与计数聚合仍由主线程按 idx 升序
+完成。TRL 升级镜像同步时需保留该三段式结构。
+
 TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
 人工同步本方法（镜像一致性由测试守护）。
 """
@@ -36,6 +41,7 @@ TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import torch
@@ -111,11 +117,15 @@ class SWEGRPOTrainer(GRPOTrainer):
         *args,
         max_consecutive_protocol_errors: int,
         process_mask_rules: list[str] | None = None,
+        tool_parallel_workers: int = 1,
         **kwargs,
     ) -> None:
         if max_consecutive_protocol_errors < 1:
             raise ValueError("max_consecutive_protocol_errors must be positive")
+        if tool_parallel_workers < 1:
+            raise ValueError("tool_parallel_workers must be positive")
         self.max_consecutive_protocol_errors = max_consecutive_protocol_errors
+        self._tool_parallel_workers = tool_parallel_workers
         self._process_mask_rules = resolve_rules(process_mask_rules or [])
         super().__init__(*args, **kwargs)
         if self._process_mask_rules and not self.use_liger_kernel:
@@ -149,6 +159,72 @@ class SWEGRPOTrainer(GRPOTrainer):
         )
         logprobs = [[lp[0] for lp in seq] for seq in logprobs]
         return completion_ids, logprobs
+    # <<< swe_agent
+
+    # >>> swe_agent: 跨样本并行 worker 只动自己的 env，返回增量与结果供主线程聚合
+    def _execute_tool_calls(self, tool_call_list, sync_tool_dict, async_tool_dict):
+        """按原顺序执行单样本的全部 tool calls，返回计数增量与结果。"""
+        n_calls = 0
+        n_failures = 0
+        async_coros = []
+        tool_call_results = []
+        for tool_call in tool_call_list:
+            n_calls += 1
+            if tool_call["type"] == "function":
+                function = tool_call["function"]
+                name = function["name"]
+                try:
+                    if name in sync_tool_dict:
+                        tool_call_results.append(
+                            (name, sync_tool_dict[name](**function["arguments"]))
+                        )
+                    elif name in async_tool_dict:
+                        async_coros.append(
+                            (name, async_tool_dict[name](**function["arguments"]))
+                        )
+                    else:
+                        raise ValueError(f"Tool {name} not found.")
+                except Exception as exc:
+                    n_failures += 1
+                    tool_call_results.append((name, {"error": str(exc)}))
+            else:
+                n_failures += 1
+                name = tool_call.get("name", "unknown")
+                tool_call_results.append(
+                    (
+                        name,
+                        {
+                            "error": (
+                                "Unsupported tool call type: "
+                                f"{tool_call['type']}"
+                            )
+                        },
+                    )
+                )
+
+        if async_coros:
+
+            async def _run_async_tools(coros_with_names):
+                coros = [coro for _, coro in coros_with_names]
+                results = await asyncio.gather(*coros, return_exceptions=True)
+                return [
+                    (name, result)
+                    for (name, _), result in zip(
+                        coros_with_names, results, strict=False
+                    )
+                ]
+
+            async_results = asyncio.run_coroutine_threadsafe(
+                _run_async_tools(async_coros), self.async_loop
+            ).result()
+
+            for name, result in async_results:
+                if isinstance(result, Exception):
+                    n_failures += 1
+                    tool_call_results.append((name, {"error": str(result)}))
+                else:
+                    tool_call_results.append((name, result))
+        return n_calls, n_failures, tool_call_results
     # <<< swe_agent
 
     def _generate_and_score_completions(self, inputs):
@@ -263,6 +339,9 @@ class SWEGRPOTrainer(GRPOTrainer):
             prompts_len_before = [len(prompts[i]) for i in idxs_with_tool]
 
             # Call the tools, and build the new prompt for generation
+            # >>> swe_agent: 三段式——串行前处理 / 跨样本并行执行 / 串行聚合
+            exec_jobs = []
+            steps_before_by_idx: dict[int, int] = {}
             for idx in range(len(idxs_with_tool)):
                 idx_with_tool = idxs_with_tool[idx]
                 tool_call_list = tool_calls[idx]
@@ -291,49 +370,48 @@ class SWEGRPOTrainer(GRPOTrainer):
                 # >>> swe_agent: 记录执行前 step 数，用于 step_index 回填与契约错误降级
                 environment = self.environments[idx_with_tool] if self.environments else None
                 # 刻意的跨模块契约：_steps 是 SWEEnvironment 的私有属性，此处只读长度
-                steps_before = len(environment._steps) if environment is not None else 0
+                steps_before_by_idx[idx] = len(environment._steps) if environment is not None else 0
                 # <<< swe_agent
-                async_coros = []
-                tool_call_results = []
-                for tool_call in tool_call_list:
-                    tool_call_count += 1
-                    if tool_call["type"] == "function":
-                        function = tool_call["function"]
-                        name = function["name"]
-                        try:
-                            if name in sync_tool_dict:
-                                tool_call_results.append((name, sync_tool_dict[name](**function["arguments"])))
-                            elif name in async_tool_dict:
-                                async_coros.append((name, async_tool_dict[name](**function["arguments"])))
-                            else:
-                                raise ValueError(f"Tool {name} not found.")
-                        except Exception as e:
-                            tool_failure_count += 1
-                            result = {"error": str(e)}
-                            tool_call_results.append((name, result))
-                    else:
-                        tool_failure_count += 1
-                        name = tool_call.get("name", "unknown")
-                        tool_call_results.append((name, {"error": f"Unsupported tool call type: {tool_call['type']}"}))
+                exec_jobs.append(
+                    (
+                        idx,
+                        idx_with_tool,
+                        tool_call_list,
+                        sync_tool_dict,
+                        async_tool_dict,
+                    )
+                )
 
-                if async_coros:
+            # >>> swe_agent: worker=1 或单样本时不建池，保持原串行基线
+            if self._tool_parallel_workers > 1 and len(exec_jobs) > 1:
+                with ThreadPoolExecutor(
+                    max_workers=min(len(exec_jobs), self._tool_parallel_workers)
+                ) as pool:
+                    exec_outcomes = list(
+                        pool.map(
+                            lambda job: self._execute_tool_calls(
+                                job[2], job[3], job[4]
+                            ),
+                            exec_jobs,
+                        )
+                    )
+            else:
+                exec_outcomes = [
+                    self._execute_tool_calls(job[2], job[3], job[4])
+                    for job in exec_jobs
+                ]
+            # <<< swe_agent
 
-                    async def _run_async_tools(async_coros):
-                        coros = [coro for _, coro in async_coros]
-                        results = await asyncio.gather(*coros, return_exceptions=True)
-                        return [(name, result) for (name, _), result in zip(async_coros, results, strict=False)]
-
-                    async_results = asyncio.run_coroutine_threadsafe(
-                        _run_async_tools(async_coros), self.async_loop
-                    ).result()
-
-                    for name, result in async_results:
-                        if isinstance(result, Exception):
-                            tool_failure_count += 1
-                            tool_call_results.append((name, {"error": str(result)}))
-                        else:
-                            tool_call_results.append((name, result))
-
+            # >>> swe_agent: 主线程按 idx 升序聚合消息、计数与 step_index
+            for (
+                (idx, idx_with_tool, _, _, _),
+                (n_calls, n_failures, tool_call_results),
+            ) in zip(exec_jobs, exec_outcomes, strict=True):
+                tool_call_count += n_calls
+                tool_failure_count += n_failures
+                prompt_completion_tool = prompt_completion_tools[idx]
+                environment = self.environments[idx_with_tool] if self.environments else None
+                steps_before = steps_before_by_idx[idx]
                 for name, result in tool_call_results:
                     # Support multimodal tool responses: if the tool returns a list of content blocks
                     # (e.g., [{"type": "image", "image": ...}, {"type": "text", "text": "..."}]),
@@ -360,6 +438,7 @@ class SWEGRPOTrainer(GRPOTrainer):
                             # infra 错误（DockerRuntimeError 未追加 Step）也走此降级，归类 invalid_call 是保守处理
                             environment.turn_records[-1] = replace(last, kind="invalid_call", step_index=None)
                 # <<< swe_agent
+            # <<< swe_agent
 
             # >>> swe_agent: 轮询环境终止信号与格式上限；上限样本保留最终无效输出以供记录
             if self.environments:

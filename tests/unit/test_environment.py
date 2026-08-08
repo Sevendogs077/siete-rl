@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -14,6 +15,7 @@ from siete_rl.docker import (
 )
 from siete_rl.environment import SWEEnvironment
 from siete_rl.models import Environment, Evaluation, Sample, Task, Verification
+from siete_rl.rewards import binary_reward
 from siete_rl.verifier import VerificationInfrastructureError
 
 
@@ -161,6 +163,36 @@ def test_finalize_degrades_verifier_infra_error() -> None:
     assert env.trajectory.termination == "infra_error"
 
 
+def test_parallel_finalize_keeps_verifier_infra_error_sample_local() -> None:
+    """并行 verifier 中单样本 infra_error 降级为零分，不影响同组其他样本。"""
+
+    class FailingVerifier(Verifier):
+        def verify(self, patch):
+            raise VerificationInfrastructureError(
+                "offline pytest evaluation timed out"
+            )
+
+    failed, failed_task_id, failed_sandboxes, _ = harness(
+        verifier_cls=FailingVerifier
+    )
+    passed, passed_task_id, passed_sandboxes, _ = harness()
+    for env, task_id, sandboxes in (
+        (failed, failed_task_id, failed_sandboxes),
+        (passed, passed_task_id, passed_sandboxes),
+    ):
+        env.reset(task_id)
+        sandboxes[0].diff = "diff --git a/x b/x\n"
+        env.finish()
+
+    rewards = binary_reward(
+        [None, None], [failed, passed], max_workers=2
+    )
+
+    assert rewards == [0.0, 1.0]
+    assert failed.trajectory.termination == "infra_error"
+    assert passed.trajectory.termination == "submitted"
+
+
 def test_turn_records_reset_clears_list() -> None:
     """turn_records 由 trainer 逐段写入：reset 必须清空，避免跨 episode 串台。"""
     from siete_rl.process_mask import TurnRecord
@@ -186,3 +218,55 @@ def test_reset_infra_failure_terminates_episode_without_raising(monkeypatch: pyt
     assert env.terminated
     assert env._finalize([]) == 0.0
     assert env.trajectory.termination == "infra_error"
+
+
+def test_parallel_finalize_cleanup_events_stay_per_environment() -> None:
+    """并行 finalize 时 rollout/verifier 清理事件保持逐环境隔离。"""
+
+    def make_env(tag: str):
+        class CleanupVerifier(Verifier):
+            def __init__(self, verification=None) -> None:
+                super().__init__(verification)
+                self.close_calls = 0
+                self.cleanup_events: list[dict[str, object]] = []
+
+            def verify(self, patch):
+                verification = super().verify(patch)
+                self.close()
+                return verification
+
+            def close(self):
+                self.close_calls += 1
+                self.cleanup_events.append(
+                    {"verifier": tag, "closed": self.close_calls}
+                )
+
+            def drain_cleanup_events(self):
+                events = list(self.cleanup_events)
+                self.cleanup_events.clear()
+                return events
+
+        env, task_id, sandboxes, verifiers = harness(
+            verifier_cls=CleanupVerifier
+        )
+        env.reset(task_id)
+        sandboxes[0].diff = "diff --git a/x b/x\n"
+        env.finish()
+        return env, sandboxes[0], verifiers
+
+    values = [make_env("env-a"), make_env("env-b")]
+    envs = [value[0] for value in values]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rewards = list(pool.map(lambda env: env._finalize(None), envs))
+
+    assert rewards == [1.0, 1.0]
+    for (env, rollout, verifiers), tag, other_tag in zip(
+        values, ("env-a", "env-b"), ("env-b", "env-a"), strict=True
+    ):
+        verifier = verifiers[0]
+        assert rollout.closed == 1
+        assert verifier.close_calls == 1
+        events = env._drain_events()
+        assert any(event.get("scope") == "rollout" for event in events)
+        assert any(event.get("verifier") == tag for event in events)
+        assert not any(event.get("verifier") == other_tag for event in events)

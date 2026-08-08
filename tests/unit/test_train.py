@@ -21,6 +21,7 @@ from siete_rl.train import (
     _require_single_visible_gpu,
     _sweep_orphans_at_exit,
     build_grpo_config,
+    build_trainer,
     build_peft_config,
     build_quantization_config,
     preflight,
@@ -662,3 +663,72 @@ def test_atexit_sweep_swallows_failures(capsys: pytest.CaptureFixture) -> None:
     _sweep_orphans_at_exit(BadClient(), "run-x")  # 必须不抛出
 
     assert "orphan sweep failed" in capsys.readouterr().err
+
+
+def test_recording_reward_forwards_verifier_parallel_workers() -> None:
+    seen: dict[str, object] = {}
+
+    def adapter(**kwargs):
+        seen.update(kwargs)
+        return [0.0]
+
+    class FakeRecorder:
+        def __init__(self) -> None:
+            self.events = []
+
+        def begin_group(self, prompt, rollout_count, *, task_id):
+            pass
+
+        def write_rollout(self, index, **values):
+            pass
+
+        def complete_group(self, **values):
+            pass
+
+        def observe_native_policy_path(self, reached):
+            pass
+
+        def merge_cleanup_events(self, events):
+            self.events.extend(events)
+
+    class FakeEnvironment:
+        episode_id = "episode-0"
+        trajectory = None
+        frozen_patch = None
+        verification = None
+
+        def _drain_events(self):
+            return []
+
+    reward = _recording_reward(
+        FakeRecorder(), adapter, verifier_parallel_workers=16
+    )
+    assert reward(
+        prompts=[[{"role": "user", "content": "p"}]],
+        completions=[[{"role": "assistant", "content": "c"}]],
+        environments=[FakeEnvironment()],
+    ) == [0.0]
+    assert seen["max_workers"] == 16
+
+
+def test_build_trainer_forwards_tool_parallel_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeTrainer:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("siete_rl.trainer.SWEGRPOTrainer", FakeTrainer)
+    monkeypatch.setattr("siete_rl.train.build_grpo_config", lambda *args, **kwargs: object())
+    config, _, _ = load_config(CONFIG_7B)
+    build_trainer(
+        config,
+        output_dir="/tmp/siete-test-out",
+        seed=0,
+        train_dataset=[],
+        environment_factory=lambda: None,
+        reward_func=lambda **kwargs: [],
+    )
+    assert captured["tool_parallel_workers"] == 16
