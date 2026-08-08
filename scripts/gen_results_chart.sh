@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 读取 outputs/_selected/ 下各 run 的评测结果，生成 README 用的 benchmark strip 图。
-# 输入：outputs/_selected/<run>/evals/<eval>/candidate/{rollout-state.json, official-report.json}
+# 将固定外部 7B 参考与 outputs/_selected/ 中的本地评测绘制为 README 对比图。
+# 本地输入：outputs/_selected/<run>/evals/<eval>/candidate/{rollout-state.json, official-report.json}
 # 输出：docs/assets/results-chart-{light,dark}.png（透明底，按主题切换）
 set -euo pipefail
 
@@ -9,6 +9,7 @@ cd "$PROJECT_ROOT"
 
 .venv/bin/python - <<'EOF'
 import json
+import math
 from pathlib import Path
 
 import matplotlib
@@ -20,54 +21,56 @@ from matplotlib.patches import FancyBboxPatch
 SELECTED = Path("outputs/_selected")
 OUT_TEMPLATE = "docs/assets/results-chart-{theme}.png"
 
-# 强调色取自 docs/assets/logo-*.png 实测主色；legend 与 rail 共享同一组色板常量
+# 固定到原始发布来源；数值是各来源报告的 SWE-bench Verified resolved rate。
+EXTERNAL_ROWS = [
+    ("Qwen2.5-Coder-7B-Instruct", 1.8),
+    ("SWE-Gym-OpenHands-7B-Agent", 10.6),
+    ("SkyRL-Agent-7B-v0", 14.6),
+]
+
 THEMES = {
     "light": {
         "accent": "#04648c",
         "text": "#24292f",
         "secondary": "#6e7781",
-        "grays": ["#c9cfd7", "#9aa3ad", "#6b7280", "#3f4650"],
+        "track": "#e7ebef",
+        "reference": "#89939e",
+        "guide": "#d8dde3",
     },
     "dark": {
         "accent": "#34a4c4",
         "text": "#e6edf3",
         "secondary": "#8b949e",
-        "grays": ["#4a525b", "#636b75", "#7d8590", "#9ba3ad"],
+        "track": "#30363d",
+        "reference": "#8b949e",
+        "guide": "#484f58",
     },
 }
 
-SEGMENTS = [
-    ("resolved", "Resolved"),
-    ("submitted_unresolved", "Unresolved"),
-    ("overlong", "Context Limit"),
-    ("itercap", "Iteration Cap"),
-    ("infra", "Infra Error"),
-]
-
-RAIL_LEN = 52.0      # rail 长度（数据单位）
-GUTTER = 3.0         # label|rail 与 rail|metric 的固定间距
-RUN_STEP = 1.0       # run 间纵向节奏
-LEGEND_DY = 0.55     # legend 距首行 rail 中心的距离
+RAIL_LEN = 51.0
+GUTTER = 3.0
+RUN_STEP = 1.12
+GROUP_GAP = 0.0
 
 
 def run_label(run_dir: Path) -> str:
-    """展示实验演进：只标相对上一级的算法增量。"""
+    """按配置标出本框架的对照臂与当前算法增量。"""
 
     try:
         import yaml
 
         config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
-        if config.get("generation", {}).get("max_repeat_action"):
-            return "+ Repeat Guard"
-        if config.get("grpo", {}).get("reward_type") == "layered":
-            return "+ Layered Reward"
-        return "Vanilla GRPO"
+        grpo = config.get("grpo", {})
+        reward_type = grpo.get("reward_type")
+        if reward_type == "layered":
+            return "SieteRL"
+        return "SieteRL · Vanilla GRPO"
     except Exception:
-        return run_dir.name
+        return f"SieteRL · {run_dir.name}"
 
 
 def latest_candidate(run_dir: Path) -> Path | None:
-    """选 outcome 数最多的 eval（完整评测），并列取最新；跳过部分任务的试跑。"""
+    """选 outcome 数最多的完整评测，并列时取最新；跳过部分任务试跑。"""
 
     evals = run_dir / "evals"
     if not evals.is_dir():
@@ -76,7 +79,8 @@ def latest_candidate(run_dir: Path) -> Path | None:
     for entry in sorted(evals.iterdir()):
         candidate = entry / "candidate"
         state = candidate / "rollout-state.json"
-        if not (candidate / "official-report.json").is_file() or not state.is_file():
+        report = candidate / "official-report.json"
+        if not report.is_file() or not state.is_file():
             continue
         try:
             count = len(json.loads(state.read_text(encoding="utf-8"))["outcomes"])
@@ -87,57 +91,72 @@ def latest_candidate(run_dir: Path) -> Path | None:
     return best[2] if best else None
 
 
-def outcome_buckets(run_dir: Path) -> dict[str, int] | None:
-    """每题恰好归入一桶：infra > resolved > submitted > overlong > itercap。"""
-
+def local_result(run_dir: Path) -> tuple[str, float, str, int] | None:
     candidate = latest_candidate(run_dir)
     if candidate is None:
         return None
-    outcomes = json.loads((candidate / "rollout-state.json").read_text(encoding="utf-8"))["outcomes"]
-    resolved = set(json.loads((candidate / "official-report.json").read_text(encoding="utf-8"))["resolved_ids"])
-    buckets = {key: 0 for key, _ in SEGMENTS}
-    for o in outcomes:
-        if o["infrastructure_error"] is not None:
-            bucket = "infra"
-        elif o["instance_id"] in resolved:
-            bucket = "resolved"
-        elif o["termination"] == "submitted":
-            bucket = "submitted_unresolved"
-        elif o["termination"] == "context_overlong":
-            bucket = "overlong"
-        else:
-            bucket = "itercap"
-        buckets[bucket] += 1
-    return buckets
+    outcomes = json.loads((candidate / "rollout-state.json").read_text(encoding="utf-8"))[
+        "outcomes"
+    ]
+    resolved = json.loads(
+        (candidate / "official-report.json").read_text(encoding="utf-8")
+    )["resolved_ids"]
+    total = len(outcomes)
+    if total == 0:
+        return None
+    count = len(resolved)
+    return run_label(run_dir), 100.0 * count / total, f"{count} / {total}", count
 
 
-rows = []
+local_rows = []
 for run_dir in sorted((p for p in SELECTED.iterdir() if p.is_dir()), key=lambda p: p.name):
-    buckets = outcome_buckets(run_dir)
-    if buckets is None:
+    result = local_result(run_dir)
+    if result is None:
         print(f"skip {run_dir.name}: no completed eval candidate")
         continue
-    rows.append((run_label(run_dir), buckets))
+    local_rows.append(result)
 
-if not rows:
+if not local_rows:
     raise SystemExit("no evaluated runs under outputs/_selected/")
 
-
-def segment_color(t: dict, i: int) -> str:
-    return t["accent"] if i == 0 else t["grays"][i - 1]
+# 对照臂在前；同类多 run 时按 resolved 数与名称稳定排序。
+local_rows.sort(key=lambda row: ("Vanilla GRPO" not in row[0], row[3], row[0]))
 
 
 def render(theme: str) -> None:
     t = THEMES[theme]
     plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = ["Inter", "SF Pro Text", "Segoe UI", "Arial", "Lato", "DejaVu Sans"]
-    n = len(rows)
-    run_y0 = 0.30
-    legend_y = run_y0 + (n - 1) * RUN_STEP + LEGEND_DY
-    height_data = legend_y + 0.28
-    fig, ax = plt.subplots(figsize=(8.6, 0.40 + 0.30 * n), dpi=200)
+    plt.rcParams["font.sans-serif"] = [
+        "Inter",
+        "SF Pro Text",
+        "Segoe UI",
+        "Arial",
+        "Lato",
+        "DejaVu Sans",
+    ]
+
+    rows = [
+        {"label": label, "rate": rate, "detail": "reported", "local": False}
+        for label, rate in EXTERNAL_ROWS
+    ] + [
+        {"label": label, "rate": rate, "detail": detail, "local": True}
+        for label, rate, detail, _ in local_rows
+    ]
+    max_rate = max(row["rate"] for row in rows)
+    scale_max = max(20, int(math.ceil(max_rate * 1.2 / 5.0) * 5))
+
+    positions = []
+    for i in range(len(rows)):
+        y = (len(rows) - 1 - i) * RUN_STEP
+        if i < len(EXTERNAL_ROWS):
+            y += GROUP_GAP
+        positions.append(float(y))
+
+    axis_dy = 0.58
+    height_data = positions[0] + 0.32
+    fig, ax = plt.subplots(figsize=(8.6, 0.42 + 0.40 * len(rows)), dpi=200)
     ax.set_xlim(0, 100)
-    ax.set_ylim(0, height_data)
+    ax.set_ylim(positions[-1] - axis_dy - 0.12, height_data)
     ax.axis("off")
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
     fig.canvas.draw()
@@ -150,71 +169,86 @@ def render(theme: str) -> None:
         ext = artist.get_window_extent(renderer)
         return inv.transform((ext.x1, 0))[0] - inv.transform((ext.x0, 0))[0]
 
-    # label 列宽按最长 label 实测，右对齐贴 rail；rail/metric 依次排布
     label_texts = [
-        ax.text(0, 0, label, ha="left", va="center", fontsize=13, color=t["text"])
-        for label, _ in rows
+        ax.text(0, 0, row["label"], ha="left", va="center", fontsize=10.5, color=t["text"])
+        for row in rows
     ]
     label_w = max(text_width_data(txt) for txt in label_texts)
     rail_x0 = label_w + 2 * GUTTER
     rail_x1 = rail_x0 + RAIL_LEN
-    metric_cx = rail_x1 + GUTTER + 5.4  # 5.4 ≈ "100.0%" 半宽
+    metric_x = rail_x1 + GUTTER
 
-    # rail 厚度按像素标定：约 8.5px（200dpi），仅两端极轻圆角
     bbox = ax.get_window_extent()
-    ppy = bbox.height / height_data
+    ppy = bbox.height / (ax.get_ylim()[1] - ax.get_ylim()[0])
     ppx = bbox.width / 100.0
-    rail_h = 8.5 / ppy
+    rail_h = 7.0 / ppy
     rx = (rail_h / 2) * ppy / ppx
 
-    # 共享 legend：总跨度与 rail 严格一致（两端对齐、间距均布）
-    swatch_w, swatch_gap = 1.2, 0.7
-    legend_texts = [
-        ax.text(0, legend_y, name, ha="left", va="center", fontsize=10, color=t["secondary"])
-        for _, name in SEGMENTS
-    ]
-    item_w = [swatch_w + swatch_gap + text_width_data(txt) for txt in legend_texts]
-    spacing = (RAIL_LEN - sum(item_w)) / (len(SEGMENTS) - 1)
-    cursor = rail_x0
-    for i, txt in enumerate(legend_texts):
-        ax.plot([cursor, cursor + swatch_w], [legend_y, legend_y],
-                color=segment_color(t, i), linewidth=1.3, solid_capstyle="butt")
-        txt.set_position((cursor + swatch_w + swatch_gap, legend_y))
-        cursor += item_w[i] + spacing
+    guide_bottom = positions[-1] - 0.25
+    guide_top = positions[0] + 0.25
+    tick_step = 5 if scale_max <= 30 else 10
+    for tick in range(0, scale_max + 1, tick_step):
+        x = rail_x0 + tick / scale_max * RAIL_LEN
+        ax.plot([x, x], [guide_bottom, guide_top], color=t["guide"], linewidth=0.45, zorder=0)
+        ax.text(
+            x,
+            positions[-1] - axis_dy,
+            f"{tick}%",
+            ha="center",
+            va="center",
+            fontsize=7.5,
+            color=t["secondary"],
+        )
 
-    for i, ((label, buckets), txt) in enumerate(zip(rows, label_texts)):
-        y = run_y0 + (n - 1 - i) * RUN_STEP
-        total = sum(buckets.values())
-        resolved = buckets["resolved"]
-
+    for row, y, txt in zip(rows, positions, label_texts):
         track = FancyBboxPatch(
-            (rail_x0, y - rail_h / 2), RAIL_LEN, rail_h,
+            (rail_x0, y - rail_h / 2),
+            RAIL_LEN,
+            rail_h,
             boxstyle=f"round,pad=0,rounding_size={rx:.5f}",
             mutation_aspect=ppx / ppy,
-            facecolor=t["grays"][0], edgecolor="none",
+            facecolor=t["track"],
+            edgecolor="none",
+            zorder=1,
         )
         ax.add_patch(track)
-
-        left = rail_x0
-        for j, (key, _) in enumerate(SEGMENTS):
-            count = buckets[key]
-            if count == 0:
-                continue
-            width = count / total * RAIL_LEN
-            (rect,) = ax.barh(y, width, left=left, height=rail_h,
-                              color=segment_color(t, j), edgecolor="none")
-            rect.set_clip_path(track)
-            left += width
+        width = row["rate"] / scale_max * RAIL_LEN
+        fill = FancyBboxPatch(
+            (rail_x0, y - rail_h / 2),
+            width,
+            rail_h,
+            boxstyle=f"round,pad=0,rounding_size={rx:.5f}",
+            mutation_aspect=ppx / ppy,
+            facecolor=t["accent"] if row["local"] else t["reference"],
+            edgecolor="none",
+            zorder=2,
+        )
+        fill.set_clip_path(track)
+        ax.add_patch(fill)
 
         txt.set_position((label_w + GUTTER, y))
         txt.set_ha("right")
-        ax.text(metric_cx, y + 0.11, f"{resolved / total:.1%}", ha="center", va="center",
-                fontsize=18, fontweight="bold", color=t["accent"])
-        ax.text(metric_cx, y - 0.18, f"{resolved} / {total}", ha="center", va="center",
-                fontsize=10, color=t["secondary"])
+        ax.text(
+            metric_x,
+            y + 0.12,
+            f"{row['rate']:.1f}%",
+            ha="left",
+            va="center",
+            fontsize=13,
+            fontweight="bold",
+            color=t["accent"] if row["local"] else t["text"],
+        )
+        ax.text(
+            metric_x,
+            y - 0.21,
+            row["detail"],
+            ha="left",
+            va="center",
+            fontsize=7.5,
+            color=t["secondary"],
+        )
 
-    # 左侧只留 1 个单位边距：label 列宽即最长 label 实测宽，不再额外预留
-    ax.set_xlim(GUTTER - 1, metric_cx + 9)
+    ax.set_xlim(GUTTER - 1, metric_x + 10)
     out = OUT_TEMPLATE.format(theme=theme)
     fig.savefig(out, transparent=True, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
@@ -223,6 +257,8 @@ def render(theme: str) -> None:
 
 for theme in THEMES:
     render(theme)
-for label, buckets in rows:
-    print(" ", label, buckets)
+for label, rate in EXTERNAL_ROWS:
+    print(f"  external: {label}: {rate:.1f}%")
+for label, rate, detail, _ in local_rows:
+    print(f"  local: {label}: {rate:.1f}% ({detail})")
 EOF

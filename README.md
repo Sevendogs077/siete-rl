@@ -6,29 +6,29 @@
   </picture>
 </p>
 
-<p align="center">中文 | <a href="README_EN.md">EN</a></p>
+<p align="center">EN | <a href="README_CN.md">中文</a></p>
 
 <p align="center"><i>Reinforcement learning for software-engineering agents with verifiable rewards.</i></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.12-blue.svg" alt="Python 3.12">
-  <img src="https://img.shields.io/badge/TRL-1.8.0-orange.svg" alt="TRL 1.8.0"></a>
+  <img src="https://img.shields.io/badge/Python-3.12-04648c.svg" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/TRL-1.8.0-04648c.svg" alt="TRL 1.8.0">
   <a href="https://github.com/Sevendogs077/siete-rl/actions/workflows/ci.yml"><img src="https://github.com/Sevendogs077/siete-rl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-9cf.svg" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-6e7781.svg" alt="MIT License"></a>
 </p>
 
-SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 policy 为 SWE-Gym OpenHands-7B-Agent（基于 Qwen2.5-Coder-7B 的 SFT checkpoint）。Agent 在隔离容器中进行多轮仓库级 bug 修复；提交的补丁由任务自带的可执行测试验证，verifier 结果即为奖励。训练后的 policy 在 SWE-bench Verified 上统一评测。
+SieteRL is a GRPO post-training project for software-engineering agents. The initial policy is SWE-Gym OpenHands-7B-Agent, an SFT checkpoint of Qwen2.5-Coder-7B. The agent fixes repository-level bugs through multi-turn interaction in isolated containers; each submitted patch is scored by the task's executable tests, and the verifier outcome is the reward. Trained policies are evaluated on SWE-bench Verified.
 
 > [!NOTE]
-> SieteRL 仍在积极开发中，项目结构、接口与实验配置可能变动。
+> SieteRL is under active development. Project structure, APIs, and experimental configurations may change.
 
-## 项目核心
+## Core components
 
-**OpenHands 兼容 scaffold** — 本仓库自行实现与 SWE-Gym OpenHands-7B-Agent 对齐的三工具交互协议。Agent 在隔离的任务容器中通过 `execute_bash` 运行命令、通过 `str_replace_editor` 浏览和修改仓库，并以 `finish` 提交当前 patch；训练与 SWE-bench Verified 评测共用同一套 prompt、工具解析器和多轮状态机。
+**OpenHands-compatible scaffold** — an in-repo implementation of the three-tool interaction protocol used by SWE-Gym OpenHands-7B-Agent. The agent runs commands via `execute_bash`, browses and edits the repository via `str_replace_editor`, and submits its patch with `finish`, all inside isolated task containers. Training and SWE-bench Verified evaluation share the same prompts, tool parser, and multi-turn state machine.
 
-**Liger Kernel** — 训练默认通过 TRL 启用 Liger Kernel：chunked loss 不保存完整 logits，降低 32K 上下文、7B LoRA GRPO 的显存开销。重要性采样校正按 token 级计算，因为长 Agent 轨迹上序列级权重会趋近于零。
+**Liger Kernel** — training enables Liger Kernel through TRL by default. Its chunked loss never materializes the full logits tensor, reducing the memory footprint of 32K-context, 7B LoRA GRPO training; importance-sampling correction is applied per token, since sequence-level weights vanish on long agent trajectories.
 
-## 实验结果
+## Results
 
 <p align="center">
   <picture>
@@ -38,34 +38,34 @@ SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 poli
   </picture>
 </p>
 
-首阶段 GRPO 基线在 SWE-bench Verified 上的结局分布（500 个任务，每题一条 rollout）。这些 run 用于确立训练与评测链路的基线，不构成算法改进；完整实验记录见 [docs/experiment_log.md](docs/experiment_log.md)。
+Full local records: [docs/experiment_log.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/experiment_log.md).
 
-## 复现运行
+## Reproduction
 
-训练需要 2 张 GPU，评测需要 1 张。数据、模型、专用 Docker daemon、任务镜像与评测 harness 的准备步骤见 [docs/asset_preparation.md](docs/asset_preparation.md)。
+Training requires 2 GPUs; evaluation requires 1 GPU. See [docs/asset_preparation.md](docs/asset_preparation.md) for the preparation of datasets, the base model, the dedicated Docker daemon, task images, and the evaluation harness.
 
 ```bash
 uv sync
-bash scripts/prepare.sh          # 拉取任务镜像并生成 assets
-bash scripts/qualify.sh          # 检查配置、数据、镜像、模型与 GPU
-CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # 启动训练
-CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # 启动评测
+bash scripts/prepare.sh          # pull task images and generate assets
+bash scripts/qualify.sh          # check config, data, images, model, and GPU
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # start training
+CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # start evaluation
 ```
 
 > [!WARNING]
-> Agent 会执行模型生成的代码，请仅连接专用的非生产 Docker daemon。
+> The agent executes model-generated code. Only connect a dedicated, non-production Docker daemon.
 
-## 项目结构
+## Project layout
 
 ```text
-src/siete_rl/   训练、环境、验证、评测与记录
-configs/        当前实验配置
-scripts/        资产准备、资格检查、训练与评测入口
-tests/          单元测试及需要显式启用的集成测试
-docs/           实验文档与补充说明
+src/siete_rl/   training, environment, verification, evaluation, and run recording
+configs/        current experiment configurations
+scripts/        entry points for asset preparation, qualification, training, and evaluation
+tests/          unit tests and explicitly enabled integration tests
+docs/           experiment documentation and notes
 ```
 
-## 参考与来源
+## References
 
 <p align="center">
   <a href="https://github.com/huggingface/trl">TRL</a> ·
@@ -78,6 +78,6 @@ docs/           实验文档与补充说明
   <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a>
 </p>
 
-## 开源许可
+## License
 
-本仓库代码以 [MIT License](LICENSE) 发布。
+The code in this repository is released under the [MIT License](LICENSE).
