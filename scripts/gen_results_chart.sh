@@ -152,25 +152,25 @@ def render(theme: str) -> None:
 
     # label 列宽按最长 label 实测，右对齐贴 rail；rail/metric 依次排布
     label_texts = [
-        ax.text(0, 0, label, ha="left", va="center", fontsize=10.5, color=t["text"])
+        ax.text(0, 0, label, ha="left", va="center", fontsize=13, color=t["text"])
         for label, _ in rows
     ]
     label_w = max(text_width_data(txt) for txt in label_texts)
     rail_x0 = label_w + 2 * GUTTER
     rail_x1 = rail_x0 + RAIL_LEN
-    metric_cx = rail_x1 + GUTTER + 4.2  # 4.2 ≈ "100.0%" 半宽
+    metric_cx = rail_x1 + GUTTER + 5.4  # 5.4 ≈ "100.0%" 半宽
 
-    # rail 厚度按像素标定：约 6px（200dpi），仅两端极轻圆角
+    # rail 厚度按像素标定：约 8.5px（200dpi），仅两端极轻圆角
     bbox = ax.get_window_extent()
     ppy = bbox.height / height_data
     ppx = bbox.width / 100.0
-    rail_h = 6.0 / ppy
+    rail_h = 8.5 / ppy
     rx = (rail_h / 2) * ppy / ppx
 
     # 共享 legend：总跨度与 rail 严格一致（两端对齐、间距均布）
     swatch_w, swatch_gap = 1.2, 0.7
     legend_texts = [
-        ax.text(0, legend_y, name, ha="left", va="center", fontsize=7.8, color=t["secondary"])
+        ax.text(0, legend_y, name, ha="left", va="center", fontsize=10, color=t["secondary"])
         for _, name in SEGMENTS
     ]
     item_w = [swatch_w + swatch_gap + text_width_data(txt) for txt in legend_texts]
@@ -208,12 +208,13 @@ def render(theme: str) -> None:
 
         txt.set_position((label_w + GUTTER, y))
         txt.set_ha("right")
-        ax.text(metric_cx, y + 0.10, f"{resolved / total:.1%}", ha="center", va="center",
-                fontsize=14, fontweight="bold", color=t["accent"])
-        ax.text(metric_cx, y - 0.16, f"{resolved} / {total}", ha="center", va="center",
-                fontsize=7.8, color=t["secondary"])
+        ax.text(metric_cx, y + 0.11, f"{resolved / total:.1%}", ha="center", va="center",
+                fontsize=18, fontweight="bold", color=t["accent"])
+        ax.text(metric_cx, y - 0.18, f"{resolved} / {total}", ha="center", va="center",
+                fontsize=10, color=t["secondary"])
 
-    ax.set_xlim(-1, metric_cx + 8)
+    # 左侧只留 1 个单位边距：label 列宽即最长 label 实测宽，不再额外预留
+    ax.set_xlim(GUTTER - 1, metric_cx + 9)
     out = OUT_TEMPLATE.format(theme=theme)
     fig.savefig(out, transparent=True, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)

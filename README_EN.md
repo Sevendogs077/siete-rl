@@ -8,7 +8,7 @@
 
 <p align="center"><a href="README.md">中文</a> | EN</p>
 
-<p align="center"><i>Reinforcement learning for verifiable software-engineering agents.</i></p>
+<p align="center"><i>Reinforcement learning for software-engineering agents with verifiable rewards.</i></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
@@ -19,18 +19,16 @@
   <a href="https://github.com/SWE-bench/SWE-bench"><img src="https://img.shields.io/badge/evaluation-SWE--bench%20Verified-6f42c1.svg" alt="Evaluated on SWE-bench Verified"></a>
 </p>
 
-SieteRL trains software-engineering agents to fix real bugs with GRPO reinforcement learning.
+SieteRL is a GRPO post-training project for software-engineering agents. The initial policy is SWE-Gym OpenHands-7B-Agent, an SFT checkpoint of Qwen2.5-Coder-7B. The agent fixes repository-level bugs through multi-turn interaction in isolated containers; each submitted patch is scored by the task's executable tests, and the verifier outcome is the reward. Trained policies are evaluated on SWE-bench Verified.
 
-Starting from Qwen2.5-Coder-7B (the SWE-Gym OpenHands-7B-Agent SFT policy), the agent repairs SWE-Gym tasks through multi-turn interaction in isolated containers, and real test results directly become the reward. The trained policy is evaluated on SWE-bench Verified.
-
-> [!CAUTION]
-> SieteRL is under active development. Project structure, APIs, and experimental configurations may change frequently.
+> [!NOTE]
+> SieteRL is under active development. Project structure, APIs, and experimental configurations may change.
 
 ## Core components
 
-**OpenHands scaffold** — a three-tool interaction protocol matching SWE-Gym OpenHands-7B-Agent. The agent runs commands via `execute_bash`, browses and edits the repository via `str_replace_editor`, and submits the current patch with `finish`, all inside isolated task containers. Training and SWE-bench Verified evaluation share the same prompts, tool parser, and multi-turn state machine.
+**OpenHands-compatible scaffold** — an in-repo implementation of the three-tool interaction protocol used by SWE-Gym OpenHands-7B-Agent. The agent runs commands via `execute_bash`, browses and edits the repository via `str_replace_editor`, and submits its patch with `finish`, all inside isolated task containers. Training and SWE-bench Verified evaluation share the same prompts, tool parser, and multi-turn state machine.
 
-**Liger Kernel** — training enables Liger Kernel through TRL by default, using a chunked loss to reduce the memory footprint of backpropagation for 32K-context, 7B LoRA GRPO. The configuration pins the compatible token-level importance sampling, and uses eager mode to avoid a known conflict between Torch 2.11 and Liger 0.8 on dynamic-shape recompilation.
+**Liger Kernel** — training enables Liger Kernel through TRL by default. Its chunked loss never materializes the full logits tensor, reducing the memory footprint of 32K-context, 7B LoRA GRPO training; importance-sampling correction is applied per token, since sequence-level weights vanish on long agent trajectories.
 
 ## Results
 
@@ -42,7 +40,7 @@ Starting from Qwen2.5-Coder-7B (the SWE-Gym OpenHands-7B-Agent SFT policy), the 
   </picture>
 </p>
 
-Outcome distribution on SWE-bench Verified (500 tasks, one rollout per task). Full experiment records: [docs/experiment_log.md](docs/experiment_log.md).
+Outcome distribution of the initial GRPO baseline on SWE-bench Verified (500 tasks, one rollout per task). These runs establish a pipeline baseline, not an algorithmic improvement; full records: [docs/experiment_log.md](docs/experiment_log.md).
 
 ## Reproduction
 
@@ -56,7 +54,8 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # start training
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # requires EVAL_HARNESS_PYTHON
 ```
 
-> **Safety note:** the agent executes model-generated code. Only connect a dedicated, non-production Docker daemon.
+> [!WARNING]
+> The agent executes model-generated code. Only connect a dedicated, non-production Docker daemon.
 
 ## Project layout
 
