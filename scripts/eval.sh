@@ -3,4 +3,6 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+export EVAL_ROLLOUT_WORKERS="${EVAL_ROLLOUT_WORKERS-16}"
+export EVAL_HARNESS_WORKERS="${EVAL_HARNESS_WORKERS-4}"
 exec uv run --no-sync python -m siete_rl.eval "$@"

@@ -145,14 +145,15 @@ export EVAL_HARNESS_PYTHON="$PWD/.external/swe-bench-venv/bin/python"
 
 harness 路径默认为 `.external/swe-bench`，可用 `EVAL_HARNESS_ROOT` 覆盖。`EVAL_TASK_IDS` 可将评测限制到部分任务（逗号分隔），默认全部 500 题。
 
-rollout 和 official harness 默认均为单 worker。A100 80 GB 环境建议从 4 开始：
+`scripts/eval.sh` 默认使用 16 个 rollout worker 和 4 个 official harness worker；
+显式环境变量可覆盖脚本默认值。直接运行 `python -m siete_rl.eval` 时仍安全回退到 1/1：
 
 ```bash
-EVAL_ROLLOUT_WORKERS=4 EVAL_HARNESS_WORKERS=4 CUDA_VISIBLE_DEVICES=0 \
+EVAL_ROLLOUT_WORKERS=8 EVAL_HARNESS_WORKERS=2 CUDA_VISIBLE_DEVICES=0 \
   bash scripts/eval.sh outputs/<run-id>
 ```
 
-`EVAL_ROLLOUT_WORKERS` 并发运行相互隔离的 agent environment/container，共享同一个 vLLM server；`EVAL_HARNESS_WORKERS` 直接控制 SWE-bench official harness。两者都必须是正整数。并发预算按同时运行的 eval 进程累加，例如两个 `EVAL_ROLLOUT_WORKERS=4` 的进程最多会同时运行 8 个 rollout container。
+`EVAL_ROLLOUT_WORKERS` 并发运行相互隔离的 agent environment/container，共享同一个 vLLM server；`EVAL_HARNESS_WORKERS` 直接控制 SWE-bench official harness。两者都必须是正整数。并发预算按同时运行的 eval 进程累加，例如两个使用默认配置的进程最多会同时运行 32 个 rollout container。
 
 ## 7. 验收
 

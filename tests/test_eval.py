@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -86,6 +87,57 @@ def test_eval_worker_count_defaults_and_accepts_positive_integer(
     assert eval_module._positive_env_int("EVAL_ROLLOUT_WORKERS") == 1
     monkeypatch.setenv("EVAL_ROLLOUT_WORKERS", "4")
     assert eval_module._positive_env_int("EVAL_ROLLOUT_WORKERS") == 4
+
+
+@pytest.mark.parametrize(
+    ("rollout_env", "harness_env", "expected_rollout", "expected_harness"),
+    [
+        (None, None, "16", "4"),
+        ("8", "2", "8", "2"),
+    ],
+    ids=["defaults", "explicit-overrides"],
+)
+def test_eval_script_supplies_defaults_and_preserves_overrides(
+    tmp_path: Path,
+    rollout_env: str | None,
+    harness_env: str | None,
+    expected_rollout: str,
+    expected_harness: str,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$EVAL_ROLLOUT_WORKERS\" \"$EVAL_HARNESS_WORKERS\" \"$*\"\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    if rollout_env is None:
+        env.pop("EVAL_ROLLOUT_WORKERS", None)
+    else:
+        env["EVAL_ROLLOUT_WORKERS"] = rollout_env
+    if harness_env is None:
+        env.pop("EVAL_HARNESS_WORKERS", None)
+    else:
+        env["EVAL_HARNESS_WORKERS"] = harness_env
+
+    completed = subprocess.run(
+        ["bash", str(PROJECT_ROOT / "scripts/eval.sh"), "outputs/example"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.splitlines() == [
+        expected_rollout,
+        expected_harness,
+        "run --no-sync python -m siete_rl.eval outputs/example",
+    ]
 
 
 @pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "four"])

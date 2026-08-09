@@ -50,12 +50,13 @@ bash scripts/prepare.sh          # pull task images and generate assets
 bash scripts/qualify.sh          # check config, data, images, model, and GPU
 CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # start training
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # start evaluation
-# opt in to task-level rollout and official-harness concurrency
-EVAL_ROLLOUT_WORKERS=4 EVAL_HARNESS_WORKERS=4 CUDA_VISIBLE_DEVICES=0 \
+# override the script's 16/4 worker defaults on a smaller host
+EVAL_ROLLOUT_WORKERS=8 EVAL_HARNESS_WORKERS=2 CUDA_VISIBLE_DEVICES=0 \
   bash scripts/eval.sh outputs/<run-id>
 ```
 
-Both evaluation worker counts default to `1`; start with `4` on an A100 80 GB host.
+`scripts/eval.sh` defaults rollout/harness workers to `16/4`; explicit environment
+values override them. Direct `python -m siete_rl.eval` calls retain safe `1/1` defaults.
 Each simultaneous evaluation process has its own worker pool, so size the combined
 Docker CPU and memory limits across all running evaluations.
 
