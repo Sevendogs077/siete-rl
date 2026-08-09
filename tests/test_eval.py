@@ -23,6 +23,7 @@ from siete_rl.eval import (
     run_agent_loop,
 )
 from siete_rl.docker import CommandResult
+from siete_rl.models import TerminalEvent
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -264,6 +265,16 @@ def test_eval_agent_loop_calls_the_existing_trainer_state_machine(
 ) -> None:
     sample = sample_factory()
     seen = {}
+    first = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {"name": "finish", "arguments": {}},
+            }
+        ],
+    }
 
     class Tokenizer:
         def apply_chat_template(self, messages, **kwargs):
@@ -281,21 +292,26 @@ def test_eval_agent_loop_calls_the_existing_trainer_state_machine(
         self.episode_id = "episode"
         seen["reset"] = task_id
 
-    def fake_loop(self, **kwargs):
-        seen["method"] = SWEGRPOTrainer._tool_call_loop
-        seen["tools"] = set(self._sync_tool_dicts[0])
-        return [], [[{"role": "assistant", "content": "done"}]], [], None, 0, 0, []
+    def finish(self):
+        self._steps.append(object())
+        self._submitted = True
+        self._frozen_patch = "patch"
+        self._terminal_event = TerminalEvent(kind="submitted", step_index=0)
+        return "submitted"
 
     from siete_rl.trainer import SWEGRPOTrainer
 
-    monkeypatch.setattr("siete_rl.eval.parse_response", lambda *args, **kwargs: {"role": "assistant", "content": "start"})
+    execute_tool_calls = SWEGRPOTrainer._execute_tool_calls
+
+    def observe_tools(self, tool_call_list, sync_tool_dict, async_tool_dict):
+        seen["tools"] = set(sync_tool_dict)
+        return execute_tool_calls(self, tool_call_list, sync_tool_dict, async_tool_dict)
+
+    monkeypatch.setattr("siete_rl.eval.parse_response", lambda *args, **kwargs: first)
     monkeypatch.setattr("siete_rl.eval.EvalEnvironment.reset", reset)
-    monkeypatch.setattr("siete_rl.eval.SWEGRPOTrainer._tool_call_loop", fake_loop)
+    monkeypatch.setattr("siete_rl.eval.EvalEnvironment.finish", finish)
     monkeypatch.setattr(
-        "siete_rl.eval.EvalEnvironment.finalize_eval",
-        lambda self, messages, started: EvalOutcome(
-            sample.task.task_id, "patch", "submitted", None, messages, 0.0
-        ),
+        "siete_rl.eval.SWEGRPOTrainer._execute_tool_calls", observe_tools
     )
     outcome = run_agent_loop(
         sample=sample,
@@ -305,7 +321,9 @@ def test_eval_agent_loop_calls_the_existing_trainer_state_machine(
         docker_client=Client([]),
         eval_run_id="eval",
     )
+    assert outcome.infrastructure_error is None
     assert outcome.patch == "patch"
+    assert outcome.termination == "submitted"
+    assert outcome.messages == [first]
     assert seen["reset"] == sample.task.task_id
-    assert seen["method"] is SWEGRPOTrainer._tool_call_loop
     assert seen["tools"] == {"execute_bash", "str_replace_editor", "finish"}

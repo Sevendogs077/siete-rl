@@ -456,6 +456,7 @@ def run_agent_loop(
         trainer.max_tool_calling_iterations = protocol.max_tool_calling_iterations
         trainer.max_consecutive_protocol_errors = protocol.max_consecutive_protocol_errors
         trainer.max_completion_length = protocol.max_completion_length
+        trainer._tool_parallel_workers = 1
         trainer.use_vllm = False
         trainer.vllm_mode = "server"
         trainer._is_vlm = False
