@@ -18,10 +18,9 @@
    ``environment.turn_records``；真实工具执行前快照 ``len(env._steps)``，
    执行后按是否追加 Step 回填 ``step_index`` 或降级为 ``invalid_call``。
 
-另覆写 ``_generate_and_score_completions``：process mask 开启时按
-``assemble_token_weights`` 组装 per-token 权重（base_mask × α 后质量保持归一；
-infra_error/context_overlong 整轨迹置零）注入 ``output["token_weights"]``，
-并记录 ``process_mask/*`` 指标。
+process mask 开启时，trainer 记录 turn facts，并在父类完成 reward/advantage 后调用
+``process_mask.build_process_token_weights``；规则、governance 和 sign 语义全部由该纯模块拥有。
+返回的二元 ``token_weights`` 仅替换 Liger reward-credit loss mask。
 
 另新增 ``_generate_tool_loop_turn``：backport huggingface/trl#6673 —— tool loop
 post-tool 再生成的 K 条 entry 各自携带独立采样的 history，不满足 server 模式
@@ -50,7 +49,7 @@ from trl.chat_template_utils import parse_response
 from trl.extras.profiling import profiling_context
 
 from siete_rl.models import LoopExit
-from siete_rl.process_mask import TurnRecord, build_alpha, resolve_rules
+from siete_rl.process_mask import ProcessMaskStats, TurnRecord, build_process_token_weights
 
 
 _PARSE_ERROR_SENTINEL = "swe_agent_parse_error"
@@ -80,35 +79,6 @@ def _record_turn(environment, start: int, end: int, kind: str, step_index: int |
 # <<< swe_agent
 
 
-# >>> swe_agent: process mask 组装层
-_GOVERNANCE_MASKED_TERMINATIONS = frozenset({"infra_error", "context_overlong"})
-
-
-def assemble_token_weights(environment, *, base_mask: list[float], n_tokens: int, rules: list) -> tuple[list[float], dict]:
-    """base_mask × α，再做质量保持归一 c = Σbase/Σ(base×α)；governance 终止或全 mask 轨迹保持全 0。
-
-    返回 (weights, stats)；stats = {"masked_turns": int, "masked_frac": float}，
-    masked_frac 是归一前被 mask 掉的 base token 比例（1 - Σ(base×α)/Σbase）。
-    governance 终止整轨迹置零：masked_turns 记 0（非规则命中），masked_frac 记 1.0
-    （base_sum == 0 时 0.0）。
-    """
-    base_sum = sum(base_mask)
-    if environment.trajectory.termination in _GOVERNANCE_MASKED_TERMINATIONS:
-        return [0.0] * n_tokens, {
-            "masked_turns": 0,
-            "masked_frac": 1.0 if base_sum > 0 else 0.0,
-        }
-    alpha, masked_turns = build_alpha(environment.turn_records, environment._steps, n_tokens, rules)
-    masked = [b * a for b, a in zip(base_mask, alpha, strict=True)]
-    masked_sum = sum(masked)
-    masked_frac = 1.0 - masked_sum / base_sum if base_sum > 0 else 0.0
-    if base_sum == 0 or masked_sum == 0:
-        return [0.0] * n_tokens, {"masked_turns": masked_turns, "masked_frac": masked_frac}
-    c = base_sum / masked_sum
-    return [m * c for m in masked], {"masked_turns": masked_turns, "masked_frac": masked_frac}
-# <<< swe_agent
-
-
 class SWEGRPOTrainer(GRPOTrainer):
     """在官方 GRPOTrainer 上加入环境信号终止；其余行为与 TRL 完全一致。"""
 
@@ -116,7 +86,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         self,
         *args,
         max_consecutive_protocol_errors: int,
-        process_mask_rules: list[str] | None = None,
+        use_process_mask: bool,
         tool_parallel_workers: int = 1,
         **kwargs,
     ) -> None:
@@ -126,12 +96,10 @@ class SWEGRPOTrainer(GRPOTrainer):
             raise ValueError("tool_parallel_workers must be positive")
         self.max_consecutive_protocol_errors = max_consecutive_protocol_errors
         self._tool_parallel_workers = tool_parallel_workers
-        self._process_mask_rules = resolve_rules(process_mask_rules or [])
+        self._use_process_mask = use_process_mask
         super().__init__(*args, **kwargs)
-        if self._process_mask_rules and not self.use_liger_kernel:
-            raise ValueError(
-                "process mask requires use_liger_kernel=true (non-Liger loss path not implemented)"
-            )
+        if self._use_process_mask and not self.use_liger_kernel:
+            raise ValueError("process mask requires use_liger_kernel=true")
 
     # >>> swe_agent: #6673 backport — tool loop 再生成禁止 server stride 去重
     def _generate_tool_loop_turn(self, prompt_ids, images, multimodal_fields):
@@ -229,43 +197,71 @@ class SWEGRPOTrainer(GRPOTrainer):
 
     def _generate_and_score_completions(self, inputs):
         output = super()._generate_and_score_completions(inputs)
-        if not self._process_mask_rules:
+        if not self._use_process_mask:
             return output
         environments = self.environments
         completion_mask = output["completion_mask"]
         tool_mask = output.get("tool_mask")
-        if not environments or len(environments) != completion_mask.size(0) or tool_mask is None:
-            raise RuntimeError("process mask requires aligned environments and tool_mask")
-        base_mask = (completion_mask * tool_mask).float()
-        weights = torch.zeros_like(base_mask)
-        masked_turns_total = 0
-        masked_frac_sum = 0.0
-        governance_masked = 0
-        for i, environment in enumerate(environments):
-            n_tokens = int(completion_mask[i].sum().item())
-            row, stats = assemble_token_weights(
-                environment,
-                base_mask=base_mask[i, :n_tokens].tolist(),
-                n_tokens=n_tokens,
-                rules=self._process_mask_rules,
+        advantages = output.get("advantages")
+        if (
+            not environments
+            or len(environments) != completion_mask.size(0)
+            or tool_mask is None
+            or tool_mask.shape != completion_mask.shape
+            or advantages is None
+            or advantages.ndim != 1
+            or advantages.shape[0] != completion_mask.size(0)
+        ):
+            raise RuntimeError(
+                "process mask requires aligned environments, tool_mask, and advantages"
             )
-            weights[i, :n_tokens] = torch.tensor(row, dtype=weights.dtype, device=weights.device)
-            masked_turns_total += stats["masked_turns"]
-            masked_frac_sum += stats["masked_frac"]
-            # governance 口径直接看终止原因，与全零判定解耦；与 assemble_token_weights 一致 fail-loud
-            governance_masked += int(environment.trajectory.termination in _GOVERNANCE_MASKED_TERMINATIONS)
-        output["token_weights"] = weights
-        mode = "train" if self.model.training else "eval"
-        n_rows = completion_mask.size(0)
-        self._metrics[mode]["process_mask/masked_token_frac"].append(masked_frac_sum / n_rows)
-        self._metrics[mode]["process_mask/masked_turns"].append(float(masked_turns_total))
-        self._metrics[mode]["process_mask/governance_masked"].append(float(governance_masked))
+
+        base_mask = (completion_mask * tool_mask).float()
+        token_weights = torch.zeros_like(base_mask)
+        stats_rows = []
+        for row_index, environment in enumerate(environments):
+            row, stats = build_process_token_weights(
+                turns=environment.turn_records,
+                steps=environment._steps,
+                termination=environment.trajectory.termination,
+                advantage=float(advantages[row_index].item()),
+                base_mask=base_mask[row_index].tolist(),
+            )
+            token_weights[row_index] = torch.tensor(
+                row,
+                dtype=token_weights.dtype,
+                device=token_weights.device,
+            )
+            stats_rows.append(stats)
+        output["token_weights"] = token_weights
+        self._record_process_mask_metrics(stats_rows)
         return output
+
+    def _record_process_mask_metrics(self, rows: list[ProcessMaskStats]) -> None:
+        mode = "train" if self.model.training else "eval"
+        n_rows = len(rows)
+        if n_rows == 0:
+            raise RuntimeError("process mask stats require at least one row")
+        self._metrics[mode]["process_mask/candidate_turns"].append(
+            float(sum(row.candidate_turns for row in rows))
+        )
+        self._metrics[mode]["process_mask/applied_turns"].append(
+            float(sum(row.applied_turns for row in rows))
+        )
+        self._metrics[mode]["process_mask/retained_negative_turns"].append(
+            float(sum(row.retained_negative_turns for row in rows))
+        )
+        self._metrics[mode]["process_mask/masked_token_frac"].append(
+            sum(row.masked_token_frac for row in rows) / n_rows
+        )
+        self._metrics[mode]["process_mask/governance_masked"].append(
+            float(sum(row.governance_masked for row in rows))
+        )
 
     def compute_liger_loss(self, unwrapped_model, inputs):
         # token_weights 的支撑集已在 completion_mask×tool_mask 内，替换后父类的
         # loss_mask = completion_mask * token_weights ≡ token_weights。
-        if self._process_mask_rules and "token_weights" in inputs:
+        if self._use_process_mask and "token_weights" in inputs:
             inputs = dict(inputs, tool_mask=inputs["token_weights"])
         return super().compute_liger_loss(unwrapped_model, inputs)
 

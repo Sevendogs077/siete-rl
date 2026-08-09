@@ -732,3 +732,5 @@ def test_build_trainer_forwards_tool_parallel_workers(
         reward_func=lambda **kwargs: [],
     )
     assert captured["tool_parallel_workers"] == 16
+    assert captured["use_process_mask"] is True
+    assert "process_mask_rules" not in captured

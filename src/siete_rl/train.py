@@ -267,7 +267,7 @@ def build_trainer(
         peft_config=build_peft_config(config),
         quantization_config=build_quantization_config(config),
         max_consecutive_protocol_errors=config.generation.max_consecutive_protocol_errors,
-        process_mask_rules=config.generation.process_mask_rules,
+        use_process_mask=config.generation.use_process_mask,
         tool_parallel_workers=config.generation.tool_parallel_workers,
     )
 

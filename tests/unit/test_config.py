@@ -37,6 +37,7 @@ def _minimal_generation_values(**overrides: object) -> GenerationConfig:
         "use_liger_kernel": True,
         "max_tool_calling_iterations": 40,
         "max_consecutive_protocol_errors": 5,
+        "use_process_mask": False,
         "temperature": 1.0,
         "top_p": 1.0,
         "top_k": 20,

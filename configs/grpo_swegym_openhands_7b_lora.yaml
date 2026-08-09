@@ -50,7 +50,7 @@ generation:
   max_consecutive_protocol_errors: 5
   tool_parallel_workers: 16
   verifier_parallel_workers: 16
-  process_mask_rules: [invalid_call, duplicate_action]
+  use_process_mask: true
   temperature: 1.0
   top_p: 1.0
   top_k: 20

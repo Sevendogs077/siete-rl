@@ -96,7 +96,7 @@ class GenerationConfig(StrictConfig):
     max_consecutive_protocol_errors: int = Field(ge=1)
     tool_parallel_workers: int = Field(default=1, ge=1)
     verifier_parallel_workers: int = Field(default=1, ge=1)
-    process_mask_rules: list[str] = []  # 默认空 = 关闭
+    use_process_mask: bool
     temperature: float = Field(gt=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
     top_k: int = Field(ge=0)
@@ -109,7 +109,7 @@ class GRPOConfigValues(StrictConfig):
     layered_lambda: float = Field(default=DEFAULT_LAMBDA, gt=0.0)
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
-    loss_type: Literal["grpo", "dapo", "bnpo", "dr_grpo"]
+    loss_type: Literal["grpo"]
     scale_rewards: Literal["group", "batch", "none"]
     multi_objective_aggregation: Literal["sum_then_normalize", "normalize_then_sum"]
     epsilon: float = Field(ge=0.0)

@@ -1,159 +1,192 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from siete_rl.models import Action, Observation, Step
 from siete_rl.process_mask import (
-    RULE_REGISTRY,
-    DuplicateActionMask,
-    InvalidCallMask,
+    ProcessMaskStats,
     TurnRecord,
-    action_signature,
-    build_alpha,
-    resolve_rules,
+    _action_key,
+    build_process_token_weights,
 )
 
 
-def _step(tool_name: str, arguments: dict) -> Step:
+CONFIG_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "configs/grpo_swegym_openhands_7b_lora.yaml"
+)
+
+
+class TestActionKey:
+    def test_argument_key_order_does_not_change_key(self):
+        left = Action(
+            tool_name="str_replace_editor",
+            arguments={"command": "view", "path": "/repo/a.py", "view_range": [1, 40]},
+        )
+        right = Action(
+            tool_name="str_replace_editor",
+            arguments={"view_range": [1, 40], "path": "/repo/a.py", "command": "view"},
+        )
+        assert _action_key(left) == _action_key(right)
+
+    @pytest.mark.parametrize(
+        ("field", "left", "right"),
+        [
+            ("view_range", [1, 40], [41, 80]),
+            ("new_str", "x = 1", "x = 2"),
+            ("insert_line", 10, 11),
+            ("file_text", "a\n", "b\n"),
+        ],
+    )
+    def test_every_editor_argument_participates(self, field, left, right):
+        common = {"command": "view", "path": "/repo/a.py"}
+        action_a = Action(tool_name="str_replace_editor", arguments={**common, field: left})
+        action_b = Action(tool_name="str_replace_editor", arguments={**common, field: right})
+        assert _action_key(action_a) != _action_key(action_b)
+
+    def test_finish_has_no_repeat_key(self):
+        assert _action_key(Action(tool_name="finish", arguments={})) is None
+
+
+def _turns(kinds: list[str]) -> list[TurnRecord]:
+    return [
+        TurnRecord(token_start=2 * i, token_end=2 * i + 2, kind=kind, step_index=i if kind == "step" else None)
+        for i, kind in enumerate(kinds)
+    ]
+
+
+def _bash_step(index: int, command: str) -> Step:
     return Step(
-        index=0,
-        action=Action(tool_name=tool_name, arguments=arguments),
+        index=index,
+        action=Action(tool_name="execute_bash", arguments={"command": command}),
         observation=Observation(text="ok", exit_code=0),
     )
 
 
-BASH = {"command": "ls"}
-EDITOR = {"command": "str_replace", "path": "/a.py", "old_str": "x" * 300}
-ALL_RULES = resolve_rules(["invalid_call", "duplicate_action"])
+class TestBuildProcessTokenWeights:
+    def test_positive_advantage_masks_third_consecutive_action(self):
+        turns = _turns(["step", "step", "step"])
+        steps = [_bash_step(i, "pytest -q") for i in range(3)]
+        weights, stats = build_process_token_weights(
+            turns=turns,
+            steps=steps,
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0] * 6,
+        )
+        assert weights == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+        assert stats.candidate_turns == 1
+        assert stats.applied_turns == 1
+        assert stats.retained_negative_turns == 0
+        assert stats.masked_token_frac == pytest.approx(2 / 6)
+        assert not stats.governance_masked
 
+    def test_intervening_action_resets_streak(self):
+        commands = ["pytest -q", "pytest -q", "sed -n '1,40p' a.py", "pytest -q"]
+        turns = _turns(["step"] * 4)
+        steps = [_bash_step(i, command) for i, command in enumerate(commands)]
+        weights, stats = build_process_token_weights(
+            turns=turns,
+            steps=steps,
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0] * 8,
+        )
+        assert weights == [1.0] * 8
+        assert stats.candidate_turns == 0
 
-def _alpha(turns, steps, n_tokens, rules):
-    """build_alpha 返回 (alpha, masked_turns)，既有用例只关心 alpha。"""
-    alpha, _ = build_alpha(turns, steps, n_tokens, rules)
-    return alpha
-
-
-class TestInvalidCallMask:
-    rule = InvalidCallMask()
-
-    def test_invalid_call_masked(self):
-        turn = TurnRecord(0, 10, "invalid_call", None)
-        assert self.rule.masked(turn, None) is True
-
-    @pytest.mark.parametrize("kind", ["step", "plain_message"])
-    def test_other_kinds_not_masked(self, kind: str):
-        turn = TurnRecord(0, 10, kind, 0)
-        assert self.rule.masked(turn, None) is False
-
-
-class TestDuplicateActionMask:
-    rule = DuplicateActionMask()
-
-    @pytest.mark.parametrize("occurrence", [1, 2])
-    def test_below_threshold_not_masked(self, occurrence: int):
-        turn = TurnRecord(0, 10, "step", 0)
-        assert self.rule.masked(turn, occurrence) is False
-
-    @pytest.mark.parametrize("occurrence", [3, 4, 100])
-    def test_at_or_above_threshold_masked(self, occurrence: int):
-        turn = TurnRecord(0, 10, "step", 0)
-        assert self.rule.masked(turn, occurrence) is True
-
-    def test_none_occurrence_not_masked(self):
-        turn = TurnRecord(0, 10, "step", 0)
-        assert self.rule.masked(turn, None) is False
-
-
-class TestBuildAlpha:
-    def test_no_turns_all_ones(self):
-        assert _alpha([], [], 5, ALL_RULES) == [1.0] * 5
-
-    def test_invalid_call_turn_zeroed(self):
-        turns = [TurnRecord(2, 4, "invalid_call", None)]
-        assert _alpha(turns, [], 6, ALL_RULES) == [1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
-
-    def test_third_duplicate_bash_masked(self):
-        # 成败均计数，签名只看 action，不看 observation
-        steps = [_step("execute_bash", BASH) for _ in range(3)]
+    def test_invalid_call_breaks_repeat_streak_and_is_candidate(self):
         turns = [
             TurnRecord(0, 2, "step", 0),
             TurnRecord(2, 4, "step", 1),
-            TurnRecord(4, 6, "step", 2),
+            TurnRecord(4, 6, "invalid_call", None),
+            TurnRecord(6, 8, "step", 2),
         ]
-        alpha = _alpha(turns, steps, 6, ALL_RULES)
-        assert alpha == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
-
-    def test_different_signatures_counted_independently(self):
-        steps = [
-            _step("execute_bash", BASH),
-            _step("execute_bash", {"command": "pwd"}),
-            _step("execute_bash", BASH),
-        ]
-        turns = [TurnRecord(i * 2, i * 2 + 2, "step", i) for i in range(3)]
-        alpha = _alpha(turns, steps, 6, ALL_RULES)
-        assert alpha == [1.0] * 6
-
-    def test_editor_signature_includes_old_str(self):
-        editor_b = {**EDITOR, "old_str": "y"}
-        steps = [_step("str_replace_editor", EDITOR) for _ in range(2)]
-        steps.append(_step("str_replace_editor", editor_b))
-        turns = [TurnRecord(i * 2, i * 2 + 2, "step", i) for i in range(3)]
-        alpha = _alpha(turns, steps, 6, ALL_RULES)
-        assert alpha == [1.0] * 6
-
-    def test_editor_old_str_truncated_at_200(self):
-        # old_str 只取前 200 字符：第 201 位起不同仍视为同一签名
-        args_a = {**EDITOR, "old_str": "a" * 200 + "X"}
-        args_b = {**EDITOR, "old_str": "a" * 200 + "Y"}
-        assert action_signature(Action(tool_name="str_replace_editor", arguments=args_a)) == action_signature(
-            Action(tool_name="str_replace_editor", arguments=args_b)
+        steps = [_bash_step(i, "pytest -q") for i in range(3)]
+        weights, stats = build_process_token_weights(
+            turns=turns,
+            steps=steps,
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0] * 8,
         )
-        steps = [
-            _step("str_replace_editor", args_a),
-            _step("str_replace_editor", args_b),
-            _step("str_replace_editor", args_a),
-        ]
-        turns = [TurnRecord(i * 2, i * 2 + 2, "step", i) for i in range(3)]
-        alpha = _alpha(turns, steps, 6, ALL_RULES)
-        assert alpha == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+        assert weights == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+        assert stats.candidate_turns == 1
 
-    def test_editor_duplicate_masked_from_third(self):
-        steps = [_step("str_replace_editor", EDITOR) for _ in range(3)]
-        turns = [TurnRecord(i * 2, i * 2 + 2, "step", i) for i in range(3)]
-        alpha = _alpha(turns, steps, 6, ALL_RULES)
-        assert alpha == [1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    @pytest.mark.parametrize("advantage", [-0.5, 0.0])
+    def test_nonpositive_advantage_retains_candidate_turns(self, advantage):
+        turns = _turns(["step", "step", "step"])
+        steps = [_bash_step(i, "pytest -q") for i in range(3)]
+        weights, stats = build_process_token_weights(
+            turns=turns,
+            steps=steps,
+            termination="submitted",
+            advantage=advantage,
+            base_mask=[1.0] * 6,
+        )
+        assert weights == [1.0] * 6
+        assert stats.applied_turns == 0
+        assert stats.retained_negative_turns == (1 if advantage < 0 else 0)
 
-    def test_finish_not_counted(self):
-        steps = [_step("execute_bash", BASH) for _ in range(2)]
-        steps.append(_step("finish", {}))
-        turns = [TurnRecord(i * 2, i * 2 + 2, "step", i) for i in range(3)]
-        alpha = _alpha(turns, steps, 6, ALL_RULES)
-        assert alpha == [1.0] * 6
+    @pytest.mark.parametrize("termination", ["infra_error", "context_overlong"])
+    def test_governance_always_masks_whole_trajectory(self, termination):
+        weights, stats = build_process_token_weights(
+            turns=[],
+            steps=[],
+            termination=termination,
+            advantage=-0.5,
+            base_mask=[1.0, 0.0, 1.0],
+        )
+        assert weights == [0.0, 0.0, 0.0]
+        assert stats.masked_token_frac == 1.0
+        assert stats.governance_masked
 
-    def test_empty_rules_all_ones(self):
+    def test_output_never_contains_weight_above_one(self):
         turns = [TurnRecord(0, 2, "invalid_call", None)]
-        assert _alpha(turns, [], 4, []) == [1.0] * 4
-
-    def test_step_kind_without_step_index_not_counted(self):
-        turns = [TurnRecord(0, 2, "step", None)]
-        assert _alpha(turns, [], 4, ALL_RULES) == [1.0] * 4
-
-    def test_token_end_clamped_to_n_tokens(self):
-        turns = [TurnRecord(2, 100, "invalid_call", None)]
-        assert _alpha(turns, [], 4, ALL_RULES) == [1.0, 1.0, 0.0, 0.0]
-
-    def test_negative_token_start_raises(self):
-        with pytest.raises(ValueError, match="invalid turn token range"):
-            build_alpha([TurnRecord(-1, 2, "step", None)], [], 4, ALL_RULES)
+        weights, _ = build_process_token_weights(
+            turns=turns,
+            steps=[],
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0, 1.0, 1.0],
+        )
+        assert set(weights) <= {0.0, 1.0}
 
 
-class TestRegistry:
-    def test_unknown_rule_raises(self):
-        with pytest.raises(ValueError, match="bogus"):
-            resolve_rules(["bogus"])
+@pytest.mark.parametrize(
+    "turn",
+    [
+        TurnRecord(-1, 1, "invalid_call", None),
+        TurnRecord(2, 1, "invalid_call", None),
+        TurnRecord(0, 4, "invalid_call", None),
+        TurnRecord(0, 1, "step", None),
+        TurnRecord(0, 1, "plain_message", 0),
+    ],
+)
+def test_invalid_turn_facts_fail_loud(turn):
+    with pytest.raises(ValueError):
+        build_process_token_weights(
+            turns=[turn],
+            steps=[],
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0, 1.0],
+        )
 
-    def test_registry_contents(self):
-        assert set(RULE_REGISTRY) == {"invalid_call", "duplicate_action"}
+
+def test_nonbinary_base_mask_fails_loud():
+    with pytest.raises(ValueError, match="base_mask must be binary"):
+        build_process_token_weights(
+            turns=[],
+            steps=[],
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0, 0.5],
+        )
 
 
 from siete_rl.trainer import (  # noqa: E402
@@ -165,27 +198,34 @@ from siete_rl.trainer import (  # noqa: E402
 
 
 class TestConfigWiring:
-    def test_yaml_generation_process_mask_rules(self):
+    def test_yaml_requires_boolean_process_mask(self):
         from siete_rl.config import load_config
 
-        config, _, _ = load_config("configs/grpo_swegym_openhands_7b_lora.yaml")
-        assert config.generation.process_mask_rules == ["invalid_call", "duplicate_action"]
+        config, _, _ = load_config(CONFIG_PATH)
+        assert config.generation.use_process_mask is True
+        assert not hasattr(config.generation, "process_mask_rules")
 
-    def test_generation_config_default_off(self):
-        from siete_rl.config import GenerationConfig
+    def test_old_process_mask_rules_key_is_rejected(self, tmp_path):
+        from siete_rl.config import load_config
 
-        generation = GenerationConfig(
-            max_completion_length=128,
-            context_safety_margin=0,
-            use_liger_kernel=True,
-            max_tool_calling_iterations=4,
-            max_consecutive_protocol_errors=3,
-            temperature=1.0,
-            top_p=1.0,
-            top_k=20,
-            repetition_penalty=1.1,
-        )
-        assert generation.process_mask_rules == []
+        raw = yaml.safe_load(CONFIG_PATH.read_text())
+        raw["generation"].pop("use_process_mask")
+        raw["generation"]["process_mask_rules"] = ["invalid_call", "duplicate_action"]
+        path = tmp_path / "old.yaml"
+        path.write_text(yaml.safe_dump(raw))
+        with pytest.raises(ValidationError):
+            load_config(path)
+
+    @pytest.mark.parametrize("loss_type", ["bnpo", "dapo", "dr_grpo"])
+    def test_non_grpo_loss_type_is_rejected(self, tmp_path, loss_type):
+        from siete_rl.config import load_config
+
+        raw = yaml.safe_load(CONFIG_PATH.read_text())
+        raw["grpo"]["loss_type"] = loss_type
+        path = tmp_path / "bad-loss.yaml"
+        path.write_text(yaml.safe_dump(raw))
+        with pytest.raises(ValidationError):
+            load_config(path)
 
 
 class _FakeEnv:
@@ -229,86 +269,13 @@ class TestRecordTurn:
 
 from types import SimpleNamespace  # noqa: E402
 
-from siete_rl.trainer import assemble_token_weights  # noqa: E402
-
-
 def _mask_env(turn_records=(), steps=(), termination="submitted"):
-    """假 env：只带 assemble_token_weights 读取的三个属性。"""
+    """假 env：只带 process-mask 接线读取的轨迹事实。"""
     return SimpleNamespace(
         turn_records=list(turn_records),
         _steps=list(steps),
         trajectory=SimpleNamespace(termination=termination),
     )
-
-
-class TestAssembleTokenWeights:
-    def test_normalization_preserves_base_mass(self):
-        env = _mask_env([TurnRecord(2, 4, "invalid_call", None)])
-        weights, stats = assemble_token_weights(
-            env, base_mask=[1.0] * 6, n_tokens=6, rules=[InvalidCallMask()]
-        )
-        # c = Σbase/Σ(base×α) = 6/4 = 1.5，逐点缩放全部未 mask token，归一保持 Σweights == Σbase
-        assert weights == [1.5, 1.5, 0.0, 0.0, 1.5, 1.5]
-        assert stats["masked_turns"] == 1
-        assert stats["masked_frac"] == pytest.approx(2 / 6)
-
-    @pytest.mark.parametrize("termination", ["infra_error", "context_overlong"])
-    def test_governance_termination_all_zero(self, termination: str):
-        env = _mask_env(termination=termination)
-        weights, _ = assemble_token_weights(
-            env, base_mask=[1.0] * 6, n_tokens=6, rules=[InvalidCallMask()]
-        )
-        assert weights == [0.0] * 6
-
-    @pytest.mark.parametrize("termination", ["iteration_cap", "submitted"])
-    def test_other_terminations_unaffected(self, termination: str):
-        env = _mask_env(termination=termination)
-        weights, stats = assemble_token_weights(
-            env, base_mask=[1.0] * 6, n_tokens=6, rules=[InvalidCallMask()]
-        )
-        assert weights == [1.0] * 6
-        assert stats["masked_frac"] == 0.0
-
-    def test_all_zero_base_mask_no_division_by_zero(self):
-        env = _mask_env([TurnRecord(0, 2, "invalid_call", None)])
-        weights, stats = assemble_token_weights(
-            env, base_mask=[0.0] * 6, n_tokens=6, rules=[InvalidCallMask()]
-        )
-        assert weights == [0.0] * 6
-        assert stats["masked_frac"] == 0.0
-
-    def test_fully_masked_trajectory_all_zero(self):
-        env = _mask_env([TurnRecord(0, 2, "invalid_call", None)])
-        weights, stats = assemble_token_weights(
-            env, base_mask=[1.0, 1.0], n_tokens=2, rules=[InvalidCallMask()]
-        )
-        assert weights == [0.0, 0.0]
-        assert stats["masked_turns"] == 1
-        assert stats["masked_frac"] == 1.0
-
-    def test_masked_turns_counts_each_hit_turn(self):
-        env = _mask_env(
-            [
-                TurnRecord(0, 2, "invalid_call", None),
-                TurnRecord(2, 4, "step", None),
-                TurnRecord(4, 6, "invalid_call", None),
-            ]
-        )
-        _, stats = assemble_token_weights(
-            env, base_mask=[1.0] * 6, n_tokens=6, rules=[InvalidCallMask()]
-        )
-        assert stats["masked_turns"] == 2
-
-    def test_masked_turns_with_duplicate_action_rule(self):
-        steps = [_step("execute_bash", BASH) for _ in range(3)]
-        turns = [TurnRecord(i * 2, i * 2 + 2, "step", i) for i in range(3)]
-        env = _mask_env(turns, steps)
-        weights, stats = assemble_token_weights(
-            env, base_mask=[1.0] * 6, n_tokens=6, rules=ALL_RULES
-        )
-        # 第 3 次同签名动作命中，c = 6/4
-        assert weights == [1.5, 1.5, 1.5, 1.5, 0.0, 0.0]
-        assert stats["masked_turns"] == 1
 
 
 from collections import defaultdict  # noqa: E402
@@ -326,9 +293,9 @@ class _FakeTrainer(SWEGRPOTrainer):
         pass
 
 
-def _bare_trainer(rules, environments):
+def _bare_trainer(*, use_process_mask: bool, environments=None):
     trainer = _FakeTrainer()
-    trainer._process_mask_rules = rules
+    trainer._use_process_mask = use_process_mask
     if environments is not None:
         trainer.environments = environments
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
@@ -336,56 +303,157 @@ def _bare_trainer(rules, environments):
     return trainer
 
 
+def test_process_mask_requires_liger(monkeypatch):
+    monkeypatch.setattr(
+        GRPOTrainer,
+        "__init__",
+        lambda self, *args, **kwargs: setattr(self, "use_liger_kernel", False),
+    )
+    with pytest.raises(ValueError, match="requires use_liger_kernel=true"):
+        SWEGRPOTrainer(max_consecutive_protocol_errors=5, use_process_mask=True)
+
+
 class TestGenerateAndScoreCompletionsOverride:
-    def test_no_rules_returns_output_untouched(self, monkeypatch):
+    def test_disabled_process_mask_returns_output_untouched(self, monkeypatch):
         output = {"completion_mask": torch.ones(1, 2, dtype=torch.long)}
-        monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: output)
-        # environments 故意不设置：无规则时覆写不应读取它
-        trainer = _bare_trainer([], None)
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        trainer = _bare_trainer(use_process_mask=False)
         assert trainer._generate_and_score_completions([]) is output
 
     def test_misaligned_environments_raise(self, monkeypatch):
         output = {
             "completion_mask": torch.ones(2, 3, dtype=torch.long),
             "tool_mask": torch.ones(2, 3, dtype=torch.long),
+            "advantages": torch.ones(2),
         }
-        monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: output)
-        trainer = _bare_trainer([InvalidCallMask()], [_mask_env()])
-        with pytest.raises(RuntimeError, match="aligned environments"):
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        trainer = _bare_trainer(use_process_mask=True, environments=[_mask_env()])
+        with pytest.raises(RuntimeError, match="process mask requires"):
             trainer._generate_and_score_completions([])
 
-    def test_missing_tool_mask_raises(self, monkeypatch):
-        output = {"completion_mask": torch.ones(1, 3, dtype=torch.long)}
-        monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: output)
-        trainer = _bare_trainer([InvalidCallMask()], [_mask_env()])
-        with pytest.raises(RuntimeError, match="tool_mask"):
-            trainer._generate_and_score_completions([])
+    def test_trainer_passes_each_advantage_to_process_module(self, monkeypatch):
+        completion_mask = torch.tensor([[1, 1, 1], [1, 1, 1]])
+        tool_mask = torch.tensor([[1, 1, 1], [1, 0, 1]])
+        output = {
+            "completion_mask": completion_mask,
+            "tool_mask": tool_mask,
+            "advantages": torch.tensor([0.5, -0.25]),
+        }
+        envs = [_mask_env(), _mask_env()]
+        calls = []
 
-    def test_token_weights_injected_and_metrics_appended(self, monkeypatch):
-        completion_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 1, 1], [1, 1, 0, 0]])
-        tool_mask = torch.tensor([[1, 1, 1, 1], [1, 0, 1, 1], [1, 1, 1, 1]])
-        output = {"completion_mask": completion_mask, "tool_mask": tool_mask}
-        monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: output)
-        rules = [InvalidCallMask()]
-        envs = [
-            _mask_env([TurnRecord(0, 2, "invalid_call", None)]),
-            _mask_env(termination="infra_error"),
-            # 规则全 mask 但非 governance 终止：不计入 governance_masked
-            _mask_env([TurnRecord(0, 2, "invalid_call", None)]),
-        ]
-        trainer = _bare_trainer(rules, envs)
+        def fake_build(**kwargs):
+            calls.append(kwargs)
+            return list(kwargs["base_mask"]), ProcessMaskStats(0, 0, 0, 0.0, False)
+
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        monkeypatch.setattr("siete_rl.trainer.build_process_token_weights", fake_build)
+        trainer = _bare_trainer(use_process_mask=True, environments=envs)
         result = trainer._generate_and_score_completions([])
 
-        expected0, stats0 = assemble_token_weights(envs[0], base_mask=[1.0, 1.0, 1.0], n_tokens=3, rules=rules)
-        expected1, stats1 = assemble_token_weights(envs[1], base_mask=[1.0, 0.0, 1.0, 1.0], n_tokens=4, rules=rules)
-        expected2, stats2 = assemble_token_weights(envs[2], base_mask=[1.0, 1.0], n_tokens=2, rules=rules)
-        assert result["token_weights"].tolist() == [expected0 + [0.0], expected1, expected2 + [0.0, 0.0]]
+        assert result["token_weights"].tolist() == [[1.0, 1.0, 1.0], [1.0, 0.0, 1.0]]
+        assert [call["advantage"] for call in calls] == [0.5, -0.25]
+        assert calls[0]["termination"] == envs[0].trajectory.termination
 
-        frac_sum = stats0["masked_frac"] + stats1["masked_frac"] + stats2["masked_frac"]
+    def test_truncated_governance_row_uses_full_padded_width(self, monkeypatch):
+        output = {
+            "completion_mask": torch.zeros(1, 4, dtype=torch.long),
+            "tool_mask": torch.zeros(1, 4, dtype=torch.long),
+            "advantages": torch.tensor([0.5]),
+        }
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        trainer = _bare_trainer(
+            use_process_mask=True,
+            environments=[
+                _mask_env(
+                    turn_records=[TurnRecord(1, 3, "invalid_call", None)],
+                    termination="context_overlong",
+                )
+            ],
+        )
+
+        result = trainer._generate_and_score_completions([])
+
+        assert result["token_weights"].tolist() == [[0.0, 0.0, 0.0, 0.0]]
+        assert trainer._metrics["train"]["process_mask/governance_masked"] == [1.0]
+
+    def test_process_mask_stats_are_aggregated_without_recomputing_policy(self):
+        trainer = _bare_trainer(use_process_mask=True)
+        trainer._record_process_mask_metrics(
+            [
+                ProcessMaskStats(3, 2, 0, 0.25, False),
+                ProcessMaskStats(4, 0, 4, 0.00, False),
+                ProcessMaskStats(1, 0, 0, 1.00, True),
+            ]
+        )
         metrics = trainer._metrics["train"]
-        assert metrics["process_mask/masked_token_frac"] == [pytest.approx(frac_sum / 3)]
-        assert metrics["process_mask/masked_turns"] == [2.0]
+        assert metrics["process_mask/candidate_turns"] == [8.0]
+        assert metrics["process_mask/applied_turns"] == [2.0]
+        assert metrics["process_mask/retained_negative_turns"] == [4.0]
+        assert metrics["process_mask/masked_token_frac"] == [pytest.approx(1.25 / 3)]
         assert metrics["process_mask/governance_masked"] == [1.0]
+
+    @pytest.mark.parametrize("missing", ["tool_mask", "advantages"])
+    def test_enabled_process_mask_requires_parent_fields(self, monkeypatch, missing):
+        output = {
+            "completion_mask": torch.ones(1, 3),
+            "tool_mask": torch.ones(1, 3),
+            "advantages": torch.tensor([0.5]),
+        }
+        output.pop(missing)
+        monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: output)
+        trainer = _bare_trainer(use_process_mask=True, environments=[_mask_env()])
+        with pytest.raises(RuntimeError, match="process mask requires"):
+            trainer._generate_and_score_completions([])
+
+    @pytest.mark.parametrize(
+        ("tool_mask", "advantages"),
+        [
+            (torch.ones(1, 3), torch.ones(2)),
+            (torch.ones(2, 3), torch.ones(2, 1)),
+        ],
+        ids=["broadcast-tool-mask", "column-advantages"],
+    )
+    def test_enabled_process_mask_requires_exact_parent_shapes(
+        self, monkeypatch, tool_mask, advantages
+    ):
+        output = {
+            "completion_mask": torch.ones(2, 3),
+            "tool_mask": tool_mask,
+            "advantages": advantages,
+        }
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        trainer = _bare_trainer(
+            use_process_mask=True,
+            environments=[_mask_env(), _mask_env()],
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            trainer._generate_and_score_completions([])
+
+        assert str(exc_info.value) == (
+            "process mask requires aligned environments, tool_mask, and advantages"
+        )
 
 
 class TestComputeLigerLossOverride:
@@ -401,9 +469,9 @@ class TestComputeLigerLossOverride:
         monkeypatch.setattr(GRPOTrainer, "compute_liger_loss", fake_compute_liger_loss)
         return captured
 
-    def test_rules_and_token_weights_replace_tool_mask(self, monkeypatch):
+    def test_enabled_mask_and_token_weights_replace_tool_mask(self, monkeypatch):
         captured = self._capture_parent(monkeypatch)
-        trainer = _bare_trainer([InvalidCallMask()], None)
+        trainer = _bare_trainer(use_process_mask=True)
         token_weights = torch.ones(1, 3)
         inputs = {"completion_mask": torch.ones(1, 3), "token_weights": token_weights}
         assert trainer.compute_liger_loss(None, inputs) == "loss"
@@ -412,34 +480,33 @@ class TestComputeLigerLossOverride:
         # 原 dict 不被修改
         assert "tool_mask" not in inputs
 
-    def test_no_rules_passes_tool_mask_through(self, monkeypatch):
+    def test_disabled_mask_passes_tool_mask_through(self, monkeypatch):
         captured = self._capture_parent(monkeypatch)
-        trainer = _bare_trainer([], None)
+        trainer = _bare_trainer(use_process_mask=False)
         tool_mask = torch.ones(1, 3)
         inputs = {"tool_mask": tool_mask, "token_weights": torch.zeros(1, 3)}
         trainer.compute_liger_loss(None, inputs)
         assert captured["inputs"]["tool_mask"] is tool_mask
 
-    def test_rules_without_token_weights_passthrough(self, monkeypatch):
+    def test_enabled_mask_without_token_weights_passthrough(self, monkeypatch):
         captured = self._capture_parent(monkeypatch)
-        trainer = _bare_trainer([InvalidCallMask()], None)
+        trainer = _bare_trainer(use_process_mask=True)
         inputs = {"completion_mask": torch.ones(1, 3)}
         trainer.compute_liger_loss(None, inputs)
         assert "tool_mask" not in captured["inputs"]
 
 
 import json  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 from siete_rl.config import load_config  # noqa: E402
 from siete_rl.recording import STEP_METRIC_KEYS, RunRecorder  # noqa: E402
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs/grpo_swegym_openhands_7b_lora.yaml"
-
 PROCESS_MASK_STEP_METRICS = {
+    "process_mask_candidate_turns": "process_mask/candidate_turns",
+    "process_mask_applied_turns": "process_mask/applied_turns",
+    "process_mask_retained_negative_turns": "process_mask/retained_negative_turns",
     "process_mask_masked_token_frac": "process_mask/masked_token_frac",
-    "process_mask_masked_turns": "process_mask/masked_turns",
     "process_mask_governance_masked": "process_mask/governance_masked",
 }
 
@@ -463,20 +530,26 @@ class TestProcessMaskStepMetricKeys:
         assert recorder.record_metrics(
             step=1,
             logs={
+                "process_mask/candidate_turns": 8.0,
+                "process_mask/applied_turns": 2.0,
+                "process_mask/retained_negative_turns": 4.0,
                 "process_mask/masked_token_frac": 0.25,
-                "process_mask/masked_turns": 3.0,
                 "process_mask/governance_masked": 1.0,
             },
         )
         row = json.loads(recorder.metrics_path.read_text(encoding="utf-8").strip())
+        assert row["process_mask_candidate_turns"] == 8.0
+        assert row["process_mask_applied_turns"] == 2.0
+        assert row["process_mask_retained_negative_turns"] == 4.0
         assert row["process_mask_masked_token_frac"] == 0.25
-        assert row["process_mask_masked_turns"] == 3.0
         assert row["process_mask_governance_masked"] == 1.0
 
     def test_metrics_row_fields_none_when_logs_absent(self, tmp_path: Path):
         recorder = _recorder(tmp_path, "pm-run")
         assert recorder.record_metrics(step=1, logs={"loss": 0.5})
         row = json.loads(recorder.metrics_path.read_text(encoding="utf-8").strip())
+        assert row["process_mask_candidate_turns"] is None
+        assert row["process_mask_applied_turns"] is None
+        assert row["process_mask_retained_negative_turns"] is None
         assert row["process_mask_masked_token_frac"] is None
-        assert row["process_mask_masked_turns"] is None
         assert row["process_mask_governance_masked"] is None
