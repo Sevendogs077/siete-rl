@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
+import siete_rl.eval as eval_module
 from siete_rl.eval import (
     EvalDockerSandbox,
     EvalError,
@@ -76,6 +79,24 @@ def test_eval_base_rejects_other_spellings(value) -> None:
         parse_strict_bool(value)
 
 
+def test_eval_worker_count_defaults_and_accepts_positive_integer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EVAL_ROLLOUT_WORKERS", raising=False)
+    assert eval_module._positive_env_int("EVAL_ROLLOUT_WORKERS") == 1
+    monkeypatch.setenv("EVAL_ROLLOUT_WORKERS", "4")
+    assert eval_module._positive_env_int("EVAL_ROLLOUT_WORKERS") == 4
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "four"])
+def test_eval_worker_count_rejects_non_positive_integer(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("EVAL_ROLLOUT_WORKERS", value)
+    with pytest.raises(EvalError, match="positive integer"):
+        eval_module._positive_env_int("EVAL_ROLLOUT_WORKERS")
+
+
 def test_sampler_fallback_is_explicit_and_session_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EVAL_SAMPLER_BACKEND", raising=False)
     monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
@@ -106,6 +127,139 @@ def test_harness_resolver_fails_closed_without_eval_harness_python(
     monkeypatch.delenv("EVAL_HARNESS_PYTHON", raising=False)
     with pytest.raises(EvalError, match="EVAL_HARNESS_PYTHON"):
         resolve_harness()
+
+
+def test_official_harness_receives_configured_worker_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[str] = []
+
+    def run(command, **kwargs):
+        del kwargs
+        captured.extend(command)
+        (tmp_path / "result.eval-workers.json").write_text("{}\n", encoding="utf-8")
+        return eval_module.subprocess.CompletedProcess(command, 0, "ok")
+
+    monkeypatch.setattr(eval_module.subprocess, "run", run)
+    report = eval_module.run_official_harness(
+        output_dir=tmp_path,
+        predictions_path=tmp_path / "predictions.jsonl",
+        task_ids=["owner__repo-1"],
+        run_id="eval-workers",
+        timeout_sec=60,
+        max_workers=4,
+        harness_root=tmp_path,
+        harness_python=tmp_path / "python",
+    )
+    worker_flag = captured.index("--max_workers")
+    assert captured[worker_flag : worker_flag + 2] == ["--max_workers", "4"]
+    assert report == {}
+
+
+def test_execute_propagates_worker_settings_to_metadata_and_both_variants(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    current_protocol = protocol()
+    run = SimpleNamespace(
+        root=run_root,
+        protocol=current_protocol,
+        base_model_path=tmp_path / "model",
+        adapter_path=run_root,
+        rank=8,
+    )
+    variant_workers: list[tuple[str, int]] = []
+    harness_workers: list[int] = []
+
+    class Tokenizer:
+        def apply_chat_template(self, *_args, **_kwargs):
+            return [1, 2]
+
+    class Generator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def generate(self, *_args):
+            return [[7]], None
+
+    class Server:
+        def __init__(self, *_args, **_kwargs):
+            self.pid = None
+
+        def start(self):
+            self.pid = 123
+
+        def close(self):
+            self.pid = None
+            return {"status": "terminated"}
+
+    def evaluate(**kwargs):
+        variant_workers.append((kwargs["name"], kwargs["rollout_workers"]))
+        return [EvalOutcome("task-0", "patch", "submitted", None, [], 0.0)]
+
+    def run_harness(**kwargs):
+        harness_workers.append(kwargs["max_workers"])
+        if kwargs["predictions_path"] == "gold":
+            return {"resolved_instances": 1}
+        return {
+            "total_instances": 1,
+            "completed_instances": 1,
+            "resolved_instances": 0,
+            "empty_patch_instances": 0,
+            "error_instances": 0,
+        }
+
+    monkeypatch.setenv("EVAL_BASE", "True")
+    monkeypatch.setenv("EVAL_ROLLOUT_WORKERS", "5")
+    monkeypatch.setenv("EVAL_HARNESS_WORKERS", "3")
+    monkeypatch.delenv("EVAL_TASK_IDS", raising=False)
+    monkeypatch.setattr(eval_module, "load_eval_run", lambda *_args: run)
+    monkeypatch.setattr(
+        eval_module,
+        "load_verified_rows",
+        lambda *_args: [{"instance_id": "task-0"}],
+    )
+    monkeypatch.setattr(
+        eval_module,
+        "resolve_harness",
+        lambda: (tmp_path, tmp_path / "python"),
+    )
+    monkeypatch.setattr(eval_module, "preflight", lambda **_kwargs: {})
+    monkeypatch.setattr(eval_module, "SubprocessDockerClient", lambda: object())
+    monkeypatch.setattr(eval_module.atexit, "register", lambda *_args: None)
+    monkeypatch.setattr(eval_module, "sweep_run_containers", lambda *_args: [])
+    monkeypatch.setattr(eval_module, "run_official_harness", run_harness)
+    monkeypatch.setattr(
+        eval_module,
+        "AutoTokenizer",
+        SimpleNamespace(from_pretrained=lambda *_args, **_kwargs: Tokenizer()),
+    )
+    monkeypatch.setattr(
+        eval_module,
+        "install_openhands_tool_protocol",
+        lambda tokenizer: tokenizer,
+    )
+    monkeypatch.setattr(
+        eval_module,
+        "public_sample_from_row",
+        lambda *_args: SimpleNamespace(task=object()),
+    )
+    monkeypatch.setattr(eval_module, "build_prompt", lambda *_args: [])
+    monkeypatch.setattr(eval_module, "run_adapter_reference", lambda *_args: [7])
+    monkeypatch.setattr(eval_module, "HTTPTokenGenerator", Generator)
+    monkeypatch.setattr(eval_module, "build_vllm_command", lambda **_kwargs: [])
+    monkeypatch.setattr(eval_module, "VLLMServer", Server)
+    monkeypatch.setattr(eval_module, "_free_port", lambda: 12345)
+    monkeypatch.setattr(eval_module, "evaluate_variant", evaluate)
+    monkeypatch.setattr(eval_module, "_git_metadata", lambda *_args: {})
+
+    output_root = eval_module.execute(run_root)
+    metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["protocol"]["request_concurrency"] == 5
+    assert metadata["protocol"]["official_harness_workers"] == 3
+    assert variant_workers == [("base", 5), ("candidate", 5)]
+    assert harness_workers == [3, 3, 3]
 
 
 # 依赖 .external 下的真实评测 harness 检出。
@@ -242,6 +396,176 @@ def test_predictions_keep_empty_and_infrastructure_failures() -> None:
         {"instance_id": "a", "model_name_or_path": "candidate", "model_patch": ""},
         {"instance_id": "b", "model_name_or_path": "candidate", "model_patch": ""},
     ]
+
+
+def test_evaluate_variant_runs_multiple_agent_loops_concurrently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [{"instance_id": f"task-{index}"} for index in range(2)]
+    lock = threading.Lock()
+    concurrent = threading.Event()
+    active = 0
+    peak_active = 0
+
+    def make_sample(row, *_args):
+        return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
+
+    def run_loop(*, sample, **_kwargs):
+        nonlocal active, peak_active
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+            if active == 2:
+                concurrent.set()
+        concurrent.wait(timeout=1)
+        with lock:
+            active -= 1
+        return EvalOutcome(sample.task.task_id, "patch", "submitted", None, [], 0.0)
+
+    monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
+    monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
+    eval_module.evaluate_variant(
+        name="candidate",
+        model_name="candidate",
+        rows=rows,
+        run=SimpleNamespace(protocol=protocol()),
+        tokenizer=object(),
+        docker_client=Client([]),
+        server_url="http://unused",
+        eval_run_id="eval",
+        output_dir=tmp_path,
+        rollout_workers=2,
+    )
+    assert peak_active == 2
+
+
+def test_evaluate_variant_single_worker_prepares_each_sample_lazily(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [{"instance_id": "task-0"}, {"instance_id": "task-1"}]
+    events: list[str] = []
+
+    def make_sample(row, *_args):
+        task_id = row["instance_id"]
+        events.append(f"prepare:{task_id}")
+        if task_id == "task-1":
+            raise EvalError("missing image")
+        return SimpleNamespace(task=SimpleNamespace(task_id=task_id))
+
+    def run_loop(*, sample, **_kwargs):
+        events.append(f"run:{sample.task.task_id}")
+        return EvalOutcome(sample.task.task_id, "patch", "submitted", None, [], 0.0)
+
+    monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
+    monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
+    with pytest.raises(EvalError, match="missing image"):
+        eval_module.evaluate_variant(
+            name="candidate",
+            model_name="candidate",
+            rows=rows,
+            run=SimpleNamespace(protocol=protocol()),
+            tokenizer=object(),
+            docker_client=Client([]),
+            server_url="http://unused",
+            eval_run_id="eval",
+            output_dir=tmp_path,
+            rollout_workers=1,
+        )
+    assert events == ["prepare:task-0", "run:task-0", "prepare:task-1"]
+    state = json.loads((tmp_path / "rollout-state.json").read_text(encoding="utf-8"))
+    assert state["completed"] == 1
+
+
+def test_evaluate_variant_preserves_order_when_workers_finish_out_of_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [{"instance_id": f"task-{index}"} for index in range(4)]
+
+    def make_sample(row, *_args):
+        return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
+
+    def run_loop(*, sample, **_kwargs):
+        index = int(sample.task.task_id.rsplit("-", 1)[1])
+        time.sleep((3 - index) * 0.01)
+        infrastructure_error = "docker unavailable" if index == 2 else None
+        patch = "" if infrastructure_error else f"patch-{index}"
+        termination = "infra_error" if infrastructure_error else "submitted"
+        return EvalOutcome(
+            sample.task.task_id,
+            patch,
+            termination,
+            infrastructure_error,
+            [],
+            0.0,
+        )
+
+    monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
+    monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
+    outcomes = eval_module.evaluate_variant(
+        name="candidate",
+        model_name="candidate",
+        rows=rows,
+        run=SimpleNamespace(protocol=protocol()),
+        tokenizer=object(),
+        docker_client=Client([]),
+        server_url="http://unused",
+        eval_run_id="eval",
+        output_dir=tmp_path,
+        rollout_workers=4,
+    )
+    expected_ids = ["task-0", "task-1", "task-2", "task-3"]
+    assert [outcome.task_id for outcome in outcomes] == expected_ids
+    state = json.loads((tmp_path / "rollout-state.json").read_text(encoding="utf-8"))
+    assert state["completed"] == 4
+    assert [item["instance_id"] for item in state["outcomes"]] == expected_ids
+    predictions = [
+        json.loads(line)
+        for line in (tmp_path / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["instance_id"] for item in predictions] == expected_ids
+    assert predictions[2]["model_patch"] == ""
+
+
+def test_evaluate_variant_cancels_pending_tasks_when_progress_write_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [{"instance_id": f"task-{index}"} for index in range(6)]
+    release = threading.Event()
+    lock = threading.Lock()
+    started: list[str] = []
+
+    def make_sample(row, *_args):
+        return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
+
+    def run_loop(*, sample, **_kwargs):
+        with lock:
+            started.append(sample.task.task_id)
+        if sample.task.task_id != "task-0":
+            release.wait(timeout=1)
+        return EvalOutcome(sample.task.task_id, "patch", "submitted", None, [], 0.0)
+
+    def fail_write(*_args, **_kwargs):
+        threading.Timer(0.1, release.set).start()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
+    monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
+    monkeypatch.setattr(eval_module, "_write_json", fail_write)
+    with pytest.raises(OSError, match="disk full"):
+        eval_module.evaluate_variant(
+            name="candidate",
+            model_name="candidate",
+            rows=rows,
+            run=SimpleNamespace(protocol=protocol()),
+            tokenizer=object(),
+            docker_client=Client([]),
+            server_url="http://unused",
+            eval_run_id="eval",
+            output_dir=tmp_path,
+            rollout_workers=2,
+        )
+    assert "task-0" in started
+    assert len(started) < len(rows)
 
 
 def test_comparison_only_claims_delta_for_complete_local_runs() -> None:

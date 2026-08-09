@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -139,6 +140,19 @@ def parse_strict_bool(value: str | None, *, default: bool = False) -> bool:
     if value == "False":
         return False
     raise EvalError("EVAL_BASE must be exactly 'True' or 'False'")
+
+
+def _positive_env_int(name: str, *, default: int = 1) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise EvalError(f"{name} must be a positive integer") from exc
+    if parsed < 1:
+        raise EvalError(f"{name} must be a positive integer")
+    return parsed
 
 
 def load_eval_run(path: str | Path) -> EvalRun:
@@ -566,6 +580,7 @@ def run_official_harness(
     task_ids: Sequence[str],
     run_id: str,
     timeout_sec: int,
+    max_workers: int = 1,
     harness_root: Path,
     harness_python: Path,
 ) -> dict[str, Any]:
@@ -582,7 +597,7 @@ def run_official_harness(
         "--predictions_path",
         str(predictions_path),
         "--max_workers",
-        "1",
+        str(max_workers),
         "--timeout",
         str(timeout_sec),
         "--cache_level",
@@ -731,6 +746,7 @@ def evaluate_variant(
     server_url: str,
     eval_run_id: str,
     output_dir: Path,
+    rollout_workers: int = 1,
 ) -> list[EvalOutcome]:
     generator = HTTPTokenGenerator(
         base_url=server_url,
@@ -740,10 +756,10 @@ def evaluate_variant(
         seed=run.protocol.seed,
         repetition_penalty=run.protocol.repetition_penalty,
     )
-    outcomes: list[EvalOutcome] = []
-    for row in rows:
-        sample = public_sample_from_row(row, run.protocol, docker_client)
-        outcome = run_agent_loop(
+    outcomes_by_index: dict[int, EvalOutcome] = {}
+
+    def evaluate_sample(sample: Sample) -> EvalOutcome:
+        return run_agent_loop(
             sample=sample,
             tokenizer=tokenizer,
             generator=generator,
@@ -751,16 +767,40 @@ def evaluate_variant(
             docker_client=docker_client,
             eval_run_id=eval_run_id,
         )
-        outcomes.append(outcome)
+
+    def record(index: int, outcome: EvalOutcome) -> None:
+        outcomes_by_index[index] = outcome
+        ordered = [outcomes_by_index[key] for key in sorted(outcomes_by_index)]
         _write_json(
             output_dir / "rollout-state.json",
             {
                 "variant": name,
-                "completed": len(outcomes),
+                "completed": len(ordered),
                 "total": len(rows),
-                "outcomes": [_outcome_record(item) for item in outcomes],
+                "outcomes": [_outcome_record(item) for item in ordered],
             },
         )
+
+    if rollout_workers == 1:
+        for index, row in enumerate(rows):
+            sample = public_sample_from_row(row, run.protocol, docker_client)
+            record(index, evaluate_sample(sample))
+    elif rows:
+        samples = [public_sample_from_row(row, run.protocol, docker_client) for row in rows]
+        executor = ThreadPoolExecutor(max_workers=rollout_workers)
+        future_indices = {}
+        try:
+            for index, sample in enumerate(samples):
+                future_indices[executor.submit(evaluate_sample, sample)] = index
+            for future in as_completed(future_indices):
+                record(future_indices[future], future.result())
+        except BaseException:
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
+
+    outcomes = [outcomes_by_index[index] for index in range(len(rows))]
     predictions = build_predictions(
         outcomes,
         model_name=model_name,
@@ -830,6 +870,8 @@ def preflight(*, gpu: str, harness_root: Path, harness_python: Path) -> dict[str
 def execute(run_root: str | Path) -> Path:
     run = load_eval_run(run_root)
     eval_base = parse_strict_bool(os.environ.get("EVAL_BASE"), default=False)
+    rollout_workers = _positive_env_int("EVAL_ROLLOUT_WORKERS")
+    harness_workers = _positive_env_int("EVAL_HARNESS_WORKERS")
     task_ids_value = os.environ.get("EVAL_TASK_IDS")
     task_ids = None
     if task_ids_value is not None:
@@ -870,7 +912,8 @@ def execute(run_root: str | Path) -> Path:
             "seed": run.protocol.seed,
             "seed_guarantee": "recorded input; vLLM does not promise cross-process token identity",
             "rollouts_per_task": 1,
-            "request_concurrency": 1,
+            "request_concurrency": rollout_workers,
+            "official_harness_workers": harness_workers,
             "max_prompt_length": run.protocol.max_prompt_length,
             "max_completion_length": run.protocol.max_completion_length,
             "max_model_length": run.protocol.max_model_length,
@@ -892,6 +935,7 @@ def execute(run_root: str | Path) -> Path:
             task_ids=[selected_ids[0]],
             run_id=f"{eval_run_id}-gold",
             timeout_sec=run.protocol.grader_timeout_sec,
+            max_workers=harness_workers,
             harness_root=harness_root,
             harness_python=harness_python,
         )
@@ -952,6 +996,7 @@ def execute(run_root: str | Path) -> Path:
                     server_url=lora_url,
                     eval_run_id=eval_run_id,
                     output_dir=base_dir,
+                    rollout_workers=rollout_workers,
                 )
                 _write_json(base_dir / "metadata.json", _variant_metadata("base", base_outcomes))
                 base_report = run_official_harness(
@@ -960,6 +1005,7 @@ def execute(run_root: str | Path) -> Path:
                     task_ids=selected_ids,
                     run_id=f"{eval_run_id}-base",
                     timeout_sec=run.protocol.grader_timeout_sec,
+                    max_workers=harness_workers,
                     harness_root=harness_root,
                     harness_python=harness_python,
                 )
@@ -975,6 +1021,7 @@ def execute(run_root: str | Path) -> Path:
                 server_url=lora_url,
                 eval_run_id=eval_run_id,
                 output_dir=candidate_dir,
+                rollout_workers=rollout_workers,
             )
             _write_json(
                 candidate_dir / "metadata.json",
@@ -986,6 +1033,7 @@ def execute(run_root: str | Path) -> Path:
                 task_ids=selected_ids,
                 run_id=f"{eval_run_id}-candidate",
                 timeout_sec=run.protocol.grader_timeout_sec,
+                max_workers=harness_workers,
                 harness_root=harness_root,
                 harness_python=harness_python,
             )
@@ -1013,6 +1061,8 @@ def execute(run_root: str | Path) -> Path:
                     gpu=gpu,
                     harness_root=harness_root,
                     harness_python=harness_python,
+                    rollout_workers=rollout_workers,
+                    harness_workers=harness_workers,
                 )
             candidate_report = _run_standalone_variant(
                 name="candidate",
@@ -1026,6 +1076,8 @@ def execute(run_root: str | Path) -> Path:
                 gpu=gpu,
                 harness_root=harness_root,
                 harness_python=harness_python,
+                rollout_workers=rollout_workers,
+                harness_workers=harness_workers,
             )
         comparison = build_comparison(
             candidate_report=candidate_report, base_report=base_report
@@ -1076,6 +1128,8 @@ def _run_standalone_variant(
     gpu: str,
     harness_root: Path,
     harness_python: Path,
+    rollout_workers: int,
+    harness_workers: int,
 ) -> dict[str, Any]:
     output_dir = output_root / name
     output_dir.mkdir(exist_ok=True)
@@ -1099,6 +1153,7 @@ def _run_standalone_variant(
             server_url=base_url,
             eval_run_id=eval_run_id,
             output_dir=output_dir,
+            rollout_workers=rollout_workers,
         )
         metadata = _variant_metadata(name, outcomes)
         metadata["vllm_cleanup"] = server.close()
@@ -1112,6 +1167,7 @@ def _run_standalone_variant(
         task_ids=[_required_row_string(row, "instance_id") for row in rows],
         run_id=f"{eval_run_id}-{name}",
         timeout_sec=run.protocol.grader_timeout_sec,
+        max_workers=harness_workers,
         harness_root=harness_root,
         harness_python=harness_python,
     )

@@ -50,7 +50,14 @@ bash scripts/prepare.sh          # pull task images and generate assets
 bash scripts/qualify.sh          # check config, data, images, model, and GPU
 CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # start training
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # start evaluation
+# opt in to task-level rollout and official-harness concurrency
+EVAL_ROLLOUT_WORKERS=4 EVAL_HARNESS_WORKERS=4 CUDA_VISIBLE_DEVICES=0 \
+  bash scripts/eval.sh outputs/<run-id>
 ```
+
+Both evaluation worker counts default to `1`; start with `4` on an A100 80 GB host.
+Each simultaneous evaluation process has its own worker pool, so size the combined
+Docker CPU and memory limits across all running evaluations.
 
 > [!WARNING]
 > The agent executes model-generated code. Only connect a dedicated, non-production Docker daemon.
