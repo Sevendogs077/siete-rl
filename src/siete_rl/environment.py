@@ -89,6 +89,12 @@ class SWEEnvironment:
     def frozen_patch(self) -> str | None:
         return self._frozen_patch
 
+    @property
+    def scorable(self) -> bool:
+        """该 episode 的 reward 是否能可靠归因给 policy。"""
+
+        return self._finalized and self._infrastructure_error is None
+
     def reset(self, task_id: str, **kwargs: object) -> None:
         """Start a fresh repository episode for one public task ID."""
 
@@ -222,14 +228,31 @@ class SWEEnvironment:
             steps=list(self._steps),
             termination=termination,
         )
-        if termination != "submitted":
+        if termination == "infra_error":
             self._close_rollout()
             self._reward = 0.0
             self._finalized = True
             return self._reward
 
+        if termination != "submitted":
+            if self._sandbox is None:
+                raise RuntimeError("healthy non-submit episode is missing its sandbox")
+            try:
+                self._frozen_patch = self._sandbox.get_diff()
+            except DockerRuntimeError as exc:
+                self._infrastructure_error = exc
+                self._close_rollout()
+                self._reward = 0.0
+                self._finalized = True
+                return self._reward
+            if termination == "context_overlong":
+                self._close_rollout()
+                self._reward = 0.0
+                self._finalized = True
+                return self._reward
+
         if self._frozen_patch is None:
-            raise RuntimeError("submitted episode is missing its frozen patch")
+            raise RuntimeError("settled episode is missing its frozen patch")
         self._close_rollout()
         if not self._frozen_patch.strip():
             self._reward = 0.0
@@ -242,14 +265,8 @@ class SWEEnvironment:
         try:
             self._verification = self._verifier.verify(self._frozen_patch)
         except DockerRuntimeError as exc:
-            # verifier 基础设施失败（容器、apply/pytest 超时等）降级为单样本 infra_error。
+            # verifier 基础设施失败只影响可评分性，不覆写 agent 的终止原因。
             self._infrastructure_error = exc
-            self._trajectory = Trajectory(
-                task_id=self._sample.task.task_id,
-                environment_id=self._sample.environment.environment_id,
-                steps=list(self._steps),
-                termination="infra_error",
-            )
             self._reward = 0.0
             self._finalized = True
             return self._reward

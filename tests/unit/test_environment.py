@@ -102,6 +102,62 @@ def test_finish_nonempty_patch_verifies_once() -> None:
     assert verifiers[0].calls == 1
 
 
+@pytest.mark.parametrize("termination", ["iteration_cap", "format_exhausted"])
+def test_healthy_non_submit_nonempty_patch_is_verified(termination: str) -> None:
+    env, task_id, sandboxes, verifiers = harness()
+    env.reset(task_id)
+    sandboxes[0].diff = "diff --git a/x b/x\n"
+    env._record_loop_exit(termination)
+
+    assert env._finalize([]) == 1.0
+    assert env.frozen_patch == "diff --git a/x b/x\n"
+    assert env.trajectory is not None
+    assert env.trajectory.termination == termination
+    assert verifiers[0].calls == 1
+
+
+def test_context_overlong_preserves_patch_without_verification() -> None:
+    env, task_id, sandboxes, verifiers = harness()
+    env.reset(task_id)
+    sandboxes[0].diff = "diff --git a/x b/x\n"
+    env._record_loop_exit("context_overlong")
+
+    assert env._finalize([]) == 0.0
+    assert env.frozen_patch == "diff --git a/x b/x\n"
+    assert env.trajectory is not None
+    assert env.trajectory.termination == "context_overlong"
+    assert not verifiers
+
+
+def test_iteration_cap_empty_patch_does_not_verify() -> None:
+    env, task_id, _, verifiers = harness()
+    env.reset(task_id)
+    env._record_loop_exit("iteration_cap")
+
+    assert env._finalize([]) == 0.0
+    assert env.frozen_patch == ""
+    assert env.trajectory is not None
+    assert env.trajectory.termination == "iteration_cap"
+    assert not verifiers
+
+
+def test_non_submit_diff_failure_is_sample_local_infra_error() -> None:
+    env, task_id, sandboxes, verifiers = harness()
+    env.reset(task_id)
+    env._record_loop_exit("iteration_cap")
+
+    def failing_diff() -> str:
+        raise ContainerExecError("failed to extract git diff (exit=128)")
+
+    sandboxes[0].get_diff = failing_diff
+
+    assert env._finalize([]) == 0.0
+    assert env.trajectory is not None
+    assert env.trajectory.termination == "iteration_cap"
+    assert env.scorable is False
+    assert not verifiers
+
+
 def test_finalize_layered_gives_partial_score() -> None:
     env = _make_submitted_env(reward_type="layered")
     reward = env._finalize(completion=None)
@@ -148,7 +204,7 @@ def test_finalize_degrades_tool_infra_error_to_zero_reward() -> None:
 
 
 def test_finalize_degrades_verifier_infra_error() -> None:
-    """verifier 基础设施失败（如离线 pytest 超时）：记 infra_error + reward 0，不传播。"""
+    """verifier 基础设施失败不覆写 agent 的 submitted termination。"""
 
     class FailingVerifier(Verifier):
         def verify(self, patch):
@@ -160,11 +216,12 @@ def test_finalize_degrades_verifier_infra_error() -> None:
     env.finish()
 
     assert env._finalize([]) == 0.0
-    assert env.trajectory.termination == "infra_error"
+    assert env.trajectory.termination == "submitted"
+    assert env.scorable is False
 
 
 def test_parallel_finalize_keeps_verifier_infra_error_sample_local() -> None:
-    """并行 verifier 中单样本 infra_error 降级为零分，不影响同组其他样本。"""
+    """并行 verifier 中单样本 infra_error 被 censor，不影响同组其他样本。"""
 
     class FailingVerifier(Verifier):
         def verify(self, patch):
@@ -188,8 +245,10 @@ def test_parallel_finalize_keeps_verifier_infra_error_sample_local() -> None:
         [None, None], [failed, passed], max_workers=2
     )
 
-    assert rewards == [0.0, 1.0]
-    assert failed.trajectory.termination == "infra_error"
+    assert rewards == [None, 1.0]
+    assert failed.trajectory.termination == "submitted"
+    assert failed.scorable is False
+    assert passed.scorable is True
     assert passed.trajectory.termination == "submitted"
 
 

@@ -57,14 +57,19 @@ def load_group_rows(output_dir: str | Path) -> list[dict[str, Any]]:
         if payload.get("state") != "completed" or not isinstance(rewards, list):
             continue
         numeric_rewards = [_number(value) for value in rewards]
-        if not numeric_rewards or any(value is None for value in numeric_rewards):
+        if not numeric_rewards or any(
+            raw is not None and numeric is None
+            for raw, numeric in zip(rewards, numeric_rewards, strict=True)
+        ):
             continue
         group_rewards = [float(value) for value in numeric_rewards if value is not None]
+        if not group_rewards:
+            continue
         reward_mean = fmean(group_rewards)
         reward_std = pstdev(group_rewards) if len(group_rewards) > 1 else 0.0
         degenerate = math.isclose(reward_std, 0.0)
         rewards_seen.extend(group_rewards)
-        rollouts_cumulative += len(group_rewards)
+        rollouts_cumulative += len(rewards)
         nondegenerate_groups += int(not degenerate)
         reward_ema = (
             reward_mean

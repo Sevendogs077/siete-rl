@@ -100,6 +100,7 @@ adapter_model.safetensors
 /tb_logs/
 
 # Docker and temporary local workspaces
+/.worktree/
 /.docker/
 /docker_tmp/
 /tmp/

@@ -107,6 +107,25 @@ def test_group_series_keeps_every_group_between_optimizer_steps(
     assert rows[-1]["nondegenerate_group_rate_cumulative"] == pytest.approx(1 / 3)
 
 
+def test_group_series_excludes_censored_rewards_without_dropping_group(
+    tmp_path: Path,
+) -> None:
+    group_dir = tmp_path / "rollouts" / "batch-0000" / "group-0000"
+    group_dir.mkdir(parents=True)
+    (group_dir / "group.json").write_text(
+        json.dumps({"state": "completed", "rewards": [None, 0.0, 1.0]}),
+        encoding="utf-8",
+    )
+
+    rows = load_group_rows(tmp_path)
+
+    assert len(rows) == 1
+    assert rows[0]["rollouts_cumulative"] == 3
+    assert rows[0]["reward_mean_group"] == 0.5
+    assert rows[0]["train_pass_rate_cumulative"] == 0.5
+    assert rows[0]["reward_std_group_population"] == 0.5
+
+
 def test_metric_reader_only_tolerates_a_truncated_last_line(tmp_path: Path) -> None:
     metrics = tmp_path / "metrics.jsonl"
     metrics.write_text('{"step": 1}\n{"step":', encoding="utf-8")

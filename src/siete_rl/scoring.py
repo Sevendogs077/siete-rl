@@ -8,9 +8,9 @@ pytest，用真实测试结果替代论文中的 LLM judge 语义判定。
   p = FAIL_TO_PASS 通过比例（新功能完成程度）；
   q = PASS_TO_PASS 通过比例（旧功能保留程度），未出现在 summary 里的
   P2P 测试（未收集/跳过/整文件 ERROR）按未通过计，方向保守。
-resolved 时 p=q=1，R = 1，公式在满分处无跳变；F2P 全过但 P2P 全挂时
-q=0，「只修新测试不管回归」拿不到部分分；大套件里个别回归按比率折扣，
-不会像 hard gate 那样直接归零。
+只有 verifier resolved 时 R = 1；unresolved 即使清单内 p=q=1，也按 verifier
+最终结论返回 0。F2P 全过但 P2P 全挂时 q=0，「只修新测试不管回归」
+拿不到部分分；大套件里个别回归按比率折扣，不会像 hard gate 那样直接归零。
 只重塑 reward 输入信号；GRPO 目标函数与 advantage 计算不变（论文贡献点 4）。
 """
 
@@ -107,4 +107,6 @@ def layered_score(
     p2p = {_match_key(t) for t in pass_to_pass}
     p = _count_matched(f2p, passed_keys) / len(f2p) if f2p else 1.0
     q = _count_matched(p2p, passed_keys) / len(p2p) if p2p else 1.0
+    if p == 1.0 and q == 1.0:
+        return 0.0
     return math.expm1(lambda_ * p) / math.expm1(lambda_) * q

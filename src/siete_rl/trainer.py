@@ -14,9 +14,10 @@
 4. overlong 撤出归因 ``context_overlong``，真实 tool call 重置连续计数；
 5. 循环出口为迭代耗尽的样本归因 ``iteration_cap``，并把全部归因写回环境；
 6. process mask：首段生成与每次 post-tool 生成各记录一条
-   ``TurnRecord``（token 区间 + step/invalid_call/plain_message 分类）到
-   ``environment.turn_records``；真实工具执行前快照 ``len(env._steps)``，
-   执行后按是否追加 Step 回填 ``step_index`` 或降级为 ``invalid_call``。
+   ``TurnRecord``（token 区间 + pending_action/step/invalid_call/plain_message
+   分类）到 ``environment.turn_records``；生成的真实调用先记为
+   ``pending_action``，真实工具执行前快照 ``len(env._steps)``，执行后按是否
+   追加 Step 原子回填为 ``step`` 与 ``step_index``，或降级为 ``invalid_call``。
 
 process mask 开启时，trainer 记录 turn facts，并在父类完成 reward/advantage 后调用
 ``process_mask.build_process_token_weights``；规则、governance 和 sign 语义全部由该纯模块拥有。
@@ -64,15 +65,16 @@ _PLAIN_MESSAGE_SENTINEL = "swe_agent_plain_message"
 
 # >>> swe_agent: process mask 的 turn 分类与记录 helper
 def _classify_turn(tool_calls: list) -> str:
+    """按生成态分类；真实 tool call 仅在执行成功后回填为 step。"""
     if tool_calls == [_PARSE_ERROR_SENTINEL]:
         return "invalid_call"
     if tool_calls == [_PLAIN_MESSAGE_SENTINEL]:
         return "plain_message"
-    return "step"
+    return "pending_action"
 
 
 def _record_turn(environment, start: int, end: int, kind: str, step_index: int | None) -> None:
-    """空区间不记录；step 类 turn 的 step_index 在工具执行后回填。"""
+    """空区间不记录；生成的 pending_action 在工具执行后回填。"""
     if end <= start:
         return
     environment.turn_records.append(TurnRecord(start, end, kind, step_index))
@@ -235,6 +237,9 @@ class SWEGRPOTrainer(GRPOTrainer):
             stats_rows.append(stats)
         output["token_weights"] = token_weights
         self._record_process_mask_metrics(stats_rows)
+        self._record_recovered_positive_support(
+            environments, advantages, token_weights
+        )
         return output
 
     def _record_process_mask_metrics(self, rows: list[ProcessMaskStats]) -> None:
@@ -257,6 +262,30 @@ class SWEGRPOTrainer(GRPOTrainer):
         self._metrics[mode]["process_mask/governance_masked"].append(
             float(sum(row.governance_masked for row in rows))
         )
+
+    def _record_recovered_positive_support(
+        self, environments, advantages, token_weights
+    ) -> None:
+        mode = "train" if self.model.training else "eval"
+        recovered_indices = [
+            index
+            for index, environment in enumerate(environments)
+            if environment.trajectory.termination
+            in {"iteration_cap", "format_exhausted"}
+            and getattr(environment, "verification", None) is not None
+            and environment.verification.result == "resolved"
+        ]
+        active_tokens = sum(
+            float(token_weights[index].sum().item())
+            for index in recovered_indices
+            if float(advantages[index].item()) != 0.0
+        )
+        self._metrics[mode]["settlement/recovered_positive_rows"].append(
+            float(len(recovered_indices))
+        )
+        self._metrics[mode][
+            "settlement/recovered_positive_active_tokens"
+        ].append(active_tokens)
 
     def compute_liger_loss(self, unwrapped_model, inputs):
         # token_weights 的支撑集已在 completion_mask×tool_mask 内，替换后父类的
@@ -424,15 +453,24 @@ class SWEGRPOTrainer(GRPOTrainer):
                     prompt_completion_tool.append(tool_message)
                     completions[idx_with_tool].append(tool_message)
 
-                # >>> swe_agent: 回填 step_index；契约错误（未追加 Step）降级为 invalid_call
-                if environment is not None and environment.turn_records:
+                # >>> swe_agent: 原子回填 pending；契约错误（未追加 Step）降级为 invalid_call
+                if environment is not None:
+                    if not environment.turn_records or environment.turn_records[-1].kind != "pending_action":
+                        raise RuntimeError(
+                            "real tool execution requires a final pending_action turn"
+                        )
                     last = environment.turn_records[-1]
-                    if last.kind == "step":
-                        if len(environment._steps) > steps_before:
-                            environment.turn_records[-1] = replace(last, step_index=len(environment._steps) - 1)
-                        else:
-                            # infra 错误（DockerRuntimeError 未追加 Step）也走此降级，归类 invalid_call 是保守处理
-                            environment.turn_records[-1] = replace(last, kind="invalid_call", step_index=None)
+                    if len(environment._steps) > steps_before:
+                        environment.turn_records[-1] = replace(
+                            last,
+                            kind="step",
+                            step_index=len(environment._steps) - 1,
+                        )
+                    else:
+                        # infra 错误（DockerRuntimeError 未追加 Step）也走此降级，归类 invalid_call 是保守处理
+                        environment.turn_records[-1] = replace(
+                            last, kind="invalid_call", step_index=None
+                        )
                 # <<< swe_agent
             # <<< swe_agent
 

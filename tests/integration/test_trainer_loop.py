@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
+from siete_rl.models import Action, Observation, Step
+from siete_rl.process_mask import build_process_token_weights
 from siete_rl.trainer import SWEGRPOTrainer
 
 
@@ -69,6 +73,70 @@ def test_turn_records_track_kinds_intervals_and_step_backfill(monkeypatch) -> No
     assert [r.step_index for r in records] == [0, None, 1]
     assert all(r.token_start < r.token_end for r in records)
     assert all(a.token_end <= b.token_start for a, b in zip(records, records[1:]))
+
+
+def test_iteration_cap_preserves_unexecuted_pending_action(monkeypatch) -> None:
+    env = Environment(); value = trainer(maximum=1); value.environments = [env]
+
+    def bash():
+        env._steps.append(
+            Step(
+                index=0,
+                action=Action(tool_name="execute_bash", arguments={"command": "pwd"}),
+                observation=Observation(text="/repo", exit_code=0),
+            )
+        )
+        return "/repo"
+
+    value._sync_tool_dicts = [{"bash": bash}]; value._async_tool_dicts = [{}]
+    value._generate_single_turn = lambda ids, *args: ([[91]], None)
+    monkeypatch.setattr(
+        "siete_rl.trainer.parse_response",
+        lambda *args, **kwargs: call(
+            "str_replace_editor", {"command": "view", "path": "/repo/a.py"}
+        ),
+    )
+
+    mask, *_ = run(value, call("bash"))
+
+    assert len(env._steps) == 1
+    assert env.loop_exit == "iteration_cap"
+    assert [r.kind for r in env.turn_records] == ["step", "pending_action"]
+    assert [r.step_index for r in env.turn_records] == [0, None]
+
+    weights, stats = build_process_token_weights(
+        turns=env.turn_records,
+        steps=env._steps,
+        termination="iteration_cap",
+        advantage=0.5,
+        base_mask=mask[0],
+    )
+    assert weights == mask[0]
+    assert stats.candidate_turns == 0
+
+
+def test_real_tool_execution_requires_final_pending_turn(monkeypatch) -> None:
+    env = Environment(); value = trainer(); value.environments = [env]
+
+    def bash():
+        env._steps.append(
+            Step(
+                index=0,
+                action=Action(tool_name="execute_bash", arguments={"command": "pwd"}),
+                observation=Observation(text="/repo", exit_code=0),
+            )
+        )
+        env.terminated = True
+        return "/repo"
+
+    value._sync_tool_dicts = [{"bash": bash}]; value._async_tool_dicts = [{}]
+    monkeypatch.setattr("siete_rl.trainer._classify_turn", lambda calls: "step")
+
+    with pytest.raises(
+        RuntimeError,
+        match="real tool execution requires a final pending_action turn",
+    ):
+        run(value, call("bash"))
 
 
 class FakeServerVLLM:

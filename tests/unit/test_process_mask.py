@@ -189,6 +189,98 @@ def test_nonbinary_base_mask_fails_loud():
         )
 
 
+@pytest.mark.parametrize("advantage", [0.5, -0.5])
+def test_final_pending_action_at_iteration_cap_preserves_base_mask(advantage):
+    base_mask = [1.0, 0.0, 1.0]
+
+    weights, stats = build_process_token_weights(
+        turns=[TurnRecord(0, 2, "pending_action", None)],
+        steps=[],
+        termination="iteration_cap",
+        advantage=advantage,
+        base_mask=base_mask,
+    )
+
+    assert weights == base_mask
+    assert stats.candidate_turns == 0
+    assert stats.applied_turns == 0
+    assert stats.retained_negative_turns == 0
+
+
+@pytest.mark.parametrize(
+    ("turns", "termination", "message"),
+    [
+        (
+            [
+                TurnRecord(0, 1, "pending_action", None),
+                TurnRecord(1, 2, "plain_message", None),
+            ],
+            "iteration_cap",
+            "pending action must be the final turn",
+        ),
+        (
+            [
+                TurnRecord(0, 1, "pending_action", None),
+                TurnRecord(1, 2, "pending_action", None),
+            ],
+            "iteration_cap",
+            "at most one pending action",
+        ),
+        (
+            [TurnRecord(0, 1, "pending_action", None)],
+            "submitted",
+            "pending action requires iteration_cap termination",
+        ),
+        (
+            [TurnRecord(0, 1, "pending_action", None)],
+            "format_exhausted",
+            "pending action requires iteration_cap termination",
+        ),
+        (
+            [TurnRecord(0, 1, "pending_action", None)],
+            "context_overlong",
+            "pending action requires iteration_cap termination",
+        ),
+        (
+            [TurnRecord(0, 1, "pending_action", None)],
+            "infra_error",
+            "pending action requires iteration_cap termination",
+        ),
+    ],
+)
+def test_impossible_pending_action_layouts_fail_loud(turns, termination, message):
+    with pytest.raises(ValueError, match=message):
+        build_process_token_weights(
+            turns=turns,
+            steps=[],
+            termination=termination,
+            advantage=0.5,
+            base_mask=[1.0, 1.0],
+        )
+
+
+def test_pending_action_with_step_index_fails_loud():
+    with pytest.raises(ValueError, match="non-step turn has step index"):
+        build_process_token_weights(
+            turns=[TurnRecord(0, 1, "pending_action", 0)],
+            steps=[],
+            termination="iteration_cap",
+            advantage=0.5,
+            base_mask=[1.0],
+        )
+
+
+def test_pending_action_layout_is_validated_before_turn_facts():
+    with pytest.raises(ValueError, match="pending action requires iteration_cap termination"):
+        build_process_token_weights(
+            turns=[TurnRecord(0, 2, "pending_action", None)],
+            steps=[],
+            termination="submitted",
+            advantage=0.5,
+            base_mask=[1.0],
+        )
+
+
 from siete_rl.trainer import (  # noqa: E402
     _PARSE_ERROR_SENTINEL,
     _PLAIN_MESSAGE_SENTINEL,
@@ -240,16 +332,16 @@ class TestClassifyTurn:
     def test_plain_message_sentinel(self):
         assert _classify_turn([_PLAIN_MESSAGE_SENTINEL]) == "plain_message"
 
-    def test_real_tool_call_is_step(self):
+    def test_real_tool_call_is_pending_action(self):
         calls = [{"type": "function", "function": {"name": "execute_bash", "arguments": {}}}]
-        assert _classify_turn(calls) == "step"
+        assert _classify_turn(calls) == "pending_action"
 
 
 class TestRecordTurn:
-    def test_appends_record(self):
+    def test_record_turn_appends_pending_action(self):
         env = _FakeEnv()
-        _record_turn(env, 0, 5, "step", None)
-        assert env.turn_records == [TurnRecord(0, 5, "step", None)]
+        _record_turn(env, 0, 5, "pending_action", None)
+        assert env.turn_records == [TurnRecord(0, 5, "pending_action", None)]
 
     def test_appends_multiple_in_order(self):
         env = _FakeEnv()
@@ -269,12 +361,15 @@ class TestRecordTurn:
 
 from types import SimpleNamespace  # noqa: E402
 
-def _mask_env(turn_records=(), steps=(), termination="submitted"):
+def _mask_env(
+    turn_records=(), steps=(), termination="submitted", verification=None
+):
     """假 env：只带 process-mask 接线读取的轨迹事实。"""
     return SimpleNamespace(
         turn_records=list(turn_records),
         _steps=list(steps),
         trajectory=SimpleNamespace(termination=termination),
+        verification=verification,
     )
 
 
@@ -409,6 +504,37 @@ class TestGenerateAndScoreCompletionsOverride:
         assert metrics["process_mask/masked_token_frac"] == [pytest.approx(1.25 / 3)]
         assert metrics["process_mask/governance_masked"] == [1.0]
 
+    def test_recovered_positive_metrics_measure_effective_token_support(
+        self, monkeypatch
+    ):
+        output = {
+            "completion_mask": torch.tensor(
+                [[1, 1, 1], [0, 0, 0], [1, 1, 1]], dtype=torch.long
+            ),
+            "tool_mask": torch.tensor(
+                [[1, 0, 1], [0, 0, 0], [1, 1, 1]], dtype=torch.long
+            ),
+            "advantages": torch.tensor([0.5, 0.5, 0.5]),
+        }
+        resolved = SimpleNamespace(result="resolved")
+        envs = [
+            _mask_env(termination="iteration_cap", verification=resolved),
+            _mask_env(termination="format_exhausted", verification=resolved),
+            _mask_env(termination="submitted", verification=resolved),
+        ]
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+
+        trainer = _bare_trainer(use_process_mask=True, environments=envs)
+        trainer._generate_and_score_completions([])
+
+        metrics = trainer._metrics["train"]
+        assert metrics["settlement/recovered_positive_rows"] == [2.0]
+        assert metrics["settlement/recovered_positive_active_tokens"] == [2.0]
+
     @pytest.mark.parametrize("missing", ["tool_mask", "advantages"])
     def test_enabled_process_mask_requires_parent_fields(self, monkeypatch, missing):
         output = {
@@ -508,6 +634,11 @@ PROCESS_MASK_STEP_METRICS = {
     "process_mask_retained_negative_turns": "process_mask/retained_negative_turns",
     "process_mask_masked_token_frac": "process_mask/masked_token_frac",
     "process_mask_governance_masked": "process_mask/governance_masked",
+    "reward_zero_std_frac": "frac_reward_zero_std",
+    "settlement_recovered_positive_rows": "settlement/recovered_positive_rows",
+    "settlement_recovered_positive_active_tokens": (
+        "settlement/recovered_positive_active_tokens"
+    ),
 }
 
 
@@ -535,6 +666,9 @@ class TestProcessMaskStepMetricKeys:
                 "process_mask/retained_negative_turns": 4.0,
                 "process_mask/masked_token_frac": 0.25,
                 "process_mask/governance_masked": 1.0,
+                "frac_reward_zero_std": 0.75,
+                "settlement/recovered_positive_rows": 2.0,
+                "settlement/recovered_positive_active_tokens": 1536.0,
             },
         )
         row = json.loads(recorder.metrics_path.read_text(encoding="utf-8").strip())
@@ -543,6 +677,9 @@ class TestProcessMaskStepMetricKeys:
         assert row["process_mask_retained_negative_turns"] == 4.0
         assert row["process_mask_masked_token_frac"] == 0.25
         assert row["process_mask_governance_masked"] == 1.0
+        assert row["reward_zero_std_frac"] == 0.75
+        assert row["settlement_recovered_positive_rows"] == 2.0
+        assert row["settlement_recovered_positive_active_tokens"] == 1536.0
 
     def test_metrics_row_fields_none_when_logs_absent(self, tmp_path: Path):
         recorder = _recorder(tmp_path, "pm-run")
@@ -553,3 +690,6 @@ class TestProcessMaskStepMetricKeys:
         assert row["process_mask_retained_negative_turns"] is None
         assert row["process_mask_masked_token_frac"] is None
         assert row["process_mask_governance_masked"] is None
+        assert row["reward_zero_std_frac"] is None
+        assert row["settlement_recovered_positive_rows"] is None
+        assert row["settlement_recovered_positive_active_tokens"] is None

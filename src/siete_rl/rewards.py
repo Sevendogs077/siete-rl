@@ -13,11 +13,12 @@ def binary_reward(
     environments: list[SWEEnvironment],
     max_workers: int = 1,
     **kwargs: Any,
-) -> list[float]:
-    """同位置 finalize；基础设施异常已由 environment 降级为零分 infra_error 样本。
+) -> list[float | None]:
+    """同位置 finalize；基础设施异常返回 None，由 TRL 从组基线中排除。
 
     此处不再做错误政策：契约错误（计数不匹配）照样抛出，单样本 infra 降级
-    由 SWEEnvironment._finalize 统一收口，系统性故障由 _recording_reward 熔断。
+    由 SWEEnvironment._finalize 统一收口，零星故障由 TRL censor，系统性故障由
+    _recording_reward 熔断。
 
     max_workers > 1 且样本数 > 1 时跨样本并行 finalize：每条 trajectory 的
     environment/verifier/容器状态互相独立（实例级隔离），pool.map 按提交序保序返回，
@@ -28,17 +29,25 @@ def binary_reward(
     del kwargs
     if len(completions) != len(environments):
         raise ValueError("completion and environment counts do not match")
+
+    def finalize(pair: tuple[SWEEnvironment, object]) -> float | None:
+        environment, completion = pair
+        value = environment._finalize(completion)
+        if not environment.scorable:
+            return None
+        return value
+
     if max_workers > 1 and len(environments) > 1:
         with ThreadPoolExecutor(
             max_workers=min(len(environments), max_workers)
         ) as pool:
             return list(
                 pool.map(
-                    lambda pair: pair[0]._finalize(pair[1]),
+                    finalize,
                     zip(environments, completions, strict=True),
                 )
             )
     return [
-        environment._finalize(completion)
+        finalize((environment, completion))
         for completion, environment in zip(completions, environments, strict=True)
     ]

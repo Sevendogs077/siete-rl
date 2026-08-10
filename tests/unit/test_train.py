@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -28,10 +29,75 @@ from siete_rl.train import (
     run,
 )
 from siete_rl.launcher import VLLMEndpoints
+from siete_rl.models import Trajectory
+from siete_rl.recording import RunRecorder
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_7B = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
+
+
+def _recording_config(tmp_path: Path) -> ProjectConfig:
+    config, _, _ = load_config(CONFIG_7B)
+    output = config.output.model_copy(
+        update={"output_root": (tmp_path / "outputs").as_posix(), "run_id": None}
+    )
+    return config.model_copy(update={"output": output})
+
+
+def _trajectory_for(task_id: str) -> Trajectory:
+    return Trajectory.model_validate(
+        {
+            "task_id": task_id,
+            "environment_id": task_id,
+            "steps": [],
+            "termination": "format_exhausted",
+        }
+    )
+
+
+class _RecordingEnvironment:
+    def __init__(self, index: int) -> None:
+        self.episode_id = f"episode-{index}"
+        self.trajectory = None
+        self.frozen_patch = None
+        self.verification = None
+
+    def _drain_events(self):
+        return []
+
+
+def _tree_bytes(path: Path) -> dict[str, bytes]:
+    return {
+        item.relative_to(path).as_posix(): item.read_bytes()
+        for item in sorted(path.rglob("*"))
+        if item.is_file()
+    }
+
+
+def _complete_recorded_group(
+    recorder: RunRecorder, task_id: str, *, count: int = 2
+) -> None:
+    environments = [_RecordingEnvironment(index) for index in range(count)]
+    prompts = [[{"role": "user", "content": f"prompt-{index}"}] for index in range(count)]
+    completions = [
+        [{"role": "assistant", "content": f"completion-{index}"}]
+        for index in range(count)
+    ]
+
+    def adapter(*, environments, **kwargs):
+        del kwargs
+        for environment in environments:
+            environment.trajectory = _trajectory_for(task_id)
+        return [0.0] * len(environments)
+
+    reward = _recording_reward(recorder, adapter)
+    assert reward(
+        prompts=prompts,
+        completions=completions,
+        environments=environments,
+        task_id=[task_id] * count,
+    ) == [0.0] * count
 
 
 def test_preflight_is_read_only_and_reports_complete_stage_modules(
@@ -224,6 +290,77 @@ def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.Monk
     assert handle["final_state"] == "closed"
 
 
+def test_recording_reward_rejects_mixed_callback_tasks_before_adapter() -> None:
+    calls = 0
+
+    class FakeRecorder:
+        def __init__(self) -> None:
+            self.begun = []
+
+        def begin_group(self, *args, **kwargs):
+            self.begun.append((args, kwargs))
+
+        def merge_cleanup_events(self, events):
+            del events
+
+    def adapter(**kwargs):
+        nonlocal calls
+        del kwargs
+        calls += 1
+        return [0.0, 0.0]
+
+    recorder = FakeRecorder()
+    reward = _recording_reward(recorder, adapter)
+    with pytest.raises(RecordingRuntimeError, match="task_id"):
+        reward(
+            prompts=[[], []],
+            completions=[[], []],
+            environments=[_RecordingEnvironment(0), _RecordingEnvironment(1)],
+            task_id=["task-a", "task-b"],
+        )
+
+    assert calls == 0
+    assert recorder.begun == []
+
+
+def test_adapter_failure_isolated_from_completed_group(
+    tmp_path: Path,
+) -> None:
+    task_a = "getmoto__moto-7023"
+    task_b = "getmoto__moto-7212"
+    recorder = RunRecorder(config=_recording_config(tmp_path), seed=7)
+    _complete_recorded_group(recorder, task_a)
+    group_a_dir = recorder.output_dir / "rollouts/batch-0000/group-0000"
+    group_a_bytes = _tree_bytes(group_a_dir)
+    metrics_before = json.loads(json.dumps(recorder.run["results"]["reward"]))
+
+    environments = [_RecordingEnvironment(0), _RecordingEnvironment(1)]
+
+    def failing_adapter(*, environments, **kwargs):
+        del kwargs
+        environments[0].trajectory = _trajectory_for(task_b)
+        raise RuntimeError("adapter B failed")
+
+    reward = _recording_reward(recorder, failing_adapter)
+    with pytest.raises(RuntimeError, match="adapter B failed"):
+        reward(
+            prompts=[[{"role": "user", "content": "B"}]] * 2,
+            completions=[[{"role": "assistant", "content": "partial"}]] * 2,
+            environments=environments,
+            task_id=[task_b, task_b],
+        )
+
+    group_b_dir = recorder.output_dir / "rollouts/batch-0001/group-0000"
+    assert _tree_bytes(group_a_dir) == group_a_bytes
+    group_b = json.loads((group_b_dir / "group.json").read_text())
+    assert group_b["task_id"] == task_b
+    assert group_b["state"] == "running"
+    assert list((group_b_dir / "0000").iterdir()) == []
+    assert recorder.run["train"]["groups_generated"] == 1
+    assert recorder.run["train"]["rollouts_generated"] == 2
+    assert recorder.run["results"]["reward"] == metrics_before
+
+
 def test_recording_reward_preserves_trl_position_order_and_drains_events() -> None:
     class FakeRecorder:
         def __init__(self) -> None:
@@ -283,6 +420,7 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
         prompts=prompts,
         completions=completions,
         environments=environments,
+        task_id=["getmoto__moto-7023"] * 4,
     ) == [1.0, 0.0, 0.0, 0.0]
     assert [index for index, _ in recorder.rollouts] == [0, 1, 2, 3]
     assert recorder.rollouts[2][1]["messages"] == prompts[2] + completions[2]
@@ -290,7 +428,12 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
     assert recorder.events == [{"index": index} for index in range(4)]
     assert recorder.native_policy_path_reached is False
     # 多步训练：reward 可被多次调用，每次开始一个新 group
-    reward(prompts=prompts, completions=completions, environments=environments)
+    reward(
+        prompts=prompts,
+        completions=completions,
+        environments=environments,
+        task_id=["getmoto__moto-7023"] * 4,
+    )
     assert recorder.begun == [
         (prompts[0], 4, "getmoto__moto-7023"),
         (prompts[0], 4, "getmoto__moto-7023"),
@@ -369,8 +512,18 @@ def test_recording_reward_preserves_an_earlier_native_policy_path() -> None:
         return [environment._reward]
 
     reward = _recording_reward(recorder, adapter)
-    reward(prompts=[[]], completions=[[]], environments=environments)
-    reward(prompts=[[]], completions=[[]], environments=environments)
+    reward(
+        prompts=[[]],
+        completions=[[]],
+        environments=environments,
+        task_id=["getmoto__moto-7023"],
+    )
+    reward(
+        prompts=[[]],
+        completions=[[]],
+        environments=environments,
+        task_id=["getmoto__moto-7023"],
+    )
 
     assert recorder.native_policy_path_reached is True
 
@@ -383,12 +536,17 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
         def begin_group(self, *args, **kwargs):
             self.begun.append((args, kwargs))
 
+        def write_rollout(self, *args, **kwargs):
+            del args, kwargs
+
         def merge_cleanup_events(self, events):
             del events
 
     class FakeEnvironment:
         def __init__(self, task_id: str) -> None:
             self.trajectory = type("Trajectory", (), {"task_id": task_id, "termination": "format_exhausted"})()
+            self.frozen_patch = None
+            self.verification = None
 
         def _drain_events(self):
             return []
@@ -403,8 +561,9 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
                 FakeEnvironment("getmoto__moto-7023"),
                 FakeEnvironment("getmoto__moto-7212"),
             ],
+            task_id=["getmoto__moto-7023"] * 2,
         )
-    assert recorder.begun == []
+    assert len(recorder.begun) == 1
 
 
 class _InfraRecorder:
@@ -444,19 +603,31 @@ def test_recording_reward_aborts_when_infra_errors_dominate_group() -> None:
     environments = [_InfraEnvironment("infra_error") for _ in range(3)] + [
         _InfraEnvironment("format_exhausted")
     ]
-    reward = _recording_reward(_InfraRecorder(), lambda **kwargs: [0.0] * 4)
+    reward = _recording_reward(
+        _InfraRecorder(), lambda **kwargs: [None, None, None, 0.0]
+    )
     with pytest.raises(RecordingRuntimeError, match="infra_error"):
-        reward(prompts=[[]] * 4, completions=[[]] * 4, environments=environments)
+        reward(
+            prompts=[[]] * 4,
+            completions=[[]] * 4,
+            environments=environments,
+            task_id=["getmoto__moto-7023"] * 4,
+        )
 
 
 def test_recording_reward_tolerates_scattered_infra_errors() -> None:
-    """零星 infra_error 降级为零分样本，不影响同组其他 rollout 与训练继续。"""
+    """零星 infra_error 被 censor，不进入健康 rollout 的组均值。"""
     environments = [_InfraEnvironment("infra_error")] + [
         _InfraEnvironment("submitted") for _ in range(3)
     ]
-    reward = _recording_reward(_InfraRecorder(), lambda **kwargs: [0.0, 1.0, 1.0, 1.0])
-    assert reward(prompts=[[]] * 4, completions=[[]] * 4, environments=environments) == [
-        0.0,
+    reward = _recording_reward(_InfraRecorder(), lambda **kwargs: [None, 1.0, 1.0, 1.0])
+    assert reward(
+        prompts=[[]] * 4,
+        completions=[[]] * 4,
+        environments=environments,
+        task_id=["getmoto__moto-7023"] * 4,
+    ) == [
+        None,
         1.0,
         1.0,
         1.0,
@@ -707,6 +878,7 @@ def test_recording_reward_forwards_verifier_parallel_workers() -> None:
         prompts=[[{"role": "user", "content": "p"}]],
         completions=[[{"role": "assistant", "content": "c"}]],
         environments=[FakeEnvironment()],
+        task_id=["getmoto__moto-7023"],
     ) == [0.0]
     assert seen["max_workers"] == 16
 

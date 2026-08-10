@@ -326,6 +326,30 @@ def test_complete_group_accepts_fractional_rewards(tmp_path: Path) -> None:
     assert reward["last_group_mean"] == pytest.approx(1.018 / 3)
 
 
+def test_complete_group_excludes_censored_rewards_from_statistics(tmp_path: Path) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=7)
+    recorder.begin_group(
+        [{"role": "user", "content": "repair it"}], 3, task_id="getmoto__moto-7023"
+    )
+    recorder.complete_group(
+        episode_ids=["e0", "e1", "e2"],
+        rewards=[None, 0.0, 1.0],
+        verifications=[None, verification("unresolved"), verification()],
+    )
+
+    group = load_json(recorder.output_dir / "rollouts/batch-0000/group-0000/group.json")
+    assert group["rewards"] == [None, 0.0, 1.0]
+    assert group["reward_mean"] == 0.5
+    assert group["reward_std"] == 0.5
+    assert group["degenerate"] is False
+
+    reward = load_json(recorder.output_dir / "run.json")["results"]["reward"]
+    assert reward["successes"] == 1
+    assert reward["attempts"] == 2
+    assert reward["mean"] == 0.5
+    assert recorder.run["train"]["rollouts_generated"] == 3
+
+
 @pytest.mark.parametrize(
     "rewards",
     [[0.0, 1.2, 1.0], [0.0, -0.1, 1.0]],

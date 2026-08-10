@@ -247,7 +247,7 @@ def build_trainer(
     seed: int,
     train_dataset: Any,
     environment_factory: Callable[[], Any],
-    reward_func: Callable[..., list[float]],
+    reward_func: Callable[..., list[float | None]],
     processing_class: Any | None = None,
     vllm_endpoints: Any | None = None,
 ) -> Any:
@@ -704,7 +704,7 @@ def _run_once(
 
 def _recording_reward(
     recorder: Any,
-    reward_adapter: Callable[..., list[float]],
+    reward_adapter: Callable[..., list[float | None]],
     reward_type: str = "binary",
     max_infra_error_ratio: float = 0.5,
     verifier_parallel_workers: int = 1,
@@ -714,48 +714,51 @@ def _recording_reward(
         completions: list[object],
         environments: list[Any],
         **kwargs: Any,
-    ) -> list[float]:
+    ) -> list[float | None]:
         if not (len(prompts) == len(completions) == len(environments)) or not completions:
             raise RecordingRuntimeError("reward requires aligned non-empty rollouts")
-        rewards: list[float] = []
+        rewards: list[float | None] = []
         try:
+            group_task_id = _callback_group_task_id(
+                kwargs.get("task_id"), len(completions)
+            )
+            messages = [
+                _join_messages(prompt, completion)
+                for prompt, completion in zip(prompts, completions, strict=True)
+            ]
+            recorder.begin_group(
+                prompts[0], len(completions), task_id=group_task_id
+            )
             rewards = reward_adapter(
                 completions=completions,
                 environments=environments,
                 max_workers=verifier_parallel_workers,
                 **kwargs,
             )
-            # 熔断：零星 infra 错误已被 environment 降级为零分样本；占比达到阈值
-            # 说明是系统性故障（如 docker daemon 挂掉），继续训练只会产出垃圾梯度。
-            infra_errors = sum(
-                1
-                for environment in environments
-                if environment.trajectory is not None
-                and environment.trajectory.termination == "infra_error"
-            )
+            # 熔断：零星 infra 错误以 None 交给 TRL censor；占比达到阈值说明是
+            # 系统性故障（如 docker daemon 挂掉），继续训练只会浪费 rollout。
+            infra_errors = sum(value is None for value in rewards)
             if infra_errors / len(environments) >= max_infra_error_ratio:
                 raise RecordingRuntimeError(
                     f"infra_error rollouts dominate group: {infra_errors}/{len(environments)} "
                     f">= max_infra_error_ratio {max_infra_error_ratio}"
                 )
-            task_ids = {
+            trajectory_task_ids = {
                 environment.trajectory.task_id
                 for environment in environments
                 if environment.trajectory is not None
             }
-            if len(task_ids) > 1:
-                raise RecordingRuntimeError(f"group mixes tasks: {sorted(task_ids)}")
-            recorder.begin_group(
-                prompts[0],
-                len(completions),
-                task_id=next(iter(task_ids), "unknown"),
-            )
-            for index, (prompt, completion, environment) in enumerate(
-                zip(prompts, completions, environments, strict=True)
+            if trajectory_task_ids and trajectory_task_ids != {group_task_id}:
+                raise RecordingRuntimeError(
+                    "group mixes tasks: "
+                    f"callback={group_task_id!r}, trajectories={sorted(trajectory_task_ids)}"
+                )
+            for index, (rollout_messages, environment) in enumerate(
+                zip(messages, environments, strict=True)
             ):
                 recorder.write_rollout(
                     index,
-                    messages=_join_messages(prompt, completion),
+                    messages=rollout_messages,
                     trajectory=environment.trajectory,
                     patch=environment.frozen_patch,
                     verification=environment.verification,
@@ -765,32 +768,31 @@ def _recording_reward(
                 rewards=rewards,
                 verifications=[environment.verification for environment in environments],
             )
-            recorder.observe_native_policy_path(_native_policy_path_reached(environments))
+            recorder.observe_native_policy_path(
+                _native_policy_path_reached(environments)
+            )
             return rewards
-        except RecordingRuntimeError:
-            raise
-        except BaseException:
-            for index, (prompt, completion, environment) in enumerate(
-                zip(prompts, completions, environments, strict=True)
-            ):
-                if environment.trajectory is not None:
-                    try:
-                        recorder.write_rollout(
-                            index,
-                            messages=_join_messages(prompt, completion),
-                            trajectory=environment.trajectory,
-                            patch=environment.frozen_patch,
-                            verification=environment.verification,
-                        )
-                    except BaseException:
-                        pass
-            raise
         finally:
             for environment in environments:
                 recorder.merge_cleanup_events(environment._drain_events())
 
     reward.__name__ = f"{reward_type}_reward"
     return reward
+
+
+def _callback_group_task_id(value: object, rollout_count: int) -> str:
+    if not isinstance(value, list) or len(value) != rollout_count:
+        raise RecordingRuntimeError(
+            "reward callback task_id must align with completions"
+        )
+    if any(not isinstance(task_id, str) or not task_id.strip() for task_id in value):
+        raise RecordingRuntimeError("reward callback task_id values must be non-empty strings")
+    task_ids = set(value)
+    if len(task_ids) != 1:
+        raise RecordingRuntimeError(
+            f"reward callback group mixes task_id values: {sorted(task_ids)}"
+        )
+    return value[0]
 
 
 def _join_messages(prompt: object, completion: object) -> list[object]:

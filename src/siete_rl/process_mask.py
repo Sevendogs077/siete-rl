@@ -12,7 +12,7 @@ from typing import Literal
 
 from siete_rl.models import Action, Step, Termination
 
-TurnKind = Literal["step", "invalid_call", "plain_message"]
+TurnKind = Literal["step", "pending_action", "invalid_call", "plain_message"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +62,22 @@ def _validate_turn(turn: TurnRecord, *, n_tokens: int, n_steps: int) -> None:
         raise ValueError(f"invalid step turn index: {turn}")
     if turn.kind != "step" and turn.step_index is not None:
         raise ValueError(f"non-step turn has step index: {turn}")
+
+
+def _validate_turn_sequence(
+    turns: list[TurnRecord], *, termination: Termination
+) -> None:
+    pending_positions = [
+        position for position, turn in enumerate(turns) if turn.kind == "pending_action"
+    ]
+    if len(pending_positions) > 1:
+        raise ValueError("at most one pending action is allowed")
+    if not pending_positions:
+        return
+    if pending_positions[0] != len(turns) - 1:
+        raise ValueError("pending action must be the final turn")
+    if termination != "iteration_cap":
+        raise ValueError("pending action requires iteration_cap termination")
 
 
 def _candidate_turn_positions(
@@ -114,6 +130,7 @@ def build_process_token_weights(
 ) -> tuple[list[float], ProcessMaskStats]:
     if any(value not in (0.0, 1.0) for value in base_mask):
         raise ValueError("base_mask must be binary")
+    _validate_turn_sequence(turns, termination=termination)
     candidates = _candidate_turn_positions(turns, steps, len(base_mask))
     if termination in _GOVERNANCE_TERMINATIONS:
         weights = [0.0] * len(base_mask)

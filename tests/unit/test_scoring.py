@@ -142,38 +142,56 @@ def test_single_regression_in_large_p2p_suite_costs_little():
     assert score == pytest.approx(107 / 113, rel=1e-9)
 
 
-def test_empty_fail_to_pass_treated_as_full_ratio():
+def test_unresolved_without_test_vectors_is_zero():
     score = layered_score(
         verification=_verification(stdout="PASSED a.py::test_x\n"),
         fail_to_pass=[],
         pass_to_pass=[],
         lambda_=LAMBDA,
     )
-    assert score == pytest.approx(1.0, rel=1e-9)
+    assert score == 0.0
+
+
+def test_unresolved_all_listed_tests_pass_but_verifier_fails_is_zero():
+    stdout = """
+PASSED tests/test_target.py::test_fixed
+PASSED tests/test_regression.py::test_preserved
+FAILED tests/test_extra.py::test_unexpected - AssertionError
+"""
+    score = layered_score(
+        verification=_verification(stdout=stdout),
+        fail_to_pass=["tests/test_target.py::test_fixed"],
+        pass_to_pass=["tests/test_regression.py::test_preserved"],
+        lambda_=LAMBDA,
+    )
+    assert score == 0.0
 
 
 def test_parametrized_and_dotted_names_match_by_last_segment():
-    # F2P 清单给完整 nodeid，运行时 nodeid 类名段不一致也能匹配（只比文件段+裸名）
+    # 一个匹配、一个未通过，p=1/2；类名段不一致仍能匹配。
     stdout = "PASSED tests/test_a.py::RuntimeSuite::test_case[param]\n"
     score = layered_score(
         verification=_verification(stdout=stdout),
-        fail_to_pass=["tests/test_a.py::DatasetSuite::test_case[param]"],
+        fail_to_pass=[
+            "tests/test_a.py::DatasetSuite::test_case[param]",
+            "tests/test_a.py::DatasetSuite::test_missing",
+        ],
         pass_to_pass=[],
         lambda_=LAMBDA,
     )
-    assert score == pytest.approx(1.0, rel=1e-9)
+    assert score == pytest.approx(math.expm1(4.0) / math.expm1(8.0), rel=1e-9)
 
 
 def test_bare_dataset_entry_falls_back_to_name_only_match():
-    # 数据集条目无文件段时退化为仅按裸名匹配（兼容旧格式清单）
+    # 一个匹配、一个未通过，p=1/2；无文件段条目退化为按裸名匹配。
     stdout = "PASSED tests/test_a.py::TestSuite::test_case[param]\n"
     score = layered_score(
         verification=_verification(stdout=stdout),
-        fail_to_pass=["test_case[param]"],
+        fail_to_pass=["test_case[param]", "test_missing"],
         pass_to_pass=[],
         lambda_=LAMBDA,
     )
-    assert score == pytest.approx(1.0, rel=1e-9)
+    assert score == pytest.approx(math.expm1(4.0) / math.expm1(8.0), rel=1e-9)
 
 
 def test_cross_file_same_bare_name_does_not_collide():

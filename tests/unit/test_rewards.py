@@ -19,11 +19,14 @@ class FakeEnvironment:
         *,
         delay: float = 0.0,
         error: BaseException | None = None,
+        termination: str = "submitted",
     ) -> None:
         self.index = index
         self.delay = delay
         self.error = error
         self.finalize_calls = 0
+        self.trajectory = type("Trajectory", (), {"termination": termination})()
+        self.scorable = termination != "infra_error"
 
     def _finalize(self, completion: object) -> float:
         self.finalize_calls += 1
@@ -85,3 +88,13 @@ def test_parallel_finalize_wall_time_covers_long_tail() -> None:
     parallel_time = time.monotonic() - started
     assert parallel == serial
     assert parallel_time < 0.75 * serial_time
+
+
+@pytest.mark.parametrize("max_workers", [1, 2])
+def test_infra_error_is_unscorable_instead_of_zero_reward(max_workers: int) -> None:
+    envs = [
+        FakeEnvironment(0, termination="infra_error"),
+        FakeEnvironment(1),
+    ]
+
+    assert binary_reward([None, None], envs, max_workers=max_workers) == [None, 1.5]

@@ -57,6 +57,11 @@ STEP_METRIC_KEYS = {
     "process_mask_retained_negative_turns": "process_mask/retained_negative_turns",
     "process_mask_masked_token_frac": "process_mask/masked_token_frac",
     "process_mask_governance_masked": "process_mask/governance_masked",
+    "reward_zero_std_frac": "frac_reward_zero_std",
+    "settlement_recovered_positive_rows": "settlement/recovered_positive_rows",
+    "settlement_recovered_positive_active_tokens": (
+        "settlement/recovered_positive_active_tokens"
+    ),
 }
 
 
@@ -116,7 +121,7 @@ class RunRecorder:
         self._group_dir: Path | None = None
         self.batch: dict[str, Any] | None = None
         self.group: dict[str, Any] | None = None
-        self._all_rewards: list[int] = []
+        self._all_rewards: list[float] = []
         self._degenerate_groups = 0
         self._reward_ema: float | None = None
         self._last_recorded_step = 0
@@ -318,7 +323,7 @@ class RunRecorder:
         self,
         *,
         episode_ids: list[str],
-        rewards: list[float],
+        rewards: list[float | None],
         verifications: list[Verification | None],
     ) -> None:
         if self.group is None:
@@ -327,11 +332,19 @@ class RunRecorder:
         if len(episode_ids) != expected or len(rewards) != expected or len(verifications) != expected:
             raise ValueError("completed group requires aligned rollouts")
         # 支持 [0, 1] 内的浮点奖励（layered 模式），仅校验取值范围
-        float_rewards = []
+        recorded_rewards: list[float | None] = []
+        float_rewards: list[float] = []
         for reward in rewards:
+            if reward is None:
+                recorded_rewards.append(None)
+                continue
             if not 0.0 <= reward <= 1.0:
                 raise ValueError("group rewards must be within [0, 1]")
-            float_rewards.append(float(reward))
+            value = float(reward)
+            recorded_rewards.append(value)
+            float_rewards.append(value)
+        if not float_rewards:
+            raise ValueError("completed group requires at least one scorable reward")
         resolved = sum(v is not None and v.result == "resolved" for v in verifications)
         unresolved = sum(v is not None and v.result == "unresolved" for v in verifications)
         reward_mean = fmean(float_rewards)
@@ -341,7 +354,7 @@ class RunRecorder:
             {
                 "state": "completed",
                 "episode_ids": list(episode_ids),
-                "rewards": float_rewards,
+                "rewards": recorded_rewards,
                 "reward_mean": reward_mean,
                 "reward_std": reward_std,
                 "degenerate": degenerate,
