@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock
 
 import pytest
 
@@ -84,6 +85,158 @@ def test_only_three_public_tools_and_reset_is_silent() -> None:
     assert methods == ["execute_bash", "finish", "str_replace_editor"]
     assert env.reset(task_id, prompt="ignored") is None
     assert sandboxes
+
+
+def test_async_reset_returns_before_open_finishes_and_records_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    original_open = Sandbox.open
+
+    def blocked_open(self):
+        started.set()
+        assert release.wait(timeout=2)
+        return original_open(self)
+
+    monkeypatch.setattr(Sandbox, "open", blocked_open)
+    with ThreadPoolExecutor(max_workers=1) as reset_executor:
+        env, task_id, _, _ = harness(reset_executor=reset_executor)
+
+        assert env.reset(task_id) is None
+        assert started.wait(timeout=2)
+        assert env._reset_timing() is None
+        release.set()
+        assert env._await_reset() is None
+
+    timing = env._reset_timing()
+    assert timing is not None
+    assert timing[0] <= timing[1]
+
+
+def test_shared_reset_executor_opens_environments_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    open_barrier = Barrier(3)
+    original_open = Sandbox.open
+
+    def synchronized_open(self):
+        open_barrier.wait(timeout=2)
+        return original_open(self)
+
+    monkeypatch.setattr(Sandbox, "open", synchronized_open)
+    with ThreadPoolExecutor(max_workers=2) as reset_executor:
+        first, first_task_id, _, _ = harness(reset_executor=reset_executor)
+        second, second_task_id, _, _ = harness(reset_executor=reset_executor)
+
+        first.reset(first_task_id)
+        second.reset(second_task_id)
+        open_barrier.wait(timeout=2)
+        first._await_reset()
+        second._await_reset()
+
+
+def test_repeated_reset_never_overlaps_the_same_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_started = Event()
+    release_first = Event()
+    second_started = Event()
+    lock = Lock()
+    open_calls = 0
+    original_open = Sandbox.open
+
+    def ordered_open(self):
+        nonlocal open_calls
+        with lock:
+            open_calls += 1
+            call = open_calls
+        if call == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_started.set()
+        return original_open(self)
+
+    monkeypatch.setattr(Sandbox, "open", ordered_open)
+    with ThreadPoolExecutor(max_workers=2) as reset_executor:
+        env, task_id, _, _ = harness(reset_executor=reset_executor)
+        env.reset(task_id)
+        assert first_started.wait(timeout=2)
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            repeated = caller.submit(env.reset, task_id)
+            assert not second_started.wait(timeout=0.1)
+            release_first.set()
+            assert second_started.wait(timeout=2)
+            assert repeated.result(timeout=2) is None
+        env._await_reset()
+
+
+@pytest.mark.parametrize("operation", ["tool", "finalize"])
+def test_environment_operations_wait_for_pending_reset(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    reset_started = Event()
+    release_reset = Event()
+    operation_started = Event()
+    operation_finished = Event()
+    original_open = Sandbox.open
+
+    def blocked_open(self):
+        reset_started.set()
+        assert release_reset.wait(timeout=2)
+        return original_open(self)
+
+    monkeypatch.setattr(Sandbox, "open", blocked_open)
+    with ThreadPoolExecutor(max_workers=1) as reset_executor:
+        env, task_id, _, _ = harness(reset_executor=reset_executor)
+        if operation == "finalize":
+            monkeypatch.setattr(env, "_termination", lambda: "iteration_cap")
+        env.reset(task_id)
+        assert reset_started.wait(timeout=2)
+
+        def invoke():
+            operation_started.set()
+            try:
+                return env.finish() if operation == "tool" else env._finalize(None)
+            finally:
+                operation_finished.set()
+
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            result = caller.submit(invoke)
+            assert operation_started.wait(timeout=2)
+            assert not operation_finished.wait(timeout=0.1)
+            release_reset.set()
+            assert result.result(timeout=2) in ("", 0.0)
+
+
+def test_close_drains_failed_reset_and_still_closes_created_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_started = Event()
+    release_reset = Event()
+
+    def failing_open(self):
+        reset_started.set()
+        assert release_reset.wait(timeout=2)
+        raise RuntimeError("unexpected reset failure")
+
+    monkeypatch.setattr(Sandbox, "open", failing_open)
+    with ThreadPoolExecutor(max_workers=1) as reset_executor:
+        env, task_id, sandboxes, _ = harness(reset_executor=reset_executor)
+        env.reset(task_id)
+        assert reset_started.wait(timeout=2)
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            closing = caller.submit(env._close)
+            release_reset.set()
+            with pytest.raises(RuntimeError, match="unexpected reset failure"):
+                closing.result(timeout=2)
+
+    assert sandboxes[0].closed == 1
+    assert env._sandbox is None
+    assert env._pending_reset is None
+    timing = env._reset_timing()
+    assert timing is not None and timing[0] <= timing[1]
 
 
 @pytest.mark.parametrize(

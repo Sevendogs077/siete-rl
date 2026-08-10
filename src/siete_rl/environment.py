@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import Executor, Future
 import re
+from time import perf_counter
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -50,6 +52,7 @@ class SWEEnvironment:
         max_timeout_sec: int,
         reward_type: Literal["binary", "layered"] = "binary",
         layered_lambda: float = DEFAULT_LAMBDA,
+        reset_executor: Executor | None = None,
     ) -> None:
         self._task_context = task_context
         self._sandbox_factory = sandbox_factory
@@ -58,6 +61,10 @@ class SWEEnvironment:
         self._max_timeout_sec = max_timeout_sec
         self._reward_type = reward_type
         self._layered_lambda = layered_lambda
+        self._reset_executor = reset_executor
+        self._pending_reset: Future[None] | None = None
+        self._last_reset_started_at: float | None = None
+        self._last_reset_finished_at: float | None = None
         self._sample: Sample | None = None
         self._evaluation: Evaluation | None = None
         self._sandbox: DockerSandbox | None = None
@@ -114,52 +121,88 @@ class SWEEnvironment:
     def reset(self, task_id: str, **kwargs: object) -> None:
         """Start a fresh repository episode for one public task ID."""
 
-        del kwargs
-        self._close()
-        try:
-            sample, evaluation = self._task_context[task_id]
-        except KeyError as exc:
-            raise ValueError(f"unknown qualified task_id: {task_id}") from exc
-
-        self._sample = sample
-        self._evaluation = evaluation
-        self.episode_id = uuid4().hex
-        self._steps = []
-        self.turn_records = []
-        self._terminal_event = None
-        self._loop_exit = None
-        self._infrastructure_error = None
-        self._submitted = False
-        self._frozen_patch = None
-        self._finalized = False
-        self._reward = None
-        self._settlement = None
-        self._trajectory = None
-        self._verification = None
-        sandbox = self._sandbox_factory(sample, self.episode_id, "rollout")
-        self._sandbox = sandbox
-        try:
-            sandbox.open()
-            workspace = _workspace_for_task(task_id)
-            _install_workspace_aliases(sandbox, workspace)
-            self._executor = ToolExecutor(
-                sandbox,
-                output_limit_chars=self._output_limit_chars,
-                max_timeout_sec=self._max_timeout_sec,
-                workspace=workspace,
-            )
-        except DockerRuntimeError as exc:
-            # 单样本基础设施失败不传播：episode 在第 0 步终止，由 _finalize 统一降级。
-            self._infrastructure_error = exc
-            self._terminal_event = TerminalEvent(kind="infra_error", step_index=0)
+        self._await_reset()
+        self._last_reset_started_at = perf_counter()
+        self._last_reset_finished_at = None
+        if self._reset_executor is not None:
             try:
-                self._close_rollout()
-            except BaseException as cleanup_exc:
-                exc.add_note(
-                    "rollout cleanup failed during reset: "
-                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                self._pending_reset = self._reset_executor.submit(
+                    self._reset_now, task_id, **kwargs
                 )
-        return None
+            except BaseException:
+                self._last_reset_finished_at = perf_counter()
+                raise
+            return None
+        return self._reset_now(task_id, **kwargs)
+
+    def _reset_now(self, task_id: str, **kwargs: object) -> None:
+        del kwargs
+        try:
+            self._close_resources()
+            try:
+                sample, evaluation = self._task_context[task_id]
+            except KeyError as exc:
+                raise ValueError(f"unknown qualified task_id: {task_id}") from exc
+
+            self._sample = sample
+            self._evaluation = evaluation
+            self.episode_id = uuid4().hex
+            self._steps = []
+            self.turn_records = []
+            self._terminal_event = None
+            self._loop_exit = None
+            self._infrastructure_error = None
+            self._submitted = False
+            self._frozen_patch = None
+            self._finalized = False
+            self._reward = None
+            self._settlement = None
+            self._trajectory = None
+            self._verification = None
+            sandbox = self._sandbox_factory(sample, self.episode_id, "rollout")
+            self._sandbox = sandbox
+            try:
+                sandbox.open()
+                workspace = _workspace_for_task(task_id)
+                _install_workspace_aliases(sandbox, workspace)
+                self._executor = ToolExecutor(
+                    sandbox,
+                    output_limit_chars=self._output_limit_chars,
+                    max_timeout_sec=self._max_timeout_sec,
+                    workspace=workspace,
+                )
+            except DockerRuntimeError as exc:
+                # 单样本基础设施失败不传播：episode 在第 0 步终止，由 _finalize 统一降级。
+                self._infrastructure_error = exc
+                self._terminal_event = TerminalEvent(kind="infra_error", step_index=0)
+                try:
+                    self._close_rollout()
+                except BaseException as cleanup_exc:
+                    exc.add_note(
+                        "rollout cleanup failed during reset: "
+                        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                    )
+            return None
+        finally:
+            self._last_reset_finished_at = perf_counter()
+
+    def _await_reset(self) -> None:
+        pending = self._pending_reset
+        if pending is None:
+            return None
+        try:
+            return pending.result()
+        finally:
+            if self._pending_reset is pending:
+                self._pending_reset = None
+
+    def _reset_timing(self) -> tuple[float, float] | None:
+        if (
+            self._last_reset_started_at is None
+            or self._last_reset_finished_at is None
+        ):
+            return None
+        return self._last_reset_started_at, self._last_reset_finished_at
 
     def execute_bash(self, command: str) -> str:
         """Execute one bash command in the episode workspace."""
@@ -178,6 +221,7 @@ class SWEEnvironment:
         return self._call_tool("finish", {})
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        self._await_reset()
         if self._executor is None or self._sandbox is None or self.episode_id is None:
             raise DockerRuntimeError("environment has no active rollout container")
         if self._submitted:
@@ -220,6 +264,7 @@ class SWEEnvironment:
         self._steps.append(Step(index=len(self._steps), action=action, observation=observation))
 
     def _finalize(self, completion: object) -> float:
+        self._await_reset()
         del completion  # 终止原因不再从 completion 推导
         if self._finalized:
             if self._reward is None:
@@ -345,6 +390,22 @@ class SWEEnvironment:
                 self._executor = None
 
     def _close(self) -> None:
+        errors: list[BaseException] = []
+        try:
+            self._await_reset()
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            self._close_resources()
+        except BaseException as exc:
+            errors.append(exc)
+        if errors:
+            primary = errors[0]
+            for extra in errors[1:]:
+                primary.add_note(f"additional cleanup failure: {type(extra).__name__}: {extra}")
+            raise primary
+
+    def _close_resources(self) -> None:
         errors: list[BaseException] = []
         if self._verifier is not None:
             try:

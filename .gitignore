@@ -130,3 +130,4 @@ adapter_model.safetensors
 # Internal local documents (kept on disk, excluded from public tree)
 /docs/notes.md
 /docs/superpowers/
+/benchmark_results/

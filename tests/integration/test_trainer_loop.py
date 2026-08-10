@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+import inspect
 from types import SimpleNamespace
 
 import pytest
+from trl import GRPOTrainer
 
 from siete_rl.models import Action, Observation, Step
 from siete_rl.process_mask import build_process_token_weights
@@ -29,6 +32,118 @@ def call(name, arguments=None):
 
 def run(value, completion, *, completion_ids=None):
     return value._tool_call_loop(prompts=[[{"role": "user", "content": "fix"}]], prompt_ids=[[1]], completion_ids=[completion_ids or [2, 99]], completions=[[completion]], logprobs=None, images=None, multimodal_fields={})
+
+
+class ResetEnvironment:
+    def __init__(self, name, events, *, timing, result=None, error=None):
+        self.name = name
+        self.events = events
+        self.timing = timing
+        self.result = result
+        self.error = error
+
+    def _await_reset(self):
+        self.events.append(f"await:{self.name}")
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def _reset_timing(self):
+        return self.timing
+
+
+def reset_trainer(environments):
+    value = object.__new__(SWEGRPOTrainer)
+    value.environments = environments
+    value.model = SimpleNamespace(training=True)
+    value._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+    return value
+
+
+def test_generate_drains_resets_before_parent_and_records_batch_span(
+    monkeypatch,
+) -> None:
+    events = []
+    value = reset_trainer(
+        [
+            ResetEnvironment("a", events, timing=(11.0, 14.0)),
+            ResetEnvironment("b", events, timing=(10.0, 16.5)),
+        ]
+    )
+
+    def parent_generate(self, prompts):
+        events.append("parent")
+        return prompts
+
+    monkeypatch.setattr(GRPOTrainer, "_generate", parent_generate)
+
+    assert value._generate(["prompt"]) == ["prompt"]
+    assert events == ["await:a", "await:b", "parent"]
+    assert value._metrics["train"]["environment/reset_time"] == [6.5]
+
+
+def test_generate_drains_every_reset_before_raising_first_error(monkeypatch) -> None:
+    events = []
+    first = RuntimeError("first reset failed")
+    second = ValueError("second reset failed")
+    value = reset_trainer(
+        [
+            ResetEnvironment("a", events, timing=(1.0, 2.0), error=first),
+            ResetEnvironment("b", events, timing=(1.0, 3.0), error=second),
+            ResetEnvironment("c", events, timing=(1.0, 4.0)),
+        ]
+    )
+    monkeypatch.setattr(
+        GRPOTrainer,
+        "_generate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("parent generation must not run")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="first reset failed") as captured:
+        value._generate(["prompt"])
+
+    assert events == ["await:a", "await:b", "await:c"]
+    assert any("second reset failed" in note for note in captured.value.__notes__)
+
+
+def test_generate_rejects_non_silent_reset_after_draining_batch(monkeypatch) -> None:
+    events = []
+    value = reset_trainer(
+        [
+            ResetEnvironment("a", events, timing=(1.0, 2.0), result="observation"),
+            ResetEnvironment("b", events, timing=(1.0, 2.5)),
+        ]
+    )
+    monkeypatch.setattr(
+        GRPOTrainer,
+        "_generate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("parent generation must not run")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="must return None"):
+        value._generate(["prompt"])
+
+    assert events == ["await:a", "await:b"]
+
+
+def test_generate_override_is_only_a_barrier_around_parent_generation() -> None:
+    source = inspect.getsource(SWEGRPOTrainer._generate)
+
+    assert SWEGRPOTrainer._generate is not GRPOTrainer._generate
+    assert "super()._generate(prompts)" in source
+    assert "_generate_and_score_completions" not in source
+
+
+def test_trl_resets_all_environments_before_project_generate_barrier() -> None:
+    source = inspect.getsource(GRPOTrainer._generate_and_score_completions)
+
+    reset_position = source.index("environment.reset")
+    generate_position = source.index("self._generate(prompts)")
+    assert reset_position < generate_position
 
 
 def test_finish_keeps_model_tokens_and_adds_no_observation() -> None:

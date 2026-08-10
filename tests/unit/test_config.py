@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from siete_rl.config import (
@@ -48,14 +49,29 @@ def _minimal_generation_values(**overrides: object) -> GenerationConfig:
 
 def test_parallel_workers_default_to_serial() -> None:
     cfg = _minimal_generation_values()
+    assert cfg.reset_parallel_workers == 1
     assert cfg.tool_parallel_workers == 1
     assert cfg.verifier_parallel_workers == 1
 
 
 def test_parallel_workers_reject_zero() -> None:
-    for field in ("tool_parallel_workers", "verifier_parallel_workers"):
+    for field in (
+        "reset_parallel_workers",
+        "tool_parallel_workers",
+        "verifier_parallel_workers",
+    ):
         with pytest.raises(ValidationError):
             _minimal_generation_values(**{field: 0})
+
+
+def test_experiment_config_explicitly_declares_parallel_worker_fields() -> None:
+    payload = yaml.safe_load(CONFIG_7B.read_text(encoding="utf-8"))
+
+    assert {
+        "reset_parallel_workers",
+        "tool_parallel_workers",
+        "verifier_parallel_workers",
+    } <= set(payload["generation"])
 
 
 def test_model_and_tokenizer_path_env_overrides_take_precedence(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+from concurrent.futures import ThreadPoolExecutor
 import gc
 import hashlib
 import json
@@ -286,6 +287,18 @@ def build_processing_class(config: ProjectConfig) -> Any:
     return install_openhands_tool_protocol(tokenizer)
 
 
+def _create_reset_executor(max_workers: int) -> ThreadPoolExecutor | None:
+    """worker=1 保持原同步路径；更大值创建 run-scoped reset pool。"""
+
+    if max_workers < 1:
+        raise ValueError("reset_parallel_workers must be positive")
+    if max_workers == 1:
+        return None
+    return ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="swe-reset"
+    )
+
+
 def _run_metrics_callback(recorder: Any) -> Any:
     """把 Trainer 每个 optimizer step 的公开日志写入 metrics.jsonl。"""
 
@@ -455,6 +468,7 @@ def _run_once(
     trainer: Any | None = None
     environments: list[SWEEnvironment] = []
     docker_client: SubprocessDockerClient | None = None
+    reset_executor: ThreadPoolExecutor | None = None
     vllm_client: Any | None = None
     gpu_baseline: dict[str, int] | None = None
     child_process_baseline = _snapshot_child_processes()
@@ -471,6 +485,14 @@ def _run_once(
         recorder.log(f"task context ready: {len(task_context)} tasks")
 
         docker_client = SubprocessDockerClient()
+        reset_executor = _create_reset_executor(
+            config.generation.reset_parallel_workers
+        )
+        if reset_executor is not None:
+            recorder.log(
+                "environment reset executor ready: "
+                f"workers={config.generation.reset_parallel_workers}"
+            )
         # atexit 兜底：即使 finally 被 KeyboardInterrupt 截断，孤儿容器也会在进程退出时被清扫
         atexit.register(_sweep_orphans_at_exit, docker_client, recorder.run_id)
 
@@ -499,6 +521,7 @@ def _run_once(
                 max_timeout_sec=config.docker.exec_timeout_sec,
                 reward_type=config.grpo.reward_type,
                 layered_lambda=config.grpo.layered_lambda,
+                reset_executor=reset_executor,
             )
             environments.append(environment)
             return environment
@@ -590,7 +613,10 @@ def _run_once(
                 return None
 
         run_processes.update(_new_child_processes(child_process_baseline))
-        cleanup_errors, environment_handles = _close_environments(environments, recorder)
+        cleanup_errors, environment_handles = _close_environments(
+            environments, recorder, reset_executor=reset_executor
+        )
+        reset_executor = None
         try:
             _sync_recorder_from_trainer(recorder, trainer)
         except BaseException as sync_error:
@@ -879,7 +905,10 @@ def _finalize_gpu_diagnostic(
 
 
 def _close_environments(
-    environments: list[Any], recorder: Any
+    environments: list[Any],
+    recorder: Any,
+    *,
+    reset_executor: Any | None = None,
 ) -> tuple[list[BaseException], list[dict[str, Any]]]:
     errors: list[BaseException] = []
     handles: list[dict[str, Any]] = []
@@ -911,6 +940,16 @@ def _close_environments(
                 "residual": residual,
             }
         )
+    if reset_executor is not None:
+        try:
+            reset_executor.shutdown(wait=True, cancel_futures=False)
+            recorder.log("environment reset executor shut down")
+        except BaseException as exc:
+            errors.append(exc)
+            recorder.log(
+                "environment reset executor shutdown failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
     return errors, handles
 
 

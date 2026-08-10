@@ -52,6 +52,7 @@ STEP_METRIC_KEYS = {
     "tool_call_frequency": "tools/call_frequency",
     "tool_failure_frequency": "tools/failure_frequency",
     "step_time_seconds": "step_time",
+    "reset_time_seconds": "environment/reset_time",
     "process_mask_candidate_turns": "process_mask/candidate_turns",
     "process_mask_applied_turns": "process_mask/applied_turns",
     "process_mask_retained_negative_turns": "process_mask/retained_negative_turns",

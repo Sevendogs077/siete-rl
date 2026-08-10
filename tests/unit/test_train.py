@@ -13,7 +13,9 @@ from siete_rl.train import (
     RuntimeNotQualifiedError,
     _apply_liger_runtime_flags,
     _clear_vllm_cuda_graphs,
+    _close_environments,
     _close_vllm_communicator,
+    _create_reset_executor,
     _detach_vllm_client_atexit,
     _detach_vllm_engine,
     _native_policy_path_reached,
@@ -927,3 +929,92 @@ def test_build_trainer_forwards_tool_parallel_workers(
     assert captured["tool_parallel_workers"] == config.generation.tool_parallel_workers
     assert captured["use_process_mask"] is True
     assert "process_mask_rules" not in captured
+
+
+def test_single_reset_worker_does_not_construct_thread_pool(monkeypatch) -> None:
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("reset worker=1 must not construct ThreadPoolExecutor")
+
+    monkeypatch.setattr("siete_rl.train.ThreadPoolExecutor", fail_if_called)
+
+    assert _create_reset_executor(1) is None
+
+
+def test_parallel_reset_executor_uses_requested_worker_count(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_executor(*args, **kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr("siete_rl.train.ThreadPoolExecutor", fake_executor)
+
+    assert _create_reset_executor(8) is sentinel
+    assert captured == {"max_workers": 8, "thread_name_prefix": "swe-reset"}
+
+
+def test_reset_executor_shuts_down_after_every_environment() -> None:
+    events: list[str] = []
+
+    class FakeRecorder:
+        def merge_cleanup_events(self, values):
+            del values
+
+        def log(self, message):
+            events.append(message)
+
+    class FakeEnvironment:
+        _sandbox = None
+        _verifier = None
+        episode_id = None
+
+        def __init__(self, name):
+            self.name = name
+
+        def _close(self):
+            events.append(f"close:{self.name}")
+
+        def _drain_events(self):
+            return []
+
+    class FakeExecutor:
+        def shutdown(self, **kwargs):
+            events.append(f"shutdown:{kwargs}")
+
+    errors, handles = _close_environments(
+        [FakeEnvironment("a"), FakeEnvironment("b")],
+        FakeRecorder(),
+        reset_executor=FakeExecutor(),
+    )
+
+    assert errors == []
+    assert len(handles) == 2
+    assert events[:3] == [
+        "close:a",
+        "close:b",
+        "shutdown:{'wait': True, 'cancel_futures': False}",
+    ]
+
+
+def test_reset_executor_shutdown_failure_is_a_cleanup_error() -> None:
+    class FakeRecorder:
+        def merge_cleanup_events(self, values):
+            del values
+
+        def log(self, message):
+            self.message = message
+
+    class FakeExecutor:
+        def shutdown(self, **kwargs):
+            del kwargs
+            raise RuntimeError("shutdown failed")
+
+    recorder = FakeRecorder()
+    errors, handles = _close_environments(
+        [], recorder, reset_executor=FakeExecutor()
+    )
+
+    assert handles == []
+    assert len(errors) == 1 and str(errors[0]) == "shutdown failed"
+    assert "shutdown failed" in recorder.message

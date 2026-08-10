@@ -94,6 +94,7 @@ class GenerationConfig(StrictConfig):
     use_liger_kernel: bool
     max_tool_calling_iterations: int = Field(ge=1)
     max_consecutive_protocol_errors: int = Field(ge=1)
+    reset_parallel_workers: int = Field(default=1, ge=1)
     tool_parallel_workers: int = Field(default=1, ge=1)
     verifier_parallel_workers: int = Field(default=1, ge=1)
     use_process_mask: bool

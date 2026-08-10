@@ -287,6 +287,7 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
             "entropy": 0.8,
             "sampling/importance_sampling_ratio/mean": 1.01,
             "sampling/importance_sampling_ratio/max": 1.2,
+            "environment/reset_time": 9.5,
             "num_tokens": 4096,
         },
     )
@@ -299,6 +300,7 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     assert rows[0]["train_pass_rate_cumulative"] == 0.25
     assert rows[0]["group_degenerate"] is False
     assert rows[0]["importance_sampling_ratio_mean"] == 1.01
+    assert rows[0]["reset_time_seconds"] == 9.5
     run = load_json(recorder.output_dir / "run.json")
     assert run["train"]["tokens_generated"] == 4096
     assert run["train"]["last_metrics"] == {

@@ -115,6 +115,56 @@ class SWEGRPOTrainer(GRPOTrainer):
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
 
+    def _await_environment_resets(self) -> float | None:
+        """收束整批 reset；发生异常时也先 drain 其余 future。"""
+
+        errors: list[tuple[int, BaseException]] = []
+        timings: list[tuple[float, float]] = []
+        for index, environment in enumerate(self.environments):
+            try:
+                observation = environment._await_reset()
+                if observation is not None:
+                    raise RuntimeError(
+                        "SWEEnvironment.reset must return None; "
+                        f"environment {index} returned {type(observation).__name__}"
+                    )
+            except BaseException as exc:
+                errors.append((index, exc))
+            try:
+                timing = environment._reset_timing()
+                if timing is None:
+                    raise RuntimeError(
+                        f"environment {index} is missing completed reset timing"
+                    )
+                timings.append(timing)
+            except BaseException as exc:
+                errors.append((index, exc))
+
+        if errors:
+            _, primary = errors[0]
+            for index, extra in errors[1:]:
+                primary.add_note(
+                    "additional reset failure at environment "
+                    f"{index}: {type(extra).__name__}: {extra}"
+                )
+            raise primary
+        if not timings:
+            return None
+        started_at = min(start for start, _ in timings)
+        finished_at = max(finish for _, finish in timings)
+        if finished_at < started_at:
+            raise RuntimeError("environment reset timing has a negative batch span")
+        return finished_at - started_at
+
+    def _generate(self, prompts: list):
+        """在父类开始 GPU generation 前形成 environment reset barrier。"""
+
+        reset_time = self._await_environment_resets()
+        if reset_time is not None:
+            mode = "train" if self.model.training else "eval"
+            self._metrics[mode]["environment/reset_time"].append(reset_time)
+        return super()._generate(prompts)
+
     # >>> swe_agent: #6673 backport — tool loop 再生成禁止 server stride 去重
     def _generate_tool_loop_turn(self, prompt_ids, images, multimodal_fields):
         """Post-tool 再生成：每条 entry 携带各自独立采样的 history，必须 n=1 逐条生成。
