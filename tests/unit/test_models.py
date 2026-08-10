@@ -9,6 +9,7 @@ from siete_rl.models import (
     Evaluation,
     Observation,
     Sample,
+    Settlement,
     Step,
     Task,
     Trajectory,
@@ -36,7 +37,8 @@ EXPECTED_FIELDS = {
     Action: {"tool_name", "arguments"},
     Observation: {"text", "exit_code", "error_type", "timed_out", "truncated"},
     Step: {"index", "action", "observation"},
-    Trajectory: {"task_id", "environment_id", "steps", "termination"},
+    Settlement: {"status", "detail"},
+    Trajectory: {"task_id", "environment_id", "steps", "termination", "settlement"},
     Verification: {"result", "patch_apply_status", "pytest_started", "exit_code", "stdout", "stderr"},
 }
 
@@ -68,8 +70,8 @@ def environment() -> Environment:
     )
 
 
-def test_nine_core_models_have_exact_planned_fields() -> None:
-    assert len(EXPECTED_FIELDS) == 9
+def test_ten_core_models_have_exact_planned_fields() -> None:
+    assert len(EXPECTED_FIELDS) == 10
     for model, expected in EXPECTED_FIELDS.items():
         assert set(model.model_fields) == expected
         assert "metadata" not in model.model_fields
@@ -93,6 +95,7 @@ def test_action_step_and_trajectory_have_no_wire_or_probability_fields(
         environment_id=environment.environment_id,
         steps=steps,
         termination="format_exhausted",
+        settlement=Settlement(status="unresolved"),
     )
     dumped = trajectory.model_dump(mode="json")
     assert dumped["steps"][0]["action"] == {
@@ -106,7 +109,26 @@ def test_action_step_and_trajectory_have_no_wire_or_probability_fields(
             environment_id=environment.environment_id,
             steps=[Step(index=1, action=action, observation=observation)],
             termination="submitted",
+            settlement=Settlement(status="unresolved"),
         )
+
+
+def test_trajectory_records_orthogonal_termination_and_settlement() -> None:
+    trajectory = Trajectory(
+        task_id="task",
+        environment_id="env",
+        steps=[],
+        termination="context_overlong",
+        settlement=Settlement(status="unresolved"),
+    )
+
+    assert trajectory.termination == "context_overlong"
+    assert trajectory.settlement == Settlement(status="unresolved", detail=None)
+
+
+def test_settlement_rejects_unknown_status() -> None:
+    with pytest.raises(ValidationError):
+        Settlement(status="timeout")
 
 
 def test_verification_requires_real_attributable_evidence() -> None:

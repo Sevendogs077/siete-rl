@@ -86,7 +86,7 @@ def layered_score(
     pass_to_pass: list[str],
     lambda_: float,
 ) -> float:
-    """按分层公式给 applied-but-unresolved 的 patch 打部分分。
+    """resolved 固定返回 1；仅对 applied-but-unresolved patch 计算部分分。
 
     匹配按 (文件路径, 裸测试名) 元组，跨文件同名测试不再互相认领
     （旧裸名匹配曾把 A 文件的 P2P 通过错记为 B 文件的 F2P 通过，并把

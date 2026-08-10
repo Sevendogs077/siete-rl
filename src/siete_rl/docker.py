@@ -35,6 +35,13 @@ class ContainerCleanupError(DockerRuntimeError):
     pass
 
 
+class WorkspaceStateError(RuntimeError):
+    """容器内 workspace Git 已启动，但最终状态无法可靠读取。"""
+
+
+_WORKSPACE_GIT_STARTED = "__SIETE_WORKSPACE_GIT_STARTED__"
+
+
 @dataclass(frozen=True, slots=True)
 class CommandResult:
     argv: list[str]
@@ -224,17 +231,53 @@ class DockerSandbox:
         )
 
     def get_diff(self) -> str:
-        intent = self.exec(
-            ["git", "-C", self.environment.workdir, "add", "-N", "--", "."]
+        self._workspace_git(
+            "failed to register untracked files",
+            "add",
+            "-N",
+            "--",
+            ".",
         )
-        if intent.exit_code != 0 or intent.timed_out:
-            raise ContainerExecError(_failure("failed to register untracked files", intent))
-        result = self.exec(
-            ["git", "-C", self.environment.workdir, "diff", "--binary", "--no-ext-diff"]
+        result = self._workspace_git(
+            "failed to extract git diff",
+            "diff",
+            self.task.base_commit,
+            "--binary",
+            "--no-ext-diff",
         )
-        if result.exit_code != 0 or result.timed_out:
-            raise ContainerExecError(_failure("failed to extract git diff", result))
         return result.stdout
+
+    def _workspace_git(self, failure_prefix: str, *arguments: str) -> CommandResult:
+        script = (
+            f"printf '%s\\n' '{_WORKSPACE_GIT_STARTED}' >&2; "
+            'workspace=$1; shift; exec git -C "$workspace" "$@"'
+        )
+        result = self.exec(
+            [
+                "/bin/bash",
+                "-lc",
+                script,
+                "siete-workspace-git",
+                self.environment.workdir,
+                *arguments,
+            ]
+        )
+        started = _WORKSPACE_GIT_STARTED in result.stderr
+        stderr = result.stderr.replace(_WORKSPACE_GIT_STARTED + "\n", "").replace(
+            _WORKSPACE_GIT_STARTED, ""
+        )
+        cleaned = CommandResult(
+            argv=result.argv,
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=stderr,
+            duration_sec=result.duration_sec,
+            timed_out=result.timed_out,
+        )
+        if cleaned.exit_code != 0 or cleaned.timed_out:
+            error_type = WorkspaceStateError if started else ContainerExecError
+            raise error_type(_failure(failure_prefix, cleaned))
+        return cleaned
 
     def close(self) -> None:
         """按明确 ID 删除；失败保留 ID，后续调用会真正重试。"""

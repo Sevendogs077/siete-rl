@@ -17,6 +17,14 @@ Termination = Literal[
 
 LoopExit = Literal["iteration_cap", "context_overlong", "format_exhausted"]
 
+SettlementStatus = Literal[
+    "resolved",
+    "unresolved",
+    "empty_patch",
+    "agent_error",
+    "infra_error",
+]
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -88,11 +96,17 @@ class TerminalEvent(StrictModel):
     step_index: int = Field(ge=0)
 
 
+class Settlement(StrictModel):
+    status: SettlementStatus
+    detail: str | None = None
+
+
 class Trajectory(StrictModel):
     task_id: str = Field(min_length=1)
     environment_id: str = Field(min_length=1)
     steps: list[Step]
     termination: Termination
+    settlement: Settlement
 
     @model_validator(mode="after")
     def validate_step_order(self) -> "Trajectory":

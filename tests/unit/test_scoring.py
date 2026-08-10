@@ -47,11 +47,21 @@ def test_parse_pytest_summary_splits_passed_and_failed():
     assert all(" - " not in n for n in failed)
 
 
-def test_resolved_is_exactly_one():
+@pytest.mark.parametrize("lambda_", [0.5, 8.0, 20.0])
+@pytest.mark.parametrize(
+    ("fail_to_pass", "pass_to_pass"),
+    [
+        ([], []),
+        (["a.py::test_fix"], ["b.py::test_old"]),
+    ],
+)
+def test_resolved_is_exactly_one(lambda_, fail_to_pass, pass_to_pass):
     v = _verification(result="resolved", apply_status="applied", exit_code=0)
     assert layered_score(
-        verification=v, fail_to_pass=["t1"], pass_to_pass=["t2"],
-        lambda_=LAMBDA,
+        verification=v,
+        fail_to_pass=fail_to_pass,
+        pass_to_pass=pass_to_pass,
+        lambda_=lambda_,
     ) == 1.0
 
 

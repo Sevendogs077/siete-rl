@@ -213,7 +213,7 @@ def build_grpo_config(
         multi_objective_aggregation=grpo.multi_objective_aggregation,
         scale_rewards=grpo.scale_rewards,
         loss_type=grpo.loss_type,
-        mask_truncated_completions=grpo.mask_truncated_completions,
+        mask_truncated_completions=False,
         router_aux_loss_coef=grpo.router_aux_loss_coef,
         shuffle_dataset=grpo.shuffle_dataset,
         vllm_importance_sampling_correction=grpo.vllm_importance_sampling_correction,
@@ -507,7 +507,6 @@ def _run_once(
             recorder,
             binary_reward,
             config.grpo.reward_type,
-            max_infra_error_ratio=config.grpo.max_infra_error_ratio,
             verifier_parallel_workers=config.generation.verifier_parallel_workers,
         )
         stage = "tokenizer"
@@ -706,7 +705,6 @@ def _recording_reward(
     recorder: Any,
     reward_adapter: Callable[..., list[float | None]],
     reward_type: str = "binary",
-    max_infra_error_ratio: float = 0.5,
     verifier_parallel_workers: int = 1,
 ):
     def reward(
@@ -735,13 +733,13 @@ def _recording_reward(
                 max_workers=verifier_parallel_workers,
                 **kwargs,
             )
-            # 熔断：零星 infra 错误以 None 交给 TRL censor；占比达到阈值说明是
-            # 系统性故障（如 docker daemon 挂掉），继续训练只会浪费 rollout。
-            infra_errors = sum(value is None for value in rewards)
-            if infra_errors / len(environments) >= max_infra_error_ratio:
+            if any(
+                environment.trajectory is None
+                or getattr(environment.trajectory, "settlement", None) is None
+                for environment in environments
+            ):
                 raise RecordingRuntimeError(
-                    f"infra_error rollouts dominate group: {infra_errors}/{len(environments)} "
-                    f">= max_infra_error_ratio {max_infra_error_ratio}"
+                    "reward adapter must finalize every rollout with a settlement"
                 )
             trajectory_task_ids = {
                 environment.trajectory.task_id
@@ -767,6 +765,10 @@ def _recording_reward(
                 episode_ids=[environment.episode_id for environment in environments],
                 rewards=rewards,
                 verifications=[environment.verification for environment in environments],
+                settlements=[
+                    environment.trajectory.settlement
+                    for environment in environments
+                ],
             )
             recorder.observe_native_policy_path(
                 _native_policy_path_reached(environments)

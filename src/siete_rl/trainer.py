@@ -19,9 +19,9 @@
    ``pending_action``，真实工具执行前快照 ``len(env._steps)``，执行后按是否
    追加 Step 原子回填为 ``step`` 与 ``step_index``，或降级为 ``invalid_call``。
 
-process mask 开启时，trainer 记录 turn facts，并在父类完成 reward/advantage 后调用
-``process_mask.build_process_token_weights``；规则、governance 和 sign 语义全部由该纯模块拥有。
-返回的二元 ``token_weights`` 仅替换 Liger reward-credit loss mask。
+trainer 始终记录 turn facts，并在父类完成 reward/advantage 后先应用
+always-on credit eligibility，再可选应用 process mask。返回的二元
+``token_weights`` 替换 Liger reward-credit loss mask。
 
 另新增 ``_generate_tool_loop_turn``：backport huggingface/trl#6673 —— tool loop
 post-tool 再生成的 K 条 entry 各自携带独立采样的 history，不满足 server 模式
@@ -50,7 +50,13 @@ from trl.chat_template_utils import parse_response
 from trl.extras.profiling import profiling_context
 
 from siete_rl.models import LoopExit
-from siete_rl.process_mask import ProcessMaskStats, TurnRecord, build_process_token_weights
+from siete_rl.process_mask import (
+    CreditMaskStats,
+    ProcessMaskStats,
+    TurnRecord,
+    build_credit_token_weights,
+    build_process_token_weights,
+)
 
 
 _PARSE_ERROR_SENTINEL = "swe_agent_parse_error"
@@ -73,7 +79,13 @@ def _classify_turn(tool_calls: list) -> str:
     return "pending_action"
 
 
-def _record_turn(environment, start: int, end: int, kind: str, step_index: int | None) -> None:
+def _record_turn(
+    environment,
+    start: int,
+    end: int,
+    kind: str,
+    step_index: int | None,
+) -> None:
     """空区间不记录；生成的 pending_action 在工具执行后回填。"""
     if end <= start:
         return
@@ -100,8 +112,8 @@ class SWEGRPOTrainer(GRPOTrainer):
         self._tool_parallel_workers = tool_parallel_workers
         self._use_process_mask = use_process_mask
         super().__init__(*args, **kwargs)
-        if self._use_process_mask and not self.use_liger_kernel:
-            raise ValueError("process mask requires use_liger_kernel=true")
+        if not self.use_liger_kernel:
+            raise ValueError("credit mask requires use_liger_kernel=true")
 
     # >>> swe_agent: #6673 backport — tool loop 再生成禁止 server stride 去重
     def _generate_tool_loop_turn(self, prompt_ids, images, multimodal_fields):
@@ -199,8 +211,6 @@ class SWEGRPOTrainer(GRPOTrainer):
 
     def _generate_and_score_completions(self, inputs):
         output = super()._generate_and_score_completions(inputs)
-        if not self._use_process_mask:
-            return output
         environments = self.environments
         completion_mask = output["completion_mask"]
         tool_mask = output.get("tool_mask")
@@ -215,28 +225,39 @@ class SWEGRPOTrainer(GRPOTrainer):
             or advantages.shape[0] != completion_mask.size(0)
         ):
             raise RuntimeError(
-                "process mask requires aligned environments, tool_mask, and advantages"
+                "credit mask requires aligned environments, tool_mask, and advantages"
             )
 
         base_mask = (completion_mask * tool_mask).float()
         token_weights = torch.zeros_like(base_mask)
-        stats_rows = []
+        credit_stats_rows = []
+        process_stats_rows = []
         for row_index, environment in enumerate(environments):
-            row, stats = build_process_token_weights(
+            row, credit_stats = build_credit_token_weights(
                 turns=environment.turn_records,
-                steps=environment._steps,
                 termination=environment.trajectory.termination,
-                advantage=float(advantages[row_index].item()),
+                settlement=environment.trajectory.settlement,
                 base_mask=base_mask[row_index].tolist(),
             )
+            credit_stats_rows.append(credit_stats)
+            if self._use_process_mask:
+                row, process_stats = build_process_token_weights(
+                    turns=environment.turn_records,
+                    steps=environment._steps,
+                    termination=environment.trajectory.termination,
+                    advantage=float(advantages[row_index].item()),
+                    base_mask=row,
+                )
+                process_stats_rows.append(process_stats)
             token_weights[row_index] = torch.tensor(
                 row,
                 dtype=token_weights.dtype,
                 device=token_weights.device,
             )
-            stats_rows.append(stats)
         output["token_weights"] = token_weights
-        self._record_process_mask_metrics(stats_rows)
+        self._record_credit_mask_metrics(credit_stats_rows)
+        if self._use_process_mask:
+            self._record_process_mask_metrics(process_stats_rows)
         self._record_recovered_positive_support(
             environments, advantages, token_weights
         )
@@ -259,8 +280,20 @@ class SWEGRPOTrainer(GRPOTrainer):
         self._metrics[mode]["process_mask/masked_token_frac"].append(
             sum(row.masked_token_frac for row in rows) / n_rows
         )
-        self._metrics[mode]["process_mask/governance_masked"].append(
-            float(sum(row.governance_masked for row in rows))
+
+    def _record_credit_mask_metrics(self, rows: list[CreditMaskStats]) -> None:
+        mode = "train" if self.model.training else "eval"
+        n_rows = len(rows)
+        if n_rows == 0:
+            raise RuntimeError("credit mask stats require at least one row")
+        self._metrics[mode]["credit_mask/infra_rows"].append(
+            float(sum(row.infra_rows for row in rows))
+        )
+        self._metrics[mode]["credit_mask/truncated_turns"].append(
+            float(sum(row.truncated_turns for row in rows))
+        )
+        self._metrics[mode]["credit_mask/masked_token_frac"].append(
+            sum(row.masked_token_frac for row in rows) / n_rows
         )
 
     def _record_recovered_positive_support(
@@ -271,7 +304,7 @@ class SWEGRPOTrainer(GRPOTrainer):
             index
             for index, environment in enumerate(environments)
             if environment.trajectory.termination
-            in {"iteration_cap", "format_exhausted"}
+            in {"iteration_cap", "format_exhausted", "context_overlong"}
             and getattr(environment, "verification", None) is not None
             and environment.verification.result == "resolved"
         ]
@@ -290,8 +323,24 @@ class SWEGRPOTrainer(GRPOTrainer):
     def compute_liger_loss(self, unwrapped_model, inputs):
         # token_weights 的支撑集已在 completion_mask×tool_mask 内，替换后父类的
         # loss_mask = completion_mask * token_weights ≡ token_weights。
-        if self._use_process_mask and "token_weights" in inputs:
-            inputs = dict(inputs, tool_mask=inputs["token_weights"])
+        if "token_weights" in inputs:
+            token_weights = inputs["token_weights"]
+            completion_mask = inputs.get("completion_mask")
+            effective_mask = (
+                token_weights
+                if completion_mask is None
+                else token_weights * completion_mask
+            )
+            if not torch.any(effective_mask):
+                dtype = (
+                    token_weights.dtype
+                    if token_weights.is_floating_point()
+                    else torch.float32
+                )
+                return torch.zeros(
+                    (), device=token_weights.device, dtype=dtype, requires_grad=True
+                )
+            inputs = dict(inputs, tool_mask=token_weights)
         return super().compute_liger_loss(unwrapped_model, inputs)
 
     @staticmethod
@@ -339,15 +388,21 @@ class SWEGRPOTrainer(GRPOTrainer):
         # <<< swe_agent
         idxs_with_tool = [idx for idx, tool_call in enumerate(tool_calls) if tool_call]
         tool_calls = [tool_calls[idx] for idx in idxs_with_tool]
+        last_turn_truncated = [False] * len(completions)
+        # >>> swe_agent: 仅由项目终止语义写回循环退出原因
+        loop_exit_reasons: dict[int, LoopExit] = {}
+        # <<< swe_agent
         # >>> swe_agent: 首段生成记录为 turn，token 区间为 [0, len(completion_ids[idx]))
         if self.environments:
             for idx, calls in zip(idxs_with_tool, tool_calls, strict=True):
                 environment = self.environments[idx]
                 if environment is not None:
                     _record_turn(environment, 0, len(completion_ids[idx]), _classify_turn(calls), None)
-        # <<< swe_agent
-        # >>> swe_agent: 仅由项目终止语义写回循环退出原因
-        loop_exit_reasons: dict[int, LoopExit] = {}
+                    last_turn_truncated[idx] = self._generation_truncated(
+                        completion_ids[idx]
+                    )
+                    if last_turn_truncated[idx]:
+                        loop_exit_reasons[idx] = "context_overlong"
         # <<< swe_agent
         tool_mask = [[1] * len(ids) for ids in completion_ids]  # 0 for tool result tokens, 1 elsewhere
         # Collect images from multimodal tool responses for the forward pass
@@ -359,9 +414,13 @@ class SWEGRPOTrainer(GRPOTrainer):
         while idxs_with_tool and iteration_num < self.max_tool_calling_iterations:
             prompt_completion_tools = [prompts[i] for i in idxs_with_tool]  # select only prompts that need tool calls
             # Snapshot state so we can rollback tool results that would exceed max_completion_length
-            completions_len_before = [len(completions[i]) for i in idxs_with_tool]
-            tool_images_len_before = [len(tool_images[i]) for i in idxs_with_tool]
-            prompts_len_before = [len(prompts[i]) for i in idxs_with_tool]
+            completions_len_before = {
+                i: len(completions[i]) for i in idxs_with_tool
+            }
+            tool_images_len_before = {
+                i: len(tool_images[i]) for i in idxs_with_tool
+            }
+            prompts_len_before = {i: len(prompts[i]) for i in idxs_with_tool}
 
             # Call the tools, and build the new prompt for generation
             # >>> swe_agent: 三段式——串行前处理 / 跨样本并行执行 / 串行聚合
@@ -486,18 +545,29 @@ class SWEGRPOTrainer(GRPOTrainer):
                 format_error_counts[idx_with_tool] >= self.max_consecutive_protocol_errors
                 for idx_with_tool in idxs_with_tool
             ]
+            truncated_flags = [
+                last_turn_truncated[idx_with_tool]
+                for idx_with_tool in idxs_with_tool
+            ]
             exit_flags = [
-                terminated or breaker
-                for terminated, breaker in zip(terminated_flags, breaker_flags, strict=True)
+                terminated or breaker or truncated
+                for terminated, breaker, truncated in zip(
+                    terminated_flags, breaker_flags, truncated_flags, strict=True
+                )
             ]
             if any(exit_flags):
                 for idx in range(len(idxs_with_tool)):
                     if exit_flags[idx]:
                         idx_with_tool = idxs_with_tool[idx]
-                        if terminated_flags[idx]:
-                            del completions[idx_with_tool][completions_len_before[idx] :]
-                            del tool_images[idx_with_tool][tool_images_len_before[idx] :]
-                            del prompts[idx_with_tool][prompts_len_before[idx] :]
+                        if truncated_flags[idx]:
+                            del completions[idx_with_tool][completions_len_before[idx_with_tool] :]
+                            del tool_images[idx_with_tool][tool_images_len_before[idx_with_tool] :]
+                            del prompts[idx_with_tool][prompts_len_before[idx_with_tool] :]
+                            loop_exit_reasons[idx_with_tool] = "context_overlong"
+                        elif terminated_flags[idx]:
+                            del completions[idx_with_tool][completions_len_before[idx_with_tool] :]
+                            del tool_images[idx_with_tool][tool_images_len_before[idx_with_tool] :]
+                            del prompts[idx_with_tool][prompts_len_before[idx_with_tool] :]
                         elif breaker_flags[idx]:
                             loop_exit_reasons[idx_with_tool] = "format_exhausted"
                 idxs_with_tool = [
@@ -540,9 +610,9 @@ class SWEGRPOTrainer(GRPOTrainer):
             for idx in range(len(idxs_with_tool)):
                 if overlong[idx]:
                     idx_with_tool = idxs_with_tool[idx]
-                    del completions[idx_with_tool][completions_len_before[idx] :]
-                    del tool_images[idx_with_tool][tool_images_len_before[idx] :]
-                    del prompts[idx_with_tool][prompts_len_before[idx] :]
+                    del completions[idx_with_tool][completions_len_before[idx_with_tool] :]
+                    del tool_images[idx_with_tool][tool_images_len_before[idx_with_tool] :]
+                    del prompts[idx_with_tool][prompts_len_before[idx_with_tool] :]
             # >>> swe_agent: overlong 撤出的样本归因 context_overlong
             for idx, o in zip(idxs_with_tool, overlong, strict=True):
                 if o:
@@ -587,6 +657,9 @@ class SWEGRPOTrainer(GRPOTrainer):
                 prompt_completion_tool_ids, loop_images, loop_multimodal_fields
             )
             # <<< swe_agent
+            post_tool_truncated = [
+                self._generation_truncated(ids) for ids in post_tool_ids
+            ]
 
             # Truncate so that pct[len(prompt_ids[idx]) :] + post_tool does not exceed max_completion_length.
             # The pre-regen check guarantees len(completion_tool_ids) <= max_completion_length, so any
@@ -597,6 +670,7 @@ class SWEGRPOTrainer(GRPOTrainer):
                 completion_tool_length = len(prompt_completion_tool_ids[idx]) - len(prompt_ids[idx_with_tool])
                 excess_length = completion_tool_length + len(post_tool_ids[idx]) - self.max_completion_length
                 if excess_length > 0:
+                    post_tool_truncated[idx] = True
                     new_len = len(post_tool_ids[idx]) - excess_length
                     post_tool_ids[idx] = post_tool_ids[idx][:new_len]
                     if logprobs is not None:
@@ -653,6 +727,9 @@ class SWEGRPOTrainer(GRPOTrainer):
                     _record_turn(
                         self.environments[idx], start, start + len(post_tool_ids[pos]), _classify_turn(calls), None
                     )
+                    last_turn_truncated[idx] = post_tool_truncated[pos]
+                    if last_turn_truncated[idx]:
+                        loop_exit_reasons[idx] = "context_overlong"
                 # <<< swe_agent
             # <<< swe_agent
             idxs_with_tool = [idx for idx, tool_call in zip(idxs_with_tool, tool_calls, strict=True) if tool_call]
@@ -666,6 +743,24 @@ class SWEGRPOTrainer(GRPOTrainer):
             for idx, reason in loop_exit_reasons.items():
                 environment = self.environments[idx]
                 if environment is not None:
+                    if (
+                        reason == "context_overlong"
+                        and last_turn_truncated[idx]
+                        and environment.turn_records
+                    ):
+                        environment.turn_records[-1] = replace(
+                            environment.turn_records[-1], truncated=True
+                        )
                     environment._record_loop_exit(reason)
         # <<< swe_agent
         return tool_mask, completions, completion_ids, logprobs, tool_call_count, tool_failure_count, tool_images
+
+    def _generation_truncated(self, token_ids) -> bool:
+        if not token_ids:
+            return False
+        eos_and_pad = {
+            getattr(self._tokenizer, "eos_token_id", None),
+            getattr(self._tokenizer, "pad_token_id", None),
+        }
+        eos_and_pad.discard(None)
+        return bool(eos_and_pad) and token_ids[-1] not in eos_and_pad

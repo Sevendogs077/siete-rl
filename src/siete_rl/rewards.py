@@ -16,9 +16,8 @@ def binary_reward(
 ) -> list[float | None]:
     """同位置 finalize；基础设施异常返回 None，由 TRL 从组基线中排除。
 
-    此处不再做错误政策：契约错误（计数不匹配）照样抛出，单样本 infra 降级
-    由 SWEEnvironment._finalize 统一收口，零星故障由 TRL censor，系统性故障由
-    _recording_reward 熔断。
+    此处不再做错误政策：契约错误（计数不匹配）照样抛出，单样本 infra 由
+    SWEEnvironment._finalize 统一收口并以 None 交给 TRL censor。
 
     max_workers > 1 且样本数 > 1 时跨样本并行 finalize：每条 trajectory 的
     environment/verifier/容器状态互相独立（实例级隔离），pool.map 按提交序保序返回，
@@ -33,7 +32,10 @@ def binary_reward(
     def finalize(pair: tuple[SWEEnvironment, object]) -> float | None:
         environment, completion = pair
         value = environment._finalize(completion)
-        if not environment.scorable:
+        settlement = environment.settlement
+        if settlement is None:
+            raise RuntimeError("finalized environment is missing settlement")
+        if settlement.status == "infra_error":
             return None
         return value
 

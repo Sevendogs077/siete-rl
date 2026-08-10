@@ -29,7 +29,7 @@ from siete_rl.train import (
     run,
 )
 from siete_rl.launcher import VLLMEndpoints
-from siete_rl.models import Trajectory
+from siete_rl.models import Settlement, Trajectory
 from siete_rl.recording import RunRecorder
 
 
@@ -52,6 +52,7 @@ def _trajectory_for(task_id: str) -> Trajectory:
             "environment_id": task_id,
             "steps": [],
             "termination": "format_exhausted",
+            "settlement": {"status": "empty_patch"},
         }
     )
 
@@ -208,6 +209,7 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     )
     assert grpo_config.router_aux_loss_coef == 0.0
     assert grpo_config.shuffle_dataset is True
+    assert grpo_config.mask_truncated_completions is False
 
 
 def test_grpo_config_enables_liger_kernel(tmp_path: Path) -> None:
@@ -411,6 +413,7 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
                     "task_id": "getmoto__moto-7023",
                     "termination": "format_exhausted",
                     "steps": [],
+                    "settlement": Settlement(status="unresolved"),
                 },
             )()
         return [float(environment.index == 0) for environment in environments]
@@ -489,7 +492,8 @@ def test_recording_reward_preserves_an_earlier_native_policy_path() -> None:
                 {
                     "task_id": "getmoto__moto-7023",
                     "termination": "submitted",
-                        "steps": [step("str_replace_editor"), step("finish")],
+                    "steps": [step("str_replace_editor"), step("finish")],
+                    "settlement": Settlement(status="resolved"),
                 },
             )()
             environment.frozen_patch = "diff --git a/x b/x\n"
@@ -503,6 +507,7 @@ def test_recording_reward_preserves_an_earlier_native_policy_path() -> None:
                     "task_id": "getmoto__moto-7023",
                     "termination": "context_overlong",
                     "steps": [],
+                    "settlement": Settlement(status="empty_patch"),
                 },
             )()
             environment.frozen_patch = None
@@ -544,7 +549,15 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
 
     class FakeEnvironment:
         def __init__(self, task_id: str) -> None:
-            self.trajectory = type("Trajectory", (), {"task_id": task_id, "termination": "format_exhausted"})()
+            self.trajectory = type(
+                "Trajectory",
+                (),
+                {
+                    "task_id": task_id,
+                    "termination": "format_exhausted",
+                    "settlement": Settlement(status="empty_patch"),
+                },
+            )()
             self.frozen_patch = None
             self.verification = None
 
@@ -567,6 +580,9 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
 
 
 class _InfraRecorder:
+    def __init__(self) -> None:
+        self.completed = []
+
     def begin_group(self, *args, **kwargs):
         del args, kwargs
 
@@ -574,7 +590,7 @@ class _InfraRecorder:
         del args, kwargs
 
     def complete_group(self, *args, **kwargs):
-        del args, kwargs
+        self.completed.append((args, kwargs))
 
     def observe_native_policy_path(self, reached):
         del reached
@@ -589,7 +605,14 @@ class _InfraEnvironment:
         self.trajectory = type(
             "Trajectory",
             (),
-            {"task_id": "getmoto__moto-7023", "termination": termination, "steps": []},
+            {
+                "task_id": "getmoto__moto-7023",
+                "termination": termination,
+                "steps": [],
+                "settlement": Settlement(
+                    status="infra_error" if termination == "infra_error" else "unresolved"
+                ),
+            },
         )()
         self.frozen_patch = None
         self.verification = None
@@ -598,21 +621,21 @@ class _InfraEnvironment:
         return []
 
 
-def test_recording_reward_aborts_when_infra_errors_dominate_group() -> None:
-    """系统性 docker 故障必须 fail-fast：group 内 infra_error 占比达到阈值即中止 run。"""
-    environments = [_InfraEnvironment("infra_error") for _ in range(3)] + [
-        _InfraEnvironment("format_exhausted")
-    ]
-    reward = _recording_reward(
-        _InfraRecorder(), lambda **kwargs: [None, None, None, 0.0]
-    )
-    with pytest.raises(RecordingRuntimeError, match="infra_error"):
-        reward(
-            prompts=[[]] * 4,
-            completions=[[]] * 4,
-            environments=environments,
-            task_id=["getmoto__moto-7023"] * 4,
-        )
+def test_recording_reward_never_aborts_fully_censored_group() -> None:
+    environments = [_InfraEnvironment("infra_error") for _ in range(4)]
+    recorder = _InfraRecorder()
+    reward = _recording_reward(recorder, lambda **kwargs: [None] * 4)
+
+    assert reward(
+        prompts=[[]] * 4,
+        completions=[[]] * 4,
+        environments=environments,
+        task_id=["getmoto__moto-7023"] * 4,
+    ) == [None] * 4
+    assert len(recorder.completed) == 1
+    assert recorder.completed[0][1]["settlements"] == [
+        Settlement(status="infra_error")
+    ] * 4
 
 
 def test_recording_reward_tolerates_scattered_infra_errors() -> None:
@@ -841,6 +864,16 @@ def test_recording_reward_forwards_verifier_parallel_workers() -> None:
 
     def adapter(**kwargs):
         seen.update(kwargs)
+        kwargs["environments"][0].trajectory = type(
+            "Trajectory",
+            (),
+            {
+                "task_id": "getmoto__moto-7023",
+                "termination": "unresolved",
+                "settlement": Settlement(status="unresolved"),
+                "steps": [],
+            },
+        )()
         return [0.0]
 
     class FakeRecorder:

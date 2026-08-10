@@ -12,6 +12,7 @@ from siete_rl.docker import (
     ContainerCreateError,
     ContainerExecError,
     DockerRuntimeError,
+    WorkspaceStateError,
 )
 from siete_rl.environment import SWEEnvironment
 from siete_rl.models import Environment, Evaluation, Sample, Task, Verification
@@ -85,63 +86,54 @@ def test_only_three_public_tools_and_reset_is_silent() -> None:
     assert sandboxes
 
 
-def test_finish_freezes_empty_patch_without_verifier() -> None:
-    env, task_id, _, verifiers = harness(); env.reset(task_id)
-    assert env.finish() == ""
-    assert env.terminated
-    assert env.frozen_patch == ""
-    assert env._finalize([]) == 0.0
-    assert not verifiers
-
-
-def test_finish_nonempty_patch_verifies_once() -> None:
-    env, task_id, sandboxes, verifiers = harness(); env.reset(task_id); sandboxes[0].diff = "diff --git a/x b/x\n"
-    env.finish()
-    assert env._finalize([]) == 1.0
-    assert env._finalize([]) == 1.0
-    assert verifiers[0].calls == 1
-
-
-@pytest.mark.parametrize("termination", ["iteration_cap", "format_exhausted"])
-def test_healthy_non_submit_nonempty_patch_is_verified(termination: str) -> None:
-    env, task_id, sandboxes, verifiers = harness()
+@pytest.mark.parametrize(
+    "termination",
+    ["submitted", "iteration_cap", "context_overlong", "format_exhausted"],
+)
+@pytest.mark.parametrize(
+    ("expected_settlement", "diff", "verification", "expected_reward"),
+    [
+        ("empty_patch", "", None, 0.0),
+        (
+            "unresolved",
+            "diff --git a/x b/x\n",
+            Verification(
+                result="unresolved",
+                patch_apply_status="applied",
+                pytest_started=True,
+                exit_code=1,
+                stdout="+ pytest\n1 failed",
+                stderr="",
+            ),
+            0.0,
+        ),
+        ("resolved", "diff --git a/x b/x\n", None, 1.0),
+    ],
+)
+def test_healthy_terminations_share_final_workspace_settlement(
+    termination, expected_settlement, diff, verification, expected_reward
+) -> None:
+    env, task_id, sandboxes, verifiers = harness(verification=verification)
     env.reset(task_id)
-    sandboxes[0].diff = "diff --git a/x b/x\n"
-    env._record_loop_exit(termination)
+    sandboxes[0].diff = diff
+    if termination == "submitted":
+        assert env.finish() == ""
+        assert env.frozen_patch is None
+    else:
+        env._record_loop_exit(termination)
 
-    assert env._finalize([]) == 1.0
-    assert env.frozen_patch == "diff --git a/x b/x\n"
+    assert env._finalize([]) == expected_reward
+    assert env._finalize([]) == expected_reward
+    assert env.frozen_patch == diff
     assert env.trajectory is not None
     assert env.trajectory.termination == termination
-    assert verifiers[0].calls == 1
+    assert env.trajectory.settlement.status == expected_settlement
+    assert len(verifiers) == (0 if expected_settlement == "empty_patch" else 1)
+    if verifiers:
+        assert verifiers[0].calls == 1
 
 
-def test_context_overlong_preserves_patch_without_verification() -> None:
-    env, task_id, sandboxes, verifiers = harness()
-    env.reset(task_id)
-    sandboxes[0].diff = "diff --git a/x b/x\n"
-    env._record_loop_exit("context_overlong")
-
-    assert env._finalize([]) == 0.0
-    assert env.frozen_patch == "diff --git a/x b/x\n"
-    assert env.trajectory is not None
-    assert env.trajectory.termination == "context_overlong"
-    assert not verifiers
-
-
-def test_iteration_cap_empty_patch_does_not_verify() -> None:
-    env, task_id, _, verifiers = harness()
-    env.reset(task_id)
-    env._record_loop_exit("iteration_cap")
-
-    assert env._finalize([]) == 0.0
-    assert env.frozen_patch == ""
-    assert env.trajectory is not None
-    assert env.trajectory.termination == "iteration_cap"
-    assert not verifiers
-
-
-def test_non_submit_diff_failure_is_sample_local_infra_error() -> None:
+def test_external_diff_failure_is_sample_local_infra_error() -> None:
     env, task_id, sandboxes, verifiers = harness()
     env.reset(task_id)
     env._record_loop_exit("iteration_cap")
@@ -154,8 +146,39 @@ def test_non_submit_diff_failure_is_sample_local_infra_error() -> None:
     assert env._finalize([]) == 0.0
     assert env.trajectory is not None
     assert env.trajectory.termination == "iteration_cap"
+    assert env.trajectory.settlement.status == "infra_error"
     assert env.scorable is False
     assert not verifiers
+
+
+def test_started_workspace_git_failure_is_agent_error() -> None:
+    env, task_id, sandboxes, verifiers = harness()
+    env.reset(task_id)
+    env._record_loop_exit("context_overlong")
+
+    def failing_diff() -> str:
+        raise WorkspaceStateError("index is corrupt")
+
+    sandboxes[0].get_diff = failing_diff
+
+    assert env._finalize([]) == 0.0
+    assert env.trajectory is not None
+    assert env.trajectory.termination == "context_overlong"
+    assert env.trajectory.settlement.status == "agent_error"
+    assert env.scorable is True
+    assert not verifiers
+
+
+def test_context_overlong_overrides_submitted_for_same_truncated_turn() -> None:
+    env, task_id, sandboxes, _ = harness()
+    env.reset(task_id)
+    sandboxes[0].diff = "diff --git a/x b/x\n"
+    env.finish()
+    env._record_loop_exit("context_overlong")
+
+    assert env._finalize([]) == 1.0
+    assert env.trajectory.termination == "context_overlong"
+    assert env.trajectory.settlement.status == "resolved"
 
 
 def test_finalize_layered_gives_partial_score() -> None:
@@ -187,20 +210,39 @@ def test_close_rollout_cleanup_failure_is_not_fatal() -> None:
 
 
 def test_finalize_degrades_tool_infra_error_to_zero_reward() -> None:
-    """finish 时 get_diff 失败（如容器内 gitlink 状态）：单样本记 infra_error，不再传播杀 run。"""
+    """工具执行 plumbing 失败：单样本记 infra_error，不再传播杀 run。"""
     env, task_id, sandboxes, _ = harness()
     env.reset(task_id)
 
-    def failing_diff() -> str:
-        raise ContainerExecError("failed to register untracked files (exit=128)")
+    def failing_exec(*args, **kwargs):
+        raise ContainerExecError("daemon unavailable")
 
-    sandboxes[0].get_diff = failing_diff
+    sandboxes[0].exec = failing_exec
     with pytest.raises(DockerRuntimeError):
-        env.finish()  # 生成循环（trainer）会接住此异常并继续轮询 terminated
+        env.execute_bash("true")  # trainer 会接住并继续轮询 terminated
 
     assert env.terminated
     assert env._finalize([]) == 0.0
     assert env.trajectory.termination == "infra_error"
+    assert env.trajectory.settlement.status == "infra_error"
+
+
+def test_context_overlong_does_not_override_tool_infra_error() -> None:
+    env, task_id, sandboxes, _ = harness()
+    env.reset(task_id)
+
+    def failing_exec(*args, **kwargs):
+        raise ContainerExecError("daemon unavailable")
+
+    sandboxes[0].exec = failing_exec
+    with pytest.raises(DockerRuntimeError):
+        env.execute_bash("true")
+    env._record_loop_exit("context_overlong")
+
+    assert env._finalize([]) == 0.0
+    assert env.trajectory.termination == "infra_error"
+    assert env.trajectory.settlement.status == "infra_error"
+    assert env.scorable is False
 
 
 def test_finalize_degrades_verifier_infra_error() -> None:
@@ -217,6 +259,7 @@ def test_finalize_degrades_verifier_infra_error() -> None:
 
     assert env._finalize([]) == 0.0
     assert env.trajectory.termination == "submitted"
+    assert env.trajectory.settlement.status == "infra_error"
     assert env.scorable is False
 
 
@@ -247,6 +290,7 @@ def test_parallel_finalize_keeps_verifier_infra_error_sample_local() -> None:
 
     assert rewards == [None, 1.0]
     assert failed.trajectory.termination == "submitted"
+    assert failed.trajectory.settlement.status == "infra_error"
     assert failed.scorable is False
     assert passed.scorable is True
     assert passed.trajectory.termination == "submitted"
@@ -277,6 +321,7 @@ def test_reset_infra_failure_terminates_episode_without_raising(monkeypatch: pyt
     assert env.terminated
     assert env._finalize([]) == 0.0
     assert env.trajectory.termination == "infra_error"
+    assert env.trajectory.settlement.status == "infra_error"
 
 
 def test_parallel_finalize_cleanup_events_stay_per_environment() -> None:

@@ -68,7 +68,6 @@ grpo:
   delta: null
   beta: 0.0
   importance_sampling_level: token
-  mask_truncated_completions: true
   router_aux_loss_coef: 0.0
   shuffle_dataset: true
   vllm_importance_sampling_correction: true

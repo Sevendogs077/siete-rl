@@ -10,6 +10,7 @@ from siete_rl.docker import DockerSandbox, SubprocessDockerClient, inspect_image
 from siete_rl.environment import SWEEnvironment
 from siete_rl.models import Environment, Evaluation, Sample, Task
 from siete_rl.swegym import load_task_instance
+from siete_rl.verifier import SWEGymVerifier
 
 
 pytestmark = pytest.mark.docker
@@ -37,7 +38,14 @@ def test_real_openhands_three_tool_episode(domain) -> None:
     def make_sandbox(sample, episode_id, scope):
         value = DockerSandbox(client=SubprocessDockerClient(), task=sample.task, environment=sample.environment, run_id="docker-qualification", episode_id=f"{scope}-{uuid.uuid4().hex[:8]}", scope=scope)
         sandboxes.append(value); return value
-    env = SWEEnvironment(task_context={TASK_ID: (sample, evaluation)}, sandbox_factory=make_sandbox, verifier_factory=lambda *args: None, output_limit_chars=30_000, max_timeout_sec=config.docker.exec_timeout_sec)
+    def make_verifier(sample, evaluation, episode_id):
+        return SWEGymVerifier(
+            sandbox_factory=lambda: make_sandbox(
+                sample, episode_id, "verifier"
+            ),
+            evaluation=evaluation,
+        )
+    env = SWEEnvironment(task_context={TASK_ID: (sample, evaluation)}, sandbox_factory=make_sandbox, verifier_factory=make_verifier, output_limit_chars=30_000, max_timeout_sec=config.docker.exec_timeout_sec)
     try:
         assert env.reset(TASK_ID) is None
         aliases = env.execute_bash("readlink /repo; readlink /workspace/getmoto__moto-7023; pwd")
@@ -47,7 +55,11 @@ def test_real_openhands_three_tool_episode(domain) -> None:
         edited = env.str_replace_editor("str_replace", "/repo/moto/lakeformation/models.py", old_str="        del self.resources[resource_arn]", new_str="        if resource_arn not in self.resources:\n            raise EntityNotFound\n        del self.resources[resource_arn]")
         assert "edited" in edited
         assert env.finish() == ""
+        assert env.frozen_patch is None
+        assert env._finalize(None) == 1.0
         assert env.frozen_patch and "raise EntityNotFound" in env.frozen_patch
+        assert env.trajectory.termination == "submitted"
+        assert env.trajectory.settlement.status == "resolved"
     finally:
         env._close()
     assert all(sandbox.container_id is None for sandbox in sandboxes)

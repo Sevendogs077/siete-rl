@@ -87,6 +87,8 @@ def test_complete_config_parses_independently() -> None:
     assert config_7b.vllm.mode == "server"
     assert config_7b.vllm.tensor_parallel_size is None
     assert config_7b.vllm.server_base_url == "http://127.0.0.1:8000"
+    assert not hasattr(config_7b.grpo, "max_infra_error_ratio")
+    assert not hasattr(config_7b.grpo, "mask_truncated_completions")
 
 
 def test_complete_config_has_independent_top_level_shape() -> None:
@@ -235,7 +237,6 @@ def test_steering_parameters_accept_theoretical_boundaries() -> None:
         epsilon_high=0.0,
         delta=0.0,
         beta=0.0,
-        mask_truncated_completions=True,
         router_aux_loss_coef=0.0,
         shuffle_dataset=False,
         vllm_importance_sampling_correction=False,

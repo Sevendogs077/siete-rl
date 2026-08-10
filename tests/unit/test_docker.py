@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections import deque
 from pathlib import Path
 from typing import Sequence
@@ -17,6 +18,7 @@ from siete_rl.docker import (
     DockerRuntimeError,
     DockerSandbox,
     SubprocessDockerClient,
+    WorkspaceStateError,
     build_create_command,
     inspect_image,
     sweep_run_containers,
@@ -254,19 +256,77 @@ def test_get_diff_registers_untracked_files_before_diff(domain) -> None:
     assert client.calls[0][0][:4] == ["docker", "exec", "-i", CONTAINER_ID]
     assert "add" in client.calls[0][0] and "-N" in client.calls[0][0]
     assert "diff" in client.calls[1][0]
+    assert task.base_commit in client.calls[1][0]
+    assert "--binary" in client.calls[1][0]
+    assert "--no-ext-diff" in client.calls[1][0]
 
 
 # 依赖私有 data/assets（domain fixture 读取真实任务实例）。
 @pytest.mark.external_assets
-def test_get_diff_fails_when_untracked_registration_fails(domain) -> None:
+def test_get_diff_attributes_started_workspace_git_failure_to_agent(domain) -> None:
     task, environment = domain
-    client = FakeClient([result([], exit_code=1, stderr="index lock")])
+    client = FakeClient(
+        [result([], exit_code=1, stderr="__SIETE_WORKSPACE_GIT_STARTED__\nindex lock")]
+    )
     sandbox = make_sandbox(client, task, environment)
     sandbox.container_id = CONTAINER_ID
     sandbox.started = True
 
-    with pytest.raises(ContainerExecError, match="failed to register untracked"):
+    with pytest.raises(WorkspaceStateError, match="index lock"):
         sandbox.get_diff()
+
+
+# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
+@pytest.mark.external_assets
+def test_get_diff_keeps_unstarted_workspace_git_failure_external(domain) -> None:
+    task, environment = domain
+    client = FakeClient([result([], exit_code=1, stderr="daemon unavailable")])
+    sandbox = make_sandbox(client, task, environment)
+    sandbox.container_id = CONTAINER_ID
+    sandbox.started = True
+
+    with pytest.raises(ContainerExecError, match="daemon unavailable"):
+        sandbox.get_diff()
+
+
+def test_base_commit_diff_captures_all_workspace_change_kinds(tmp_path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("base\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "base"], check=True)
+    base_commit = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    committed = tmp_path / "committed.txt"
+    committed.write_text("committed\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "committed.txt"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "agent commit"], check=True)
+    staged = tmp_path / "staged.txt"
+    staged.write_text("staged\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "staged.txt"], check=True)
+    tracked.write_text("unstaged\n")
+    (tmp_path / "untracked.txt").write_text("untracked\n")
+
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-N", "--", "."], check=True)
+    diff = subprocess.run(
+        ["git", "-C", str(tmp_path), "diff", base_commit, "--binary", "--no-ext-diff"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    for path in ("committed.txt", "staged.txt", "tracked.txt", "untracked.txt"):
+        assert f"b/{path}" in diff
 
 
 def test_subprocess_client_pins_dedicated_docker_host(monkeypatch) -> None:

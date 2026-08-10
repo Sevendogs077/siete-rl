@@ -51,7 +51,6 @@ def validate_tool_arguments(name: str, arguments: dict[str, Any]) -> None:
 class ToolExecutor:
     def __init__(self, sandbox: DockerSandbox, *, output_limit_chars: int, max_timeout_sec: int, workspace: str) -> None:
         self.sandbox, self.output_limit_chars, self.max_timeout_sec, self.workspace = sandbox, output_limit_chars, max_timeout_sec, workspace
-        self.submitted_patch: str | None = None
         self.editor = OpenHandsEditor(ContainerFileBackend(sandbox, timeout_sec=max_timeout_sec))
 
     def execute(self, action: Action) -> Observation:
@@ -74,7 +73,6 @@ class ToolExecutor:
 
     def _finish(self, arguments: dict[str, Any]) -> tuple[int, str, bool]:
         if arguments: raise ToolError("finish does not accept arguments")
-        self.submitted_patch = self.sandbox.get_diff()
         return 0, "", False
 
     def _bounded(self, text: str) -> tuple[str, bool]:

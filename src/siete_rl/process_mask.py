@@ -1,7 +1,7 @@
 """Process mask 纯决策层：只产出 per-token 二元权重 α∈{0,1}。
 
-职责边界：本模块不接触 TRL/torch，也不管 base_mask 的合成；候选识别、
-advantage 门控与治理终止都在这里完成。
+职责边界：本模块不接触 TRL/torch。always-on credit eligibility 与可选的
+process-mask 候选识别分别由独立纯函数处理。
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal
 
-from siete_rl.models import Action, Step, Termination
+from siete_rl.models import Action, Settlement, Step, Termination
 
 TurnKind = Literal["step", "pending_action", "invalid_call", "plain_message"]
 
@@ -23,6 +23,7 @@ class TurnRecord:
     token_end: int
     kind: TurnKind
     step_index: int | None
+    truncated: bool = False
 
 
 _REPEATABLE_TOOLS = frozenset({"execute_bash", "str_replace_editor"})
@@ -41,25 +42,31 @@ def _action_key(action: Action) -> tuple[str, str] | None:
     return action.tool_name, arguments
 
 
-_GOVERNANCE_TERMINATIONS = frozenset({"infra_error", "context_overlong"})
-
-
 @dataclass(frozen=True, slots=True)
 class ProcessMaskStats:
     candidate_turns: int
     applied_turns: int
     retained_negative_turns: int
     masked_token_frac: float
-    governance_masked: bool
 
 
-def _validate_turn(turn: TurnRecord, *, n_tokens: int, n_steps: int) -> None:
+@dataclass(frozen=True, slots=True)
+class CreditMaskStats:
+    infra_rows: int
+    truncated_turns: int
+    masked_token_frac: float
+
+
+def _validate_turn(
+    turn: TurnRecord, *, n_tokens: int, n_steps: int | None = None
+) -> None:
     if turn.token_start < 0 or turn.token_end < turn.token_start or turn.token_end > n_tokens:
         raise ValueError(f"invalid turn token range: {turn}")
-    if turn.kind == "step" and (
-        turn.step_index is None or turn.step_index < 0 or turn.step_index >= n_steps
-    ):
-        raise ValueError(f"invalid step turn index: {turn}")
+    if turn.kind == "step":
+        if turn.step_index is None or turn.step_index < 0:
+            raise ValueError(f"invalid step turn index: {turn}")
+        if n_steps is not None and turn.step_index >= n_steps:
+            raise ValueError(f"invalid step turn index: {turn}")
     if turn.kind != "step" and turn.step_index is not None:
         raise ValueError(f"non-step turn has step index: {turn}")
 
@@ -72,12 +79,22 @@ def _validate_turn_sequence(
     ]
     if len(pending_positions) > 1:
         raise ValueError("at most one pending action is allowed")
-    if not pending_positions:
-        return
-    if pending_positions[0] != len(turns) - 1:
-        raise ValueError("pending action must be the final turn")
-    if termination != "iteration_cap":
-        raise ValueError("pending action requires iteration_cap termination")
+    if pending_positions:
+        if pending_positions[0] != len(turns) - 1:
+            raise ValueError("pending action must be the final turn")
+        if termination != "iteration_cap":
+            raise ValueError("pending action requires iteration_cap termination")
+
+    truncated_positions = [
+        position for position, turn in enumerate(turns) if turn.truncated
+    ]
+    if len(truncated_positions) > 1:
+        raise ValueError("at most one truncated turn is allowed")
+    if truncated_positions:
+        if truncated_positions[0] != len(turns) - 1:
+            raise ValueError("truncated turn must be the final turn")
+        if termination != "context_overlong":
+            raise ValueError("truncated turn requires context_overlong termination")
 
 
 def _candidate_turn_positions(
@@ -132,16 +149,6 @@ def build_process_token_weights(
         raise ValueError("base_mask must be binary")
     _validate_turn_sequence(turns, termination=termination)
     candidates = _candidate_turn_positions(turns, steps, len(base_mask))
-    if termination in _GOVERNANCE_TERMINATIONS:
-        weights = [0.0] * len(base_mask)
-        return weights, ProcessMaskStats(
-            candidate_turns=len(candidates),
-            applied_turns=0,
-            retained_negative_turns=0,
-            masked_token_frac=_masked_fraction(base_mask, weights),
-            governance_masked=True,
-        )
-
     weights = list(base_mask)
     applied_turns = 0
     retained_negative_turns = 0
@@ -160,5 +167,34 @@ def build_process_token_weights(
         applied_turns=applied_turns,
         retained_negative_turns=retained_negative_turns,
         masked_token_frac=_masked_fraction(base_mask, weights),
-        governance_masked=False,
+    )
+
+
+def build_credit_token_weights(
+    *,
+    turns: list[TurnRecord],
+    termination: Termination,
+    settlement: Settlement,
+    base_mask: list[float],
+) -> tuple[list[float], CreditMaskStats]:
+    if any(value not in (0.0, 1.0) for value in base_mask):
+        raise ValueError("base_mask must be binary")
+    _validate_turn_sequence(turns, termination=termination)
+    for turn in turns:
+        _validate_turn(turn, n_tokens=len(base_mask))
+
+    weights = list(base_mask)
+    infra_rows = int(settlement.status == "infra_error")
+    truncated_turns = sum(turn.truncated for turn in turns)
+    if infra_rows:
+        weights = [0.0] * len(base_mask)
+    elif truncated_turns:
+        turn = turns[-1]
+        weights[turn.token_start : turn.token_end] = [0.0] * (
+            turn.token_end - turn.token_start
+        )
+    return weights, CreditMaskStats(
+        infra_rows=infra_rows,
+        truncated_turns=truncated_turns,
+        masked_token_frac=_masked_fraction(base_mask, weights),
     )

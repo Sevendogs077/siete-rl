@@ -7,15 +7,22 @@ import re
 from typing import Any, Literal
 from uuid import uuid4
 
-from siete_rl.docker import ContainerCleanupError, DockerRuntimeError, DockerSandbox
+from siete_rl.docker import (
+    ContainerCleanupError,
+    DockerRuntimeError,
+    DockerSandbox,
+    WorkspaceStateError,
+)
 from siete_rl.models import (
     Action,
     Evaluation,
     LoopExit,
     Observation,
     Sample,
+    Settlement,
     Step,
     TerminalEvent,
+    Termination,
     Trajectory,
     Verification,
 )
@@ -65,6 +72,7 @@ class SWEEnvironment:
         self._frozen_patch: str | None = None
         self._finalized = False
         self._reward: float | None = None
+        self._settlement: Settlement | None = None
         self._trajectory: Trajectory | None = None
         self._verification: Verification | None = None
         self.episode_id: str | None = None
@@ -90,10 +98,18 @@ class SWEEnvironment:
         return self._frozen_patch
 
     @property
+    def settlement(self) -> Settlement | None:
+        return self._settlement
+
+    @property
     def scorable(self) -> bool:
         """该 episode 的 reward 是否能可靠归因给 policy。"""
 
-        return self._finalized and self._infrastructure_error is None
+        return (
+            self._finalized
+            and self._settlement is not None
+            and self._settlement.status != "infra_error"
+        )
 
     def reset(self, task_id: str, **kwargs: object) -> None:
         """Start a fresh repository episode for one public task ID."""
@@ -117,6 +133,7 @@ class SWEEnvironment:
         self._frozen_patch = None
         self._finalized = False
         self._reward = None
+        self._settlement = None
         self._trajectory = None
         self._verification = None
         sandbox = self._sandbox_factory(sample, self.episode_id, "rollout")
@@ -157,7 +174,7 @@ class SWEEnvironment:
         return self._call_tool("str_replace_editor", _without_none({"command": command, "path": path, "file_text": file_text, "old_str": old_str, "new_str": new_str, "insert_line": insert_line, "view_range": view_range}))
 
     def finish(self) -> str:
-        """Freeze the current diff, including an empty diff, and terminate."""
+        """Record a submit event; final workspace capture happens at settlement."""
         return self._call_tool("finish", {})
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -188,10 +205,7 @@ class SWEEnvironment:
             raise
         self._append_step(action, observation)
         if name == "finish" and observation.error_type is None and not observation.timed_out:
-            if self._executor.submitted_patch is None:
-                raise RuntimeError("successful submit did not freeze a patch")
             self._submitted = True
-            self._frozen_patch = self._executor.submitted_patch
             self._terminal_event = TerminalEvent(
                 kind="submitted", step_index=len(self._steps) - 1
             )
@@ -214,50 +228,56 @@ class SWEEnvironment:
         if self._sample is None or self._evaluation is None or self.episode_id is None:
             raise RuntimeError("environment was finalized before reset")
 
-        if self._terminal_event is not None:
-            termination = self._terminal_event.kind
-        elif self._loop_exit is not None:
-            termination = self._loop_exit
-        elif self._infrastructure_error is not None:
-            termination = "infra_error"
-        else:
-            raise RuntimeError("environment finalized without a terminal event or loop exit")
-        self._trajectory = Trajectory(
-            task_id=self._sample.task.task_id,
-            environment_id=self._sample.environment.environment_id,
-            steps=list(self._steps),
-            termination=termination,
-        )
+        termination = self._termination()
         if termination == "infra_error":
             self._close_rollout()
-            self._reward = 0.0
-            self._finalized = True
-            return self._reward
+            detail = str(self._infrastructure_error) if self._infrastructure_error else None
+            return self._finish_settlement(
+                termination, Settlement(status="infra_error", detail=detail), 0.0
+            )
 
-        if termination != "submitted":
-            if self._sandbox is None:
-                raise RuntimeError("healthy non-submit episode is missing its sandbox")
-            try:
-                self._frozen_patch = self._sandbox.get_diff()
-            except DockerRuntimeError as exc:
-                self._infrastructure_error = exc
-                self._close_rollout()
-                self._reward = 0.0
-                self._finalized = True
-                return self._reward
-            if termination == "context_overlong":
-                self._close_rollout()
-                self._reward = 0.0
-                self._finalized = True
-                return self._reward
+        capture_failure = self._capture_final_patch()
+        self._close_rollout()
+        if capture_failure is not None:
+            return self._finish_settlement(termination, capture_failure, 0.0)
 
         if self._frozen_patch is None:
             raise RuntimeError("settled episode is missing its frozen patch")
-        self._close_rollout()
         if not self._frozen_patch.strip():
-            self._reward = 0.0
-            self._finalized = True
-            return self._reward
+            return self._finish_settlement(
+                termination, Settlement(status="empty_patch"), 0.0
+            )
+        settlement, reward = self._verify_final_patch()
+        return self._finish_settlement(termination, settlement, reward)
+
+    def _termination(self) -> Termination:
+        if self._terminal_event is not None and self._terminal_event.kind == "infra_error":
+            return self._terminal_event.kind
+        if self._loop_exit == "context_overlong":
+            return self._loop_exit
+        if self._terminal_event is not None:
+            return self._terminal_event.kind
+        if self._loop_exit is not None:
+            return self._loop_exit
+        if self._infrastructure_error is not None:
+            return "infra_error"
+        raise RuntimeError("environment finalized without a terminal event or loop exit")
+
+    def _capture_final_patch(self) -> Settlement | None:
+        if self._sandbox is None:
+            raise RuntimeError("healthy episode is missing its rollout sandbox")
+        try:
+            self._frozen_patch = self._sandbox.get_diff()
+        except WorkspaceStateError as exc:
+            return Settlement(status="agent_error", detail=str(exc))
+        except DockerRuntimeError as exc:
+            self._infrastructure_error = exc
+            return Settlement(status="infra_error", detail=str(exc))
+        return None
+
+    def _verify_final_patch(self) -> tuple[Settlement, float]:
+        if self._frozen_patch is None or not self._frozen_patch.strip():
+            raise RuntimeError("verifier requires a non-empty frozen patch")
         if self._verifier is None:
             self._verifier = self._verifier_factory(
                 self._sample, self._evaluation, self.episode_id
@@ -265,24 +285,37 @@ class SWEEnvironment:
         try:
             self._verification = self._verifier.verify(self._frozen_patch)
         except DockerRuntimeError as exc:
-            # verifier 基础设施失败只影响可评分性，不覆写 agent 的终止原因。
             self._infrastructure_error = exc
-            self._reward = 0.0
-            self._finalized = True
-            return self._reward
+            return Settlement(status="infra_error", detail=str(exc)), 0.0
         finally:
             self._events.extend(self._verifier.drain_cleanup_events())
+        if self._verification.result == "resolved":
+            return Settlement(status="resolved"), 1.0
         if self._reward_type == "layered":
-            self._reward = layered_score(
+            reward = layered_score(
                 verification=self._verification,
                 fail_to_pass=self._evaluation.fail_to_pass,
                 pass_to_pass=self._evaluation.pass_to_pass,
                 lambda_=self._layered_lambda,
             )
         else:
-            self._reward = 1.0 if self._verification.result == "resolved" else 0.0
+            reward = 0.0
+        return Settlement(status="unresolved"), reward
+
+    def _finish_settlement(
+        self, termination: Termination, settlement: Settlement, reward: float
+    ) -> float:
+        self._settlement = settlement
+        self._trajectory = Trajectory(
+            task_id=self._sample.task.task_id,
+            environment_id=self._sample.environment.environment_id,
+            steps=list(self._steps),
+            termination=termination,
+            settlement=settlement,
+        )
+        self._reward = reward
         self._finalized = True
-        return self._reward
+        return reward
 
     def _close_rollout(self) -> None:
         if self._sandbox is None:

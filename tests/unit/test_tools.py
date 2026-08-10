@@ -14,12 +14,14 @@ class FakeSandbox:
         self.responses: deque[CommandResult] = deque()
         self.diff = ""
         self.commands = []
+        self.get_diff_calls = 0
 
     def exec(self, command, *, input_text=None, timeout_sec=None):
         self.commands.append((command, input_text, timeout_sec))
         return self.responses.popleft()
 
     def get_diff(self) -> str:
+        self.get_diff_calls += 1
         return self.diff
 
 
@@ -39,11 +41,11 @@ def test_execute_bash_uses_workspace_and_openhands_exit_text() -> None:
     assert observation.error_type == "tool_error"
 
 
-def test_finish_freezes_empty_or_nonempty_diff() -> None:
+def test_finish_does_not_capture_workspace_diff() -> None:
     sandbox = FakeSandbox(); sandbox.diff = ""
     executor = ToolExecutor(sandbox, output_limit_chars=30_000, max_timeout_sec=12, workspace="/workspace/task")
     assert executor.execute(Action(tool_name="finish", arguments={})).error_type is None
-    assert executor.submitted_patch == ""
+    assert sandbox.get_diff_calls == 0
 
 
 def test_editor_errors_are_tool_errors_without_host_filesystem() -> None:

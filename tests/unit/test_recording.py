@@ -8,7 +8,14 @@ import pytest
 import yaml
 
 from siete_rl.config import load_config
-from siete_rl.models import Action, Observation, Step, Trajectory, Verification
+from siete_rl.models import (
+    Action,
+    Observation,
+    Settlement,
+    Step,
+    Trajectory,
+    Verification,
+)
 from siete_rl.recording import RunRecorder, generate_run_id
 
 
@@ -35,7 +42,9 @@ def verification(result: str = "resolved") -> Verification:
     )
 
 
-def trajectory(termination: str = "submitted") -> Trajectory:
+def trajectory(
+    termination: str = "submitted", settlement: str = "resolved"
+) -> Trajectory:
     return Trajectory.model_validate(
         {
             "task_id": "getmoto__moto-7023",
@@ -50,6 +59,7 @@ def trajectory(termination: str = "submitted") -> Trajectory:
                 )
             ],
             "termination": termination,
+            "settlement": {"status": settlement},
         }
     )
 
@@ -230,6 +240,12 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
         episode_ids=["e0", "e1", "e2", "e3"],
         rewards=[1.0, 0.0, 0.0, 0.0],
         verifications=[first_verification, verification("unresolved"), None, None],
+        settlements=[
+            Settlement(status="resolved"),
+            Settlement(status="unresolved"),
+            Settlement(status="empty_patch"),
+            Settlement(status="agent_error"),
+        ],
     )
     completed_group = load_json(group_path)
     assert completed_group["state"] == "completed"
@@ -237,6 +253,17 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     assert completed_group["reward_mean"] == 0.25
     assert completed_group["reward_std"] == pytest.approx(0.4330127019)
     assert completed_group["degenerate"] is False
+    assert completed_group["group_size"] == 4
+    assert completed_group["scorable_count"] == 4
+    assert completed_group["censored_count"] == 0
+    assert completed_group["fully_censored"] is False
+    assert completed_group["settlement_counts"] == {
+        "resolved": 1,
+        "unresolved": 1,
+        "empty_patch": 1,
+        "agent_error": 1,
+        "infra_error": 0,
+    }
     assert completed_group["verification_counts"] == {
         "resolved": 1,
         "unresolved": 1,
@@ -311,6 +338,11 @@ def test_complete_group_accepts_fractional_rewards(tmp_path: Path) -> None:
             verification("unresolved"),
             verification(),
         ],
+        settlements=[
+            Settlement(status="unresolved"),
+            Settlement(status="unresolved"),
+            Settlement(status="resolved"),
+        ],
     )
 
     group = load_json(recorder.output_dir / "rollouts/batch-0000/group-0000/group.json")
@@ -335,6 +367,11 @@ def test_complete_group_excludes_censored_rewards_from_statistics(tmp_path: Path
         episode_ids=["e0", "e1", "e2"],
         rewards=[None, 0.0, 1.0],
         verifications=[None, verification("unresolved"), verification()],
+        settlements=[
+            Settlement(status="infra_error"),
+            Settlement(status="unresolved"),
+            Settlement(status="resolved"),
+        ],
     )
 
     group = load_json(recorder.output_dir / "rollouts/batch-0000/group-0000/group.json")
@@ -342,12 +379,56 @@ def test_complete_group_excludes_censored_rewards_from_statistics(tmp_path: Path
     assert group["reward_mean"] == 0.5
     assert group["reward_std"] == 0.5
     assert group["degenerate"] is False
+    assert group["group_size"] == 3
+    assert group["scorable_count"] == 2
+    assert group["censored_count"] == 1
+    assert group["fully_censored"] is False
+    assert group["settlement_counts"]["infra_error"] == 1
 
     reward = load_json(recorder.output_dir / "run.json")["results"]["reward"]
     assert reward["successes"] == 1
     assert reward["attempts"] == 2
     assert reward["mean"] == 0.5
     assert recorder.run["train"]["rollouts_generated"] == 3
+
+
+def test_complete_group_records_fully_censored_without_reward_statistics(
+    tmp_path: Path,
+) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=7)
+    recorder.begin_group(
+        [{"role": "user", "content": "repair it"}],
+        4,
+        task_id="getmoto__moto-7023",
+    )
+    recorder.complete_group(
+        episode_ids=["e0", "e1", "e2", "e3"],
+        rewards=[None, None, None, None],
+        verifications=[None, None, None, None],
+        settlements=[Settlement(status="infra_error")] * 4,
+    )
+
+    group = load_json(
+        recorder.output_dir / "rollouts/batch-0000/group-0000/group.json"
+    )
+    assert group["group_size"] == 4
+    assert group["scorable_count"] == 0
+    assert group["censored_count"] == 4
+    assert group["fully_censored"] is True
+    assert group["reward_mean"] is None
+    assert group["reward_std"] is None
+    assert group["degenerate"] is None
+    assert group["settlement_counts"]["infra_error"] == 4
+
+    reward = recorder.run["results"]["reward"]
+    assert reward["attempts"] == 0
+    assert reward["mean"] is None
+    assert reward["ema"] is None
+    assert reward["degenerate_groups"] == 0
+    assert reward["nondegenerate_groups"] == 0
+    assert reward["nondegenerate_rate"] is None
+    assert recorder.run["train"]["groups_generated"] == 1
+    assert recorder.run["train"]["fully_censored_groups"] == 1
 
 
 @pytest.mark.parametrize(
@@ -367,6 +448,7 @@ def test_complete_group_rejects_out_of_range_rewards(
             episode_ids=["e0", "e1", "e2"],
             rewards=rewards,
             verifications=[None, None, None],
+            settlements=[Settlement(status="unresolved")] * 3,
         )
 
 

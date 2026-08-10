@@ -19,7 +19,7 @@ class Environment:
 def trainer(*, maximum=5, protocol_errors=2):
     value = object.__new__(SWEGRPOTrainer)
     value.max_tool_calling_iterations = maximum; value.max_consecutive_protocol_errors = protocol_errors; value.max_completion_length = 64; value._tool_parallel_workers = 1
-    value.use_vllm = False; value.vllm_mode = "server"; value._is_vlm = False; value.model = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=512)); value._tokenizer = object(); value._get_tool_suffix_ids = lambda messages: [90] * len(messages)
+    value.use_vllm = False; value.vllm_mode = "server"; value._is_vlm = False; value.model = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=512)); value._tokenizer = SimpleNamespace(eos_token_id=99, pad_token_id=0); value._get_tool_suffix_ids = lambda messages: [90] * len(messages)
     return value
 
 
@@ -27,16 +27,60 @@ def call(name, arguments=None):
     return {"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": name, "arguments": arguments or {}}}]}
 
 
-def run(value, completion):
-    return value._tool_call_loop(prompts=[[{"role": "user", "content": "fix"}]], prompt_ids=[[1]], completion_ids=[[2]], completions=[[completion]], logprobs=None, images=None, multimodal_fields={})
+def run(value, completion, *, completion_ids=None):
+    return value._tool_call_loop(prompts=[[{"role": "user", "content": "fix"}]], prompt_ids=[[1]], completion_ids=[completion_ids or [2, 99]], completions=[[completion]], logprobs=None, images=None, multimodal_fields={})
 
 
 def test_finish_keeps_model_tokens_and_adds_no_observation() -> None:
     env = Environment(); value = trainer(); value.environments = [env]; value._sync_tool_dicts = [{"finish": lambda: setattr(env, "terminated", True) or ""}]; value._async_tool_dicts = [{}]
-    mask, completions, ids, _, count, failures, _ = run(value, call("finish"))
+    mask, completions, ids, _, count, failures, _ = run(
+        value, call("finish"), completion_ids=[2]
+    )
     assert count == 1 and failures == 0 and env.terminated
     assert completions == [[call("finish")]]
     assert ids == [[2]] and mask == [[1]]
+    assert env.loop_exit == "context_overlong"
+    assert env.turn_records[-1].truncated is True
+
+
+def test_active_row_filter_keeps_rollback_snapshot_aligned() -> None:
+    envs = [Environment(), Environment()]
+    value = trainer()
+    value.max_completion_length = 1
+    value.environments = envs
+
+    def finish():
+        envs[0]._steps.append(object())
+        envs[0].terminated = True
+        return ""
+
+    def bash():
+        envs[1]._steps.append(object())
+        return "obs"
+
+    value._sync_tool_dicts = [{"finish": finish}, {"bash": bash}]
+    value._async_tool_dicts = [{}, {}]
+    prompts = [
+        [{"role": "user", "content": "short"}],
+        [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "keep both"},
+        ],
+    ]
+
+    value._tool_call_loop(
+        prompts=prompts,
+        prompt_ids=[[1], [2]],
+        completion_ids=[[10, 99], [20, 99]],
+        completions=[[call("finish")], [call("bash")]],
+        logprobs=None,
+        images=None,
+        multimodal_fields={},
+    )
+
+    assert len(prompts[1]) == 2
+    assert prompts[1][-1]["content"] == "keep both"
+    assert envs[1].loop_exit == "context_overlong"
 
 
 def test_plain_message_gets_fake_user_and_continues_to_finish(monkeypatch) -> None:
@@ -46,7 +90,7 @@ def test_plain_message_gets_fake_user_and_continues_to_finish(monkeypatch) -> No
     mask, completions, ids, *_ = run(value, {"role": "assistant", "content": "I will inspect this."})
     assert "Please continue working" in completions[0][1]["content"]
     assert completions[0][-1] == call("finish")
-    assert ids[0] == [2, 90, 91] and mask[0] == [1, 0, 1]
+    assert ids[0] == [2, 99, 90, 91] and mask[0] == [1, 1, 0, 1]
 
 
 def test_protocol_error_retries_then_records_format_exhaustion(monkeypatch) -> None:
@@ -54,7 +98,7 @@ def test_protocol_error_retries_then_records_format_exhaustion(monkeypatch) -> N
     completion = {"role": "assistant", "content": "<function=finish>", "parse_error": "incomplete function call"}
     mask, completions, ids, *_ = run(value, completion)
     assert env.loop_exit == "format_exhausted"
-    assert completions == [[completion]] and ids == [[2]] and mask == [[1]]
+    assert completions == [[completion]] and ids == [[2, 99]] and mask == [[1, 1]]
 
 
 def test_turn_records_track_kinds_intervals_and_step_backfill(monkeypatch) -> None:
@@ -63,7 +107,7 @@ def test_turn_records_track_kinds_intervals_and_step_backfill(monkeypatch) -> No
     def bash(): env._steps.append(object()); return "obs"
     def finish(): env._steps.append(object()); env.terminated = True; return ""
     value._sync_tool_dicts = [{"bash": bash, "finish": finish}]; value._async_tool_dicts = [{}]
-    generations = iter([([91, 92], None), ([93], None)])
+    generations = iter([([91, 92, 99], None), ([93, 99], None)])
     value._generate_single_turn = lambda ids, *args: ([next(generations)[0]], None)
     parses = iter([{"role": "assistant", "content": "oops", "parse_error": "bad call"}, call("finish")])
     monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: next(parses))
@@ -89,7 +133,7 @@ def test_iteration_cap_preserves_unexecuted_pending_action(monkeypatch) -> None:
         return "/repo"
 
     value._sync_tool_dicts = [{"bash": bash}]; value._async_tool_dicts = [{}]
-    value._generate_single_turn = lambda ids, *args: ([[91]], None)
+    value._generate_single_turn = lambda ids, *args: ([[91, 99]], None)
     monkeypatch.setattr(
         "siete_rl.trainer.parse_response",
         lambda *args, **kwargs: call(
@@ -137,6 +181,107 @@ def test_real_tool_execution_requires_final_pending_turn(monkeypatch) -> None:
         match="real tool execution requires a final pending_action turn",
     ):
         run(value, call("bash"))
+
+
+def test_observation_overlong_keeps_complete_turn_credit() -> None:
+    env = Environment()
+    value = trainer()
+    value.max_completion_length = 2
+    value.environments = [env]
+
+    def bash():
+        env._steps.append(
+            Step(
+                index=0,
+                action=Action(tool_name="execute_bash", arguments={"command": "pwd"}),
+                observation=Observation(text="/repo", exit_code=0),
+            )
+        )
+        return "/repo"
+
+    value._sync_tool_dicts = [{"bash": bash}]
+    value._async_tool_dicts = [{}]
+    value._tool_call_loop(
+        prompts=[[{"role": "user", "content": "fix"}]],
+        prompt_ids=[[1]],
+        completion_ids=[[2, 99]],
+        completions=[[call("bash")]],
+        logprobs=None,
+        images=None,
+        multimodal_fields={},
+    )
+
+    assert env.loop_exit == "context_overlong"
+    assert [turn.truncated for turn in env.turn_records] == [False]
+
+
+def test_physical_slice_marks_only_final_executed_turn_truncated(monkeypatch) -> None:
+    env = Environment()
+    value = trainer()
+    value.max_completion_length = 4
+    value.environments = [env]
+
+    def bash():
+        index = len(env._steps)
+        env._steps.append(
+            Step(
+                index=index,
+                action=Action(tool_name="execute_bash", arguments={"command": "pwd"}),
+                observation=Observation(text="/repo", exit_code=0),
+            )
+        )
+        return "/repo"
+
+    value._sync_tool_dicts = [{"bash": bash}]
+    value._async_tool_dicts = [{}]
+    value._generate_single_turn = lambda ids, *args: ([[91, 92, 93]], None)
+    monkeypatch.setattr(
+        "siete_rl.trainer.parse_response", lambda *args, **kwargs: call("bash")
+    )
+    value._tool_call_loop(
+        prompts=[[{"role": "user", "content": "fix"}]],
+        prompt_ids=[[1]],
+        completion_ids=[[2, 99]],
+        completions=[[call("bash")]],
+        logprobs=None,
+        images=None,
+        multimodal_fields={},
+    )
+
+    assert env.loop_exit == "context_overlong"
+    assert [turn.kind for turn in env.turn_records] == ["step", "step"]
+    assert [turn.truncated for turn in env.turn_records] == [False, True]
+
+
+def test_post_tool_truncated_finish_is_context_overlong(monkeypatch) -> None:
+    env = Environment()
+    value = trainer()
+    value.environments = [env]
+
+    def step(name, *, terminate=False):
+        def execute():
+            env._steps.append(object())
+            if terminate:
+                env.terminated = True
+            return name
+
+        return execute
+
+    value._sync_tool_dicts = [
+        {"bash": step("bash"), "finish": step("finish", terminate=True)}
+    ]
+    value._async_tool_dicts = [{}]
+    value._generate_single_turn = lambda ids, *args: ([[91]], None)
+    monkeypatch.setattr(
+        "siete_rl.trainer.parse_response", lambda *args, **kwargs: call("finish")
+    )
+
+    run(value, call("bash"))
+
+    assert env.terminated is True
+    assert env.loop_exit == "context_overlong"
+    assert [turn.kind for turn in env.turn_records] == ["step", "step"]
+    assert [turn.truncated for turn in env.turn_records] == [False, True]
 
 
 class FakeServerVLLM:
@@ -240,14 +385,14 @@ def _run_parallel_scenario(
     value._sync_tool_dicts = [{"bash": make_bash(i)} for i in range(k)]
     value._async_tool_dicts = [{} for _ in range(k)]
     value._generate_single_turn = lambda ids, *args: (
-        [[91]] * len(ids),
-        [[0.5]] * len(ids),
+        [[91, 99]] * len(ids),
+        [[0.5, 0.5]] * len(ids),
     )
     started = _time.monotonic()
     result = value._tool_call_loop(
         prompts=[[{"role": "user", "content": "fix"}] for _ in range(k)],
         prompt_ids=[[i + 1] for i in range(k)],
-        completion_ids=[[(i + 1) * 11] for i in range(k)],
+        completion_ids=[[(i + 1) * 11, 99] for i in range(k)],
         completions=[[call("bash")] for _ in range(k)],
         logprobs=[[0.0] for _ in range(k)],
         images=None,
@@ -292,14 +437,14 @@ def test_parallel_tool_failure_isolated_to_failing_sample(monkeypatch) -> None:
     ]
     value._async_tool_dicts = [{} for _ in range(3)]
     value._generate_single_turn = lambda ids, *args: (
-        [[91]] * len(ids),
-        [[0.5]] * len(ids),
+        [[91, 99]] * len(ids),
+        [[0.5, 0.5]] * len(ids),
     )
     monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
     _, completions, _, _, count, failures, _ = value._tool_call_loop(
         prompts=[[{"role": "user", "content": "fix"}] for _ in range(3)],
         prompt_ids=[[1], [2], [3]],
-        completion_ids=[[11], [22], [33]],
+        completion_ids=[[11, 99], [22, 99], [33, 99]],
         completions=[[call("bash")] for _ in range(3)],
         logprobs=[[0.0] for _ in range(3)],
         images=None,
@@ -336,7 +481,7 @@ def test_single_worker_or_job_uses_serial_path_without_pool(monkeypatch) -> None
         ]
         value._async_tool_dicts = [{}]
         _, _, ids, *_ = run(value, call("finish"))
-        assert ids == [[2]]
+        assert ids == [[2, 99]]
 
 
 def test_parallel_tool_execution_covers_slow_trajectories(monkeypatch) -> None:

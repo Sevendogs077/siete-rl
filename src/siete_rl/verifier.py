@@ -55,7 +55,7 @@ class SWEGymVerifier:
                             "verifier container cleanup failed: "
                             f"{type(cleanup_exc).__name__}: {cleanup_exc}"
                         )
-                    else:
+                    elif self._pending_verification is None:
                         raise VerificationInfrastructureError(
                             f"verifier container cleanup failed: {cleanup_exc}"
                         ) from cleanup_exc

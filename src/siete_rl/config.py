@@ -105,7 +105,6 @@ class GenerationConfig(StrictConfig):
 
 class GRPOConfigValues(StrictConfig):
     reward_type: Literal["binary", "layered"]
-    max_infra_error_ratio: float = Field(default=0.5, gt=0.0, le=1.0)
     layered_lambda: float = Field(default=DEFAULT_LAMBDA, gt=0.0)
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
@@ -117,7 +116,6 @@ class GRPOConfigValues(StrictConfig):
     delta: float | None = Field(ge=0.0)
     beta: float = Field(ge=0.0)
     importance_sampling_level: Literal["token", "sequence", "sequence_token"]
-    mask_truncated_completions: bool
     router_aux_loss_coef: float = Field(ge=0.0)
     shuffle_dataset: bool
     vllm_importance_sampling_correction: bool

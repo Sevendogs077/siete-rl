@@ -160,14 +160,14 @@ def test_timeout_and_missing_pytest_marker_are_infrastructure(domain, responses)
     assert sandboxes[0].closed
 
 
-def test_cleanup_failure_never_returns_binary_verification(domain) -> None:
+def test_cleanup_failure_does_not_replace_successful_verification(domain) -> None:
     verifier, sandboxes = verifier_for(
         domain,
         [command_result(), command_result(), command_result(stdout="+ pytest\npassed")],
         close_error=True,
     )
-    with pytest.raises(VerificationInfrastructureError, match="cleanup failed"):
-        verifier.verify(PATCH)
+    verification = verifier.verify(PATCH)
+    assert verification.result == "resolved"
     events = verifier.drain_cleanup_events()
     assert events[0]["residual"] is True
     assert sandboxes[0].container_id is not None

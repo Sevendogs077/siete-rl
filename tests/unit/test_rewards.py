@@ -7,6 +7,7 @@ import time
 import pytest
 
 from siete_rl.docker import DockerRuntimeError
+from siete_rl.models import Settlement
 from siete_rl.rewards import binary_reward
 
 
@@ -25,8 +26,13 @@ class FakeEnvironment:
         self.delay = delay
         self.error = error
         self.finalize_calls = 0
-        self.trajectory = type("Trajectory", (), {"termination": termination})()
-        self.scorable = termination != "infra_error"
+        settlement = "infra_error" if termination == "infra_error" else "unresolved"
+        self.trajectory = type(
+            "Trajectory",
+            (),
+            {"termination": termination, "settlement": Settlement(status=settlement)},
+        )()
+        self.settlement = self.trajectory.settlement
 
     def _finalize(self, completion: object) -> float:
         self.finalize_calls += 1

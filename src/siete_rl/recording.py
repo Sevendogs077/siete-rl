@@ -17,7 +17,7 @@ from typing import Any, Literal
 import yaml
 
 from siete_rl.config import ProjectConfig
-from siete_rl.models import Trajectory, Verification
+from siete_rl.models import Settlement, Trajectory, Verification
 
 
 RunState = Literal["running", "completed", "failed", "interrupted"]
@@ -56,7 +56,9 @@ STEP_METRIC_KEYS = {
     "process_mask_applied_turns": "process_mask/applied_turns",
     "process_mask_retained_negative_turns": "process_mask/retained_negative_turns",
     "process_mask_masked_token_frac": "process_mask/masked_token_frac",
-    "process_mask_governance_masked": "process_mask/governance_masked",
+    "credit_mask_infra_rows": "credit_mask/infra_rows",
+    "credit_mask_truncated_turns": "credit_mask/truncated_turns",
+    "credit_mask_masked_token_frac": "credit_mask/masked_token_frac",
     "reward_zero_std_frac": "frac_reward_zero_std",
     "settlement_recovered_positive_rows": "settlement/recovered_positive_rows",
     "settlement_recovered_positive_active_tokens": (
@@ -123,6 +125,7 @@ class RunRecorder:
         self.group: dict[str, Any] | None = None
         self._all_rewards: list[float] = []
         self._degenerate_groups = 0
+        self._scorable_groups = 0
         self._reward_ema: float | None = None
         self._last_recorded_step = 0
         self._native_policy_path_reached = False
@@ -160,6 +163,16 @@ class RunRecorder:
                 "steps_target": config.grpo.max_steps,
                 "groups_generated": 0,
                 "rollouts_generated": 0,
+                "scorable_rollouts": 0,
+                "censored_rollouts": 0,
+                "fully_censored_groups": 0,
+                "settlement_counts": {
+                    "resolved": 0,
+                    "unresolved": 0,
+                    "empty_patch": 0,
+                    "agent_error": 0,
+                    "infra_error": 0,
+                },
                 "tokens_generated": 0,
                 "model_updated": None,
                 "last_metrics": {
@@ -286,6 +299,17 @@ class RunRecorder:
             "task_id": task_id,
             "prompt_sha256": _payload_sha256(prompt),
             "rollout_dirs": [f"{index:04d}" for index in range(rollout_count)],
+            "group_size": rollout_count,
+            "scorable_count": 0,
+            "censored_count": 0,
+            "fully_censored": False,
+            "settlement_counts": {
+                "resolved": 0,
+                "unresolved": 0,
+                "empty_patch": 0,
+                "agent_error": 0,
+                "infra_error": 0,
+            },
             "episode_ids": [],
             "rewards": [],
             "reward_mean": None,
@@ -325,16 +349,24 @@ class RunRecorder:
         episode_ids: list[str],
         rewards: list[float | None],
         verifications: list[Verification | None],
+        settlements: list[Settlement],
     ) -> None:
         if self.group is None:
             raise ValueError("no active group to complete")
         expected = len(self.group["rollout_dirs"])
-        if len(episode_ids) != expected or len(rewards) != expected or len(verifications) != expected:
+        if (
+            len(episode_ids) != expected
+            or len(rewards) != expected
+            or len(verifications) != expected
+            or len(settlements) != expected
+        ):
             raise ValueError("completed group requires aligned rollouts")
         # 支持 [0, 1] 内的浮点奖励（layered 模式），仅校验取值范围
         recorded_rewards: list[float | None] = []
         float_rewards: list[float] = []
-        for reward in rewards:
+        for reward, settlement in zip(rewards, settlements, strict=True):
+            if (reward is None) != (settlement.status == "infra_error"):
+                raise ValueError("reward censoring must match infra_error settlement")
             if reward is None:
                 recorded_rewards.append(None)
                 continue
@@ -343,13 +375,31 @@ class RunRecorder:
             value = float(reward)
             recorded_rewards.append(value)
             float_rewards.append(value)
-        if not float_rewards:
-            raise ValueError("completed group requires at least one scorable reward")
         resolved = sum(v is not None and v.result == "resolved" for v in verifications)
         unresolved = sum(v is not None and v.result == "unresolved" for v in verifications)
-        reward_mean = fmean(float_rewards)
-        reward_std = pstdev(float_rewards) if len(float_rewards) > 1 else 0.0
-        degenerate = math.isclose(reward_std, 0.0)
+        reward_mean = fmean(float_rewards) if float_rewards else None
+        reward_std = (
+            None
+            if not float_rewards
+            else pstdev(float_rewards)
+            if len(float_rewards) > 1
+            else 0.0
+        )
+        degenerate = (
+            math.isclose(reward_std, 0.0) if reward_std is not None else None
+        )
+        settlement_counts = {
+            status: sum(item.status == status for item in settlements)
+            for status in (
+                "resolved",
+                "unresolved",
+                "empty_patch",
+                "agent_error",
+                "infra_error",
+            )
+        }
+        scorable_count = len(float_rewards)
+        censored_count = expected - scorable_count
         self.group.update(
             {
                 "state": "completed",
@@ -358,6 +408,11 @@ class RunRecorder:
                 "reward_mean": reward_mean,
                 "reward_std": reward_std,
                 "degenerate": degenerate,
+                "group_size": expected,
+                "scorable_count": scorable_count,
+                "censored_count": censored_count,
+                "fully_censored": scorable_count == 0,
+                "settlement_counts": settlement_counts,
                 "verification_counts": {
                     "resolved": resolved,
                     "unresolved": unresolved,
@@ -370,26 +425,37 @@ class RunRecorder:
         result = self.run["results"]["reward"]
         train["groups_generated"] += 1
         train["rollouts_generated"] += expected
+        train["scorable_rollouts"] += scorable_count
+        train["censored_rollouts"] += censored_count
+        train["fully_censored_groups"] += int(scorable_count == 0)
+        for status, count in settlement_counts.items():
+            train["settlement_counts"][status] += count
         self._all_rewards.extend(float_rewards)
-        self._degenerate_groups += int(degenerate)
-        self._reward_ema = (
-            reward_mean
-            if self._reward_ema is None
-            else REWARD_EMA_ALPHA * reward_mean
-            + (1.0 - REWARD_EMA_ALPHA) * self._reward_ema
-        )
-        nondegenerate_groups = train["groups_generated"] - self._degenerate_groups
+        if reward_mean is not None:
+            self._scorable_groups += 1
+            self._degenerate_groups += int(bool(degenerate))
+            self._reward_ema = (
+                reward_mean
+                if self._reward_ema is None
+                else REWARD_EMA_ALPHA * reward_mean
+                + (1.0 - REWARD_EMA_ALPHA) * self._reward_ema
+            )
+        nondegenerate_groups = self._scorable_groups - self._degenerate_groups
         result.update(
             {
                 # successes 只统计 reward == 1.0（完全解决），部分得分不算成功
                 "successes": sum(reward == 1.0 for reward in self._all_rewards),
                 "attempts": len(self._all_rewards),
-                "mean": fmean(self._all_rewards),
+                "mean": fmean(self._all_rewards) if self._all_rewards else None,
                 "last_group_mean": reward_mean,
                 "ema": self._reward_ema,
                 "degenerate_groups": self._degenerate_groups,
                 "nondegenerate_groups": nondegenerate_groups,
-                "nondegenerate_rate": nondegenerate_groups / train["groups_generated"],
+                "nondegenerate_rate": (
+                    nondegenerate_groups / self._scorable_groups
+                    if self._scorable_groups
+                    else None
+                ),
             }
         )
         self._write_group()
@@ -427,6 +493,7 @@ class RunRecorder:
             "group_degenerate": group_degenerate,
             "nondegenerate_group_rate_cumulative": reward["nondegenerate_rate"],
             "reward_mean_ema": reward["ema"],
+            "settlement_fully_censored_groups": train["fully_censored_groups"],
         }
         for target, source in STEP_METRIC_KEYS.items():
             row[target] = _numeric(logs.get(source))
