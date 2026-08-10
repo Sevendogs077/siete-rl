@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 将固定外部 7B 参考与 outputs/_selected/ 中的本地评测绘制为 README 对比图。
-# 本地输入：outputs/_selected/<run>/evals/<eval>/candidate/{rollout-state.json, official-report.json}
+# 本地输入：outputs/_selected/<run>/evals/<eval>/base/{rollout-state.json, official-report.json}
 # 输出：docs/assets/results-chart-{light,dark}.png（透明底，按主题切换）
 set -euo pipefail
 
@@ -54,52 +54,57 @@ GROUP_GAP = 0.0
 
 
 def run_label(run_dir: Path) -> str:
-    """按配置标出本框架的对照臂与当前算法增量。"""
+    """selected run 只展示同次评测中的固定 base policy。"""
 
-    try:
-        import yaml
-
-        config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
-        grpo = config.get("grpo", {})
-        reward_type = grpo.get("reward_type")
-        if reward_type == "layered":
-            return "SieteRL"
-        return "SieteRL · Vanilla GRPO"
-    except Exception:
-        return f"SieteRL · {run_dir.name}"
+    del run_dir
+    return "SieteRL-Agent-7B-Base"
 
 
-def latest_candidate(run_dir: Path) -> Path | None:
-    """选 outcome 数最多的完整评测，并列时取最新；跳过部分任务试跑。"""
+def latest_base(run_dir: Path) -> Path | None:
+    """按 metadata 选择最新完成且 outcome 齐全的 base 评测。"""
 
     evals = run_dir / "evals"
     if not evals.is_dir():
         return None
-    best: tuple[int, str, Path] | None = None
+    best: tuple[str, str, Path] | None = None
     for entry in sorted(evals.iterdir()):
-        candidate = entry / "candidate"
-        state = candidate / "rollout-state.json"
-        report = candidate / "official-report.json"
-        if not report.is_file() or not state.is_file():
+        base = entry / "base"
+        metadata_path = entry / "metadata.json"
+        state = base / "rollout-state.json"
+        report = base / "official-report.json"
+        if not metadata_path.is_file() or not report.is_file() or not state.is_file():
             continue
         try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("status") != "completed":
+                continue
+            finished_at = metadata["finished_at"]
+            selected_count = metadata["dataset"]["selected_count"]
             count = len(json.loads(state.read_text(encoding="utf-8"))["outcomes"])
-        except Exception:
+            if (
+                not isinstance(finished_at, str)
+                or not finished_at
+                or not isinstance(selected_count, int)
+                or selected_count < 1
+                or count != selected_count
+            ):
+                continue
+        except (KeyError, TypeError, json.JSONDecodeError, OSError):
             continue
-        if best is None or (count, entry.name) >= (best[0], best[1]):
-            best = (count, entry.name, candidate)
+        if best is None or (finished_at, entry.name) >= (best[0], best[1]):
+            best = (finished_at, entry.name, base)
     return best[2] if best else None
 
 
 def local_result(run_dir: Path) -> tuple[str, float, str, int] | None:
-    candidate = latest_candidate(run_dir)
-    if candidate is None:
+    base = latest_base(run_dir)
+    if base is None:
         return None
-    outcomes = json.loads((candidate / "rollout-state.json").read_text(encoding="utf-8"))[
+    outcomes = json.loads((base / "rollout-state.json").read_text(encoding="utf-8"))[
         "outcomes"
     ]
     resolved = json.loads(
-        (candidate / "official-report.json").read_text(encoding="utf-8")
+        (base / "official-report.json").read_text(encoding="utf-8")
     )["resolved_ids"]
     total = len(outcomes)
     if total == 0:
@@ -112,15 +117,15 @@ local_rows = []
 for run_dir in sorted((p for p in SELECTED.iterdir() if p.is_dir()), key=lambda p: p.name):
     result = local_result(run_dir)
     if result is None:
-        print(f"skip {run_dir.name}: no completed eval candidate")
+        print(f"skip {run_dir.name}: no completed base eval")
         continue
     local_rows.append(result)
 
 if not local_rows:
     raise SystemExit("no evaluated runs under outputs/_selected/")
 
-# 对照臂在前；同类多 run 时按 resolved 数与名称稳定排序。
-local_rows.sort(key=lambda row: ("Vanilla GRPO" not in row[0], row[3], row[0]))
+# 同类多 run 时按 resolved 数与名称稳定排序。
+local_rows.sort(key=lambda row: (row[3], row[0]))
 
 
 def render(theme: str) -> None:

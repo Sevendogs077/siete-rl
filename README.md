@@ -42,7 +42,7 @@ Full local records: [docs/experiment_log.md](https://github.com/Sevendogs077/sie
 
 ## Reproduction
 
-Training requires 2 GPUs; evaluation requires 1 GPU. See [docs/asset_preparation.md](docs/asset_preparation.md) for the preparation of datasets, the base model, the dedicated Docker daemon, task images, and the evaluation harness.
+Training requires 2 GPUs; evaluation requires 1 GPU. Follow the [setup guide](docs/setup.md) to prepare the environment, datasets, base model, dedicated Docker daemon, task images, and evaluation harness.
 
 ```bash
 uv sync

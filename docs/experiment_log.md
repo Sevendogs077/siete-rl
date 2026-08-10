@@ -1,51 +1,101 @@
 # Experiment Log
 
-## 固定评测口径
+Local records for SieteRL training and SWE-bench Verified evaluation, listed newest first under a fixed [evaluation protocol](#evaluation-protocol).
 
-现有记录均使用 SWE-bench Verified 全部 500 个任务，每题一条 rollout，`temperature=0`、`top_p=1.0`、`max_model_length=32768`、最多 40 轮工具调用。数据 revision 为 `91aa3ed51b709be6457e12d00300a6a596d4c6a3`，评分 harness revision 为 `f7bbbb2ccdf479001d6467c9e34af59e44a840f9`。
+## 2026-08-10 — Reward shaping ablation
 
-`Resolved` 的分母固定为全部 500 个任务；未完成 harness 评分的任务也按未解决计入。这里记录的是本地固定 harness 结果，不等同于 SWE-bench leaderboard 的独立认证。
+[![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)
 
-结局栏的归位规则：每道题恰好计入一栏，优先级 infra > resolved > submitted > overlong > itercap；超窗或超轮的轨迹仍会以容器内 diff 兜底评分，因此这两栏只计未解决的部分。五栏合计恒为 500。`Empty Patch` 为交叉统计，不参与加总。
+> **Takeaway:** SieteRL-Agent-7B-v1 produced a richer training signal without improving verified performance.
 
-## 结果总览
+### Results
 
-| 完成日期 | Train run | 配置差异 | Resolved | Unresolved | Context Limit | Iteration Cap | Infra | Empty Patch |
-|---|---|---|---:|---:|---:|---:|---:|---:|
-| 2026-08-05 | `20260801T235407Z-149b` | `loss_type=grpo` | **56（11.2%）** | 190（38.0%） | 173（34.6%） | 78（15.6%） | 3 | 152（30.4%） |
-| 2026-08-05 | `20260802T065312Z-b873` | `loss_type=dapo`（legacy label） | 53（10.6%） | 179（35.8%） | 196（39.2%） | 69（13.8%） | 3 | 150（30.0%） |
+| Variant | Mean reward | Non-degenerate groups | SWE-bench Verified | Δ vs. Base |
+|---|---:|---:|---:|---:|
+| **SieteRL-Agent-7B-Base** | — | — | **56/500 (11.2%)** | — |
+| **SieteRL-Agent-7B-Vanilla-GRPO** | 0.10625 | 25/100 | **54/500 (10.8%)** | −2 |
+| **SieteRL-Agent-7B-v1** | 0.11432 | 31/100 | **47/500 (9.4%)** | −9 |
 
-两条 run 的 resolved 差异（+3 题）在 500 题单次评测下无统计显著性，仅作基线参照。
+**Method.** Vanilla-GRPO learns only from pass/fail verifier outcomes; v1 reshapes that sparse signal into an exponential transform of the bug-fix-test pass rate multiplied by regression-test retention, while excluding invalid-call and third-or-later repeated-action turns from the policy loss.
 
-## 失败解剖（`20260801T235407Z-149b`）
+**Caveat.** This is not a single-factor ablation: v1 changed both reward shaping and process masking, used one training seed, and evaluated one rollout per task.
 
-未正常提交的轨迹合计 254 / 500（50.8%）。对其逐条取证（动作签名 = 工具 + 命令 + 路径 + old_str 前缀，同一签名出现 ≥3 次判定为循环）：
+<details>
+<summary><strong>Evidence and run details</strong></summary>
 
-- **高重复占比**：context limit 轨迹 57% 存在动作循环，iteration cap 轨迹 76%。循环是未提交的主因，合法长探索只占约两三成。
-- **三种典型循环模式**：
-  - `str_replace` 空转：`old_str` 不匹配后原样重试（context limit 中 33 条连续失败 ≥3 次，iteration cap 中 23 条）。案例 `django__django-11734`：同一文件 view 19 次、同一编辑重试 5 次后超窗。
-  - 反复 view 同一文件而不动作。
-  - `pip install` 撞墙：容器 `network_mode: none`，模型沿用 SFT 分布中"缺包就装"的行为反复重试（12 条）。
-- **环境失配佐证**：SFT 轨迹中 `pytest` 直接可调用（11 次中 9 次成功），而本 scaffold 镜像默认 PATH 未激活 conda testbed 环境；SFT 中 `pip install` 27 次成功，本 scaffold 容器无网络。两者已在 scaffold v2 修复。
+| Variant | Run | Trajectories | Exact / partial / zero reward | Scored / empty / error |
+|---|---|---:|---:|---:|
+| SieteRL-Agent-7B-Base | OpenHands-7B-Agent | — | — | 360 / 139 / 1 |
+| SieteRL-Agent-7B-Vanilla-GRPO | `20260808T080700Z-8a86` | 1,600 | 170 / 0 / 1,430 | 352 / 148 / 0 |
+| SieteRL-Agent-7B-v1 | `20260808T065031Z-f4cf` | 1,600 | 177 / 9 / 1,414 | 355 / 144 / 1 |
 
-## 训练侧指标
-
-| Train run | reward mean | 非退化组占比 | steps |
+| Comparison | Newly solved | Regressed | Net change |
 |---|---:|---:|---:|
-| `20260801T235407Z-149b` | 0.084 | 17% | 100 |
-| `20260802T065312Z-b873` | 0.074 | 15% | 100 |
+| Vanilla-GRPO vs. Base | 12 | 14 | −2 |
+| v1 vs. Base | 12 | 21 | −9 |
+| v1 vs. Vanilla-GRPO | 15 | 22 | −7 |
 
-binary reward 下，组内 16 条 rollout reward 全同时 GRPO advantage 为零（退化组），不产生梯度。两条 run 的退化组占比分别为 83% 与 85%，即奖励稀疏的直接量化，也是引入 layered reward 的动机。
+“Scored” is a non-empty patch that completed harness evaluation; empty patches are separate, and evaluation errors count as unresolved.
 
-## Scaffold 版本
+- Partial credit reached 9/1,600 trajectories across 4/100 groups; six came from one group, and one scored 0.8333 despite breaking an existing behavior, showing that reward could overstate patch quality.
+- The v1 mask suppressed 148 overlong negative-advantage trajectories; the masked negative/positive candidate-turn count was 807/238.
+- On normal submissions, v1 resolved 2 more tasks than Vanilla-GRPO; on context-limit or iteration-cap exits, it resolved 9 fewer.
+- All three variants shared only 29 resolved tasks. Vanilla-GRPO and v1 shared 32, with 69 in their union.
+- One verified patch from each trained policy included 773 and 669 virtual-environment files, respectively, and was not directly deliverable.
+- A group of 16 zero-reward trajectories produces no GRPO advantage; overlong context tokens receive no gradient.
 
-| 版本 | 起始 commit | 变更 |
+</details>
+
+## 2026-08-05 — Loss baseline
+
+[![Scaffold v1](https://img.shields.io/badge/Scaffold-v1-04648c.svg)](#scaffold-compatibility)
+
+> **Takeaway:** GRPO resolved three more tasks than DAPO.
+
+### Results
+
+| Variant | Mean reward | Non-degenerate groups | SWE-bench Verified | Δ vs. GRPO |
+|---|---:|---:|---:|---:|
+| GRPO | 0.084 | 17/100 | **56/500 (11.2%)** | — |
+| DAPO | 0.074 | 15/100 | **53/500 (10.6%)** | −3 |
+
+**Method.** Both runs used binary verifier rewards; the recorded configuration difference was `loss_type=grpo` versus `loss_type=dapo`.
+
+**Caveat.** The three-task difference is not statistically meaningful under a single 500-task evaluation.
+
+<details>
+<summary><strong>Evidence and run details</strong></summary>
+
+| Run | Submitted unresolved | Context limit | Iteration cap | Infra | Empty patch |
+|---|---:|---:|---:|---:|---:|
+| `20260801T235407Z-149b` | 190 | 173 | 78 | 3 | 152 |
+| `20260802T065312Z-b873` | 179 | 196 | 69 | 3 | 150 |
+
+Run `149b` had 254/500 (50.8%) non-submitting trajectories. Defining a loop as the same tool, command, path, and `old_str` prefix appearing at least three times, loops occurred in 57% of context-limit and 76% of iteration-cap trajectories.
+
+- Common patterns were repeated `str_replace` failures, repeatedly viewing one file without acting, and retrying `pip install` in a network-isolated container.
+- The SFT data assumed an active test environment and network access; Scaffold v2 corrected both training/evaluation mismatches.
+
+</details>
+
+## Evaluation protocol
+
+- **Setup:** all 500 SWE-bench Verified tasks, one rollout per task, `temperature=0`, `top_p=1.0`, `max_model_length=32768`, and at most 40 tool turns.
+- **Revisions:** dataset `91aa3ed51b709be6457e12d00300a6a596d4c6a3`; harness `f7bbbb2ccdf479001d6467c9e34af59e44a840f9`.
+- **Metrics:** a non-degenerate group contains at least two distinct rewards among its 16 rollouts.
+- **Accounting:** `Resolved` always uses 500 as the denominator, and harness errors count as unresolved. Mutually exclusive outcomes are assigned infra → resolved → submitted → overlong → iteration cap; overlong and iteration-cap trajectories may still be scored from the container diff, so those buckets contain only unresolved tasks. `Empty patch` is cross-cutting and is not added to them.
+- **Scope:** these are fixed local-harness results, not independently certified leaderboard submissions. One training seed and one deterministic evaluation rollout support directional, not definitive, comparisons.
+
+## Scaffold compatibility
+
+| Version | Commit | Changes |
 |---|---|---|
-| v1 | — | 初始 OpenHands 三工具 scaffold（149b、b873 均属 v1） |
-| v2 | `451d0a2` | 截断标记对齐 SFT 原文（`[... Observation truncated due to length ...]`）；rollout 容器登录 shell 自动激活 conda testbed 环境；新增可配置的重复动作警告 `max_repeat_action`（默认关闭） |
+| Scaffold v1 | — | Initial three-tool OpenHands-compatible scaffold; used by runs `149b` and `b873`. |
+| Scaffold v2 | `451d0a2` | Matched the SFT truncation marker, injected conda testbed activation for login shells, and added the optional `max_repeat_action` warning. |
+| Scaffold v3 | `d4c57fe` | Removed redundant activation injection; task images activate testbed through `.bashrc`. |
 
-评测结果只在同一大版本 scaffold 下直接可比；跨版本对比需在记录中注明。
+Only results within the same major scaffold version are directly comparable; cross-version comparisons must be labeled.
 
-## 外部参照
+## External reference points
 
-SWE-Gym 报告 Qwen2.5-Coder-7B-Instruct zero-shot 为 1.8%，SWE-Gym OpenHands-7B-Agent SFT 为 10.6%；SkyRL 公开记录 OpenHands-7B-Agent base 为 11.0%，SkyRL-Agent-7B-v0 为 14.6%。来源见 [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) 与 [SkyRL](https://github.com/NovaSky-AI/SkyRL)。这些结果的 scaffold、预算、解码参数或版本可能不同，只提供背景，不进入同条件比较。
+For context, SWE-Gym reports 1.8% for Qwen2.5-Coder-7B-Instruct zero-shot and 10.6% for SWE-Gym OpenHands-7B-Agent SFT; SkyRL reports 11.0% for OpenHands-7B-Agent base and 14.6% for SkyRL-Agent-7B-v0. See [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) and [SkyRL](https://github.com/NovaSky-AI/SkyRL). Different scaffolds, budgets, decoding parameters, or versions make these references contextual rather than controlled comparisons.
