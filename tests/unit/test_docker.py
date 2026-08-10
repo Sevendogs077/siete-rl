@@ -9,7 +9,6 @@ from typing import Sequence
 
 import pytest
 
-from siete_rl.config import load_config
 from siete_rl.docker import (
     CommandResult,
     ContainerCleanupError,
@@ -23,11 +22,9 @@ from siete_rl.docker import (
     inspect_image,
     sweep_run_containers,
 )
-from siete_rl.swegym import load_task_instance
+from siete_rl.models import Environment, Task
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 CONTAINER_ID = "a" * 64
 TASK_ID = "getmoto__moto-7023"
 
@@ -79,9 +76,26 @@ class FakeClient:
 
 @pytest.fixture(scope="module")
 def domain():
-    config, project_root, _ = load_config(CONFIG_PATH)
-    sample, _ = load_task_instance(config, project_root, TASK_ID)
-    return sample.task, sample.environment
+    task = Task(
+        task_id=TASK_ID,
+        repo_name="getmoto/moto",
+        base_commit="a" * 40,
+        problem_statement="Fix the bug.",
+    )
+    environment = Environment(
+        environment_id=f"swegym:{TASK_ID}",
+        task_id=TASK_ID,
+        image_name="xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest",
+        expected_image_id="sha256:" + "1" * 64,
+        expected_registry_digest="sha256:" + "2" * 64,
+        workdir="/testbed",
+        cpus=4,
+        memory="16g",
+        pids_limit=512,
+        exec_timeout_sec=300,
+        verifier_timeout_sec=3600,
+    )
+    return task, environment
 
 
 def image_inspect(environment, **updates: object) -> CommandResult:
@@ -118,8 +132,6 @@ def make_sandbox(client: FakeClient, task, environment) -> DockerSandbox:
     )
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_create_command_has_fixed_isolation_and_no_mount(domain) -> None:
     task, environment = domain
     sandbox = make_sandbox(FakeClient([]), task, environment)
@@ -136,8 +148,6 @@ def test_create_command_has_fixed_isolation_and_no_mount(domain) -> None:
     assert environment.image_name in command
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_open_saves_id_before_start_and_closes_by_id(domain) -> None:
     task, environment = domain
     client = FakeClient([*ready_responses(task, environment), result([], stdout=CONTAINER_ID)])
@@ -150,8 +160,6 @@ def test_open_saves_id_before_start_and_closes_by_id(domain) -> None:
     assert sandbox.container_id is None
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_start_failure_preserves_primary_and_runs_cleanup(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -169,8 +177,6 @@ def test_start_failure_preserves_primary_and_runs_cleanup(domain) -> None:
     assert sandbox.container_id is None
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_base_mismatch_is_primary_and_container_is_removed(domain) -> None:
     task, environment = domain
     responses = ready_responses(task, environment)
@@ -182,8 +188,6 @@ def test_base_mismatch_is_primary_and_container_is_removed(domain) -> None:
     assert sandbox.container_id is None
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_cleanup_failure_retains_handle_and_next_close_retries(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -207,8 +211,6 @@ def test_cleanup_failure_retains_handle_and_next_close_retries(domain) -> None:
     assert len(client.calls) == calls_after_success
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_ambiguous_create_recovers_exact_id_then_cleans(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -226,8 +228,6 @@ def test_ambiguous_create_recovers_exact_id_then_cleans(domain) -> None:
     assert client.calls[-1][0] == ["docker", "rm", "-f", CONTAINER_ID]
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_image_identity_mismatch_fails_before_create(domain) -> None:
     task, environment = domain
     client = FakeClient([image_inspect(environment, Id="sha256:" + "0" * 64)])
@@ -236,8 +236,6 @@ def test_image_identity_mismatch_fails_before_create(domain) -> None:
     assert len(client.calls) == 1
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_get_diff_registers_untracked_files_before_diff(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -261,8 +259,6 @@ def test_get_diff_registers_untracked_files_before_diff(domain) -> None:
     assert "--no-ext-diff" in client.calls[1][0]
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_get_diff_attributes_started_workspace_git_failure_to_agent(domain) -> None:
     task, environment = domain
     client = FakeClient(
@@ -276,8 +272,6 @@ def test_get_diff_attributes_started_workspace_git_failure_to_agent(domain) -> N
         sandbox.get_diff()
 
 
-# 依赖私有 data/assets（domain fixture 读取真实任务实例）。
-@pytest.mark.external_assets
 def test_get_diff_keeps_unstarted_workspace_git_failure_external(domain) -> None:
     task, environment = domain
     client = FakeClient([result([], exit_code=1, stderr="daemon unavailable")])

@@ -78,7 +78,7 @@ def test_cli_rejects_unqualified_runtime(monkeypatch: pytest.MonkeyPatch, capsys
     assert "runtime_qualified=false" in capsys.readouterr().err
 
 
-def test_signal_boundary_maps_first_signal() -> None:
+def test_signal_boundary_maps_sigterm_to_workflow_termination() -> None:
     boundary = cli.SignalBoundary()
     with pytest.raises(cli.WorkflowTermination) as captured:
         boundary._handle(signal.SIGTERM, None)

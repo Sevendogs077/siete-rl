@@ -99,40 +99,26 @@ def test_load_task_instance_carries_test_lists(loaded) -> None:
     ]
 
 
-# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
-@pytest.mark.external_assets
-def test_load_task_instance_rejects_non_list_test_field(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
-    # official 行的 FAIL_TO_PASS 不是 JSON 字符串列表时必须拒绝。
-    config, project_root, _, _ = loaded
-    real_read = swegym._read_exact_row
-
-    def fake_read(path: Path, instance_id: str):
-        row = real_read(path, instance_id)
-        if "FAIL_TO_PASS" in row:
-            row = dict(row, FAIL_TO_PASS={"not": "a list"})
-        return row
-
-    monkeypatch.setattr(swegym, "_read_exact_row", fake_read)
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"not": "a list"},
+        "not-json{",
+        [""],
+        [1],
+    ],
+    ids=["mapping", "invalid-json", "empty-test-id", "non-string-test-id"],
+)
+def test_test_list_parser_rejects_non_string_lists(raw: object) -> None:
     with pytest.raises(SWEGymContractError, match="FAIL_TO_PASS"):
-        load_task_instance(config, project_root, TASK_ID)
+        swegym._load_test_list({"FAIL_TO_PASS": raw}, "FAIL_TO_PASS", TASK_ID)
 
 
-# 依赖私有 data/assets（loaded fixture 读取真实 parquet 资产）。
-@pytest.mark.external_assets
-def test_load_task_instance_rejects_invalid_json_test_field(loaded, monkeypatch: pytest.MonkeyPatch) -> None:
-    # FAIL_TO_PASS 是字符串但不是合法 JSON 时也必须拒绝。
-    config, project_root, _, _ = loaded
-    real_read = swegym._read_exact_row
-
-    def fake_read(path: Path, instance_id: str):
-        row = real_read(path, instance_id)
-        if "FAIL_TO_PASS" in row:
-            row = dict(row, FAIL_TO_PASS="not-json{")
-        return row
-
-    monkeypatch.setattr(swegym, "_read_exact_row", fake_read)
-    with pytest.raises(SWEGymContractError, match="FAIL_TO_PASS"):
-        load_task_instance(config, project_root, TASK_ID)
+@pytest.mark.parametrize("raw", ['["tests/test_a.py::test_fix"]', ["tests/test_a.py::test_fix"]])
+def test_test_list_parser_accepts_json_and_materialized_lists(raw: object) -> None:
+    assert swegym._load_test_list({"FAIL_TO_PASS": raw}, "FAIL_TO_PASS", TASK_ID) == [
+        "tests/test_a.py::test_fix"
+    ]
 
 
 def test_exactly_one_parquet_row_is_required(tmp_path: Path) -> None:
@@ -150,18 +136,23 @@ def test_exactly_one_parquet_row_is_required(tmp_path: Path) -> None:
         swegym._read_exact_row(path, "x")
 
 
-# 依赖私有 data/assets（读取 assets 下真实 eval_script）。
 @pytest.mark.external_assets
-def test_offline_transform_is_exact_and_fail_closed(loaded) -> None:
+def test_generated_offline_script_matches_checked_in_asset(loaded) -> None:
     config, _, _, _ = loaded
     assets = Path(config.dataset.tasks_dir) / TASK_ID
     original = (assets / "eval_script.sh").read_text(encoding="utf-8")
     offline = (assets / "eval_script.offline.sh").read_text(encoding="utf-8")
     assert transform_eval_script_offline(original) == offline
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["echo no-init\n", "make init\nmake init\n"],
+    ids=["missing-install", "multiple-installs"],
+)
+def test_offline_transform_requires_exactly_one_install_line(script: str) -> None:
     with pytest.raises(SWEGymContractError, match="exactly one"):
-        transform_eval_script_offline("echo no-init\n")
-    with pytest.raises(SWEGymContractError, match="exactly one"):
-        transform_eval_script_offline("make init\nmake init\n")
+        transform_eval_script_offline(script)
 
 
 @pytest.mark.parametrize(

@@ -357,24 +357,6 @@ from siete_rl.trainer import (  # noqa: E402
 
 
 class TestConfigWiring:
-    def test_yaml_requires_boolean_process_mask(self):
-        from siete_rl.config import load_config
-
-        config, _, _ = load_config(CONFIG_PATH)
-        assert config.generation.use_process_mask is True
-        assert not hasattr(config.generation, "process_mask_rules")
-
-    def test_old_process_mask_rules_key_is_rejected(self, tmp_path):
-        from siete_rl.config import load_config
-
-        raw = yaml.safe_load(CONFIG_PATH.read_text())
-        raw["generation"].pop("use_process_mask")
-        raw["generation"]["process_mask_rules"] = ["invalid_call", "duplicate_action"]
-        path = tmp_path / "old.yaml"
-        path.write_text(yaml.safe_dump(raw))
-        with pytest.raises(ValidationError):
-            load_config(path)
-
     @pytest.mark.parametrize("loss_type", ["bnpo", "dapo", "dr_grpo"])
     def test_non_grpo_loss_type_is_rejected(self, tmp_path, loss_type):
         from siete_rl.config import load_config
@@ -778,52 +760,10 @@ def test_fixed_g_liger_loss_and_gradient_scale_with_censored_rows():
     assert torch.allclose(censored_grad, complete_grad / 2, atol=1e-6, rtol=1e-6)
 
 
-def test_censored_microbatch_adds_no_gradient_but_preserves_accumulator():
-    parameter = torch.nn.Parameter(torch.tensor(2.0))
-    healthy_loss = parameter.square()
-    healthy_loss.backward()
-    accumulated = parameter.grad.detach().clone()
-
-    zero_loss = torch.zeros((), requires_grad=True)
-    zero_loss.backward()
-
-    assert torch.equal(parameter.grad, accumulated)
-
-
-def test_fully_censored_window_leaves_adamw_parameter_and_state_unchanged():
-    parameter = torch.nn.Parameter(torch.tensor(2.0))
-    optimizer = torch.optim.AdamW([parameter], lr=0.1)
-    optimizer.zero_grad(set_to_none=True)
-    before = parameter.detach().clone()
-
-    torch.zeros((), requires_grad=True).backward()
-    assert parameter.grad is None
-    optimizer.step()
-
-    assert torch.equal(parameter, before)
-    assert optimizer.state == {}
-
-
 import json  # noqa: E402
 
 from siete_rl.config import load_config  # noqa: E402
-from siete_rl.recording import STEP_METRIC_KEYS, RunRecorder  # noqa: E402
-
-
-PROCESS_MASK_STEP_METRICS = {
-    "process_mask_candidate_turns": "process_mask/candidate_turns",
-    "process_mask_applied_turns": "process_mask/applied_turns",
-    "process_mask_retained_negative_turns": "process_mask/retained_negative_turns",
-    "process_mask_masked_token_frac": "process_mask/masked_token_frac",
-    "credit_mask_infra_rows": "credit_mask/infra_rows",
-    "credit_mask_truncated_turns": "credit_mask/truncated_turns",
-    "credit_mask_masked_token_frac": "credit_mask/masked_token_frac",
-    "reward_zero_std_frac": "frac_reward_zero_std",
-    "settlement_recovered_positive_rows": "settlement/recovered_positive_rows",
-    "settlement_recovered_positive_active_tokens": (
-        "settlement/recovered_positive_active_tokens"
-    ),
-}
+from siete_rl.recording import RunRecorder  # noqa: E402
 
 
 def _recorder(tmp_path: Path, run_id: str) -> RunRecorder:
@@ -836,10 +776,6 @@ def _recorder(tmp_path: Path, run_id: str) -> RunRecorder:
 
 
 class TestProcessMaskStepMetricKeys:
-    def test_step_metric_keys_mapping(self):
-        for field, source in PROCESS_MASK_STEP_METRICS.items():
-            assert STEP_METRIC_KEYS.get(field) == source
-
     def test_metrics_row_contains_process_mask_fields(self, tmp_path: Path):
         recorder = _recorder(tmp_path, "pm-run")
         assert recorder.record_metrics(

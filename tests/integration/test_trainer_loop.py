@@ -361,13 +361,9 @@ def test_initial_turn_generation_path_is_not_overridden() -> None:
     assert SWEGRPOTrainer._generate_single_turn is GRPOTrainer._generate_single_turn
 
 
-def _run_parallel_scenario(
-    workers: int, bash_delays: list[float] | None = None
-):
+def _run_parallel_scenario(workers: int, trajectory_count: int = 4):
     """K 条 trajectory 各调一次 bash 后由空生成退出。"""
-    import time as _time
-
-    k = len(bash_delays) if bash_delays else 4
+    k = trajectory_count
     envs = [Environment() for _ in range(k)]
     value = trainer()
     value._tool_parallel_workers = workers
@@ -375,8 +371,6 @@ def _run_parallel_scenario(
 
     def make_bash(i):
         def _bash():
-            if bash_delays:
-                _time.sleep(bash_delays[i])
             envs[i]._steps.append(object())
             return f"obs-{i}-{len(envs[i]._steps)}"
 
@@ -388,7 +382,6 @@ def _run_parallel_scenario(
         [[91, 99]] * len(ids),
         [[0.5, 0.5]] * len(ids),
     )
-    started = _time.monotonic()
     result = value._tool_call_loop(
         prompts=[[{"role": "user", "content": "fix"}] for _ in range(k)],
         prompt_ids=[[i + 1] for i in range(k)],
@@ -398,14 +391,14 @@ def _run_parallel_scenario(
         images=None,
         multimodal_fields={},
     )
-    return result, envs, _time.monotonic() - started
+    return result, envs
 
 
 def test_parallel_tool_execution_matches_serial_byte_for_byte(monkeypatch) -> None:
     """worker=1 与 worker=8 的全部状态转移结果逐项全等。"""
     monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
-    serial, envs_s, _ = _run_parallel_scenario(1)
-    parallel, envs_p, _ = _run_parallel_scenario(8)
+    serial, envs_s = _run_parallel_scenario(1)
+    parallel, envs_p = _run_parallel_scenario(8)
     assert serial == parallel
     for env_s, env_p in zip(envs_s, envs_p, strict=True):
         assert env_s.turn_records == env_p.turn_records
@@ -484,10 +477,34 @@ def test_single_worker_or_job_uses_serial_path_without_pool(monkeypatch) -> None
         assert ids == [[2, 99]]
 
 
-def test_parallel_tool_execution_covers_slow_trajectories(monkeypatch) -> None:
-    """并行耗时应接近最慢单条 trajectory，而非所有延迟之和。"""
-    delays = [1.0] + [0.1] * 7
+def test_parallel_tool_execution_dispatches_every_trajectory_through_pool(monkeypatch) -> None:
+    """多 trajectory 时必须按配置的并行度进入 pool 路径。"""
+    created: list[object] = []
+
+    class RecordingExecutor:
+        def __init__(self, *, max_workers: int) -> None:
+            self.max_workers = max_workers
+            self.jobs = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def map(self, function, jobs):
+            self.jobs = list(jobs)
+            return [function(job) for job in self.jobs]
+
     monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
-    _, _, serial_time = _run_parallel_scenario(1, delays)
-    _, _, parallel_time = _run_parallel_scenario(8, delays)
-    assert parallel_time < 0.75 * serial_time
+    monkeypatch.setattr("siete_rl.trainer.ThreadPoolExecutor", RecordingExecutor)
+    result, envs = _run_parallel_scenario(8, trajectory_count=8)
+
+    *_, tool_call_count, tool_failure_count, _ = result
+    executor = created[0]
+    assert executor.max_workers == 8
+    assert len(executor.jobs) == 8
+    assert tool_call_count == 8
+    assert tool_failure_count == 0
+    assert all(len(environment._steps) == 1 for environment in envs)

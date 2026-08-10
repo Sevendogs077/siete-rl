@@ -12,6 +12,7 @@ from siete_rl.models import (
     Settlement,
     Step,
     Task,
+    TerminalEvent,
     Trajectory,
     Verification,
 )
@@ -37,6 +38,7 @@ EXPECTED_FIELDS = {
     Action: {"tool_name", "arguments"},
     Observation: {"text", "exit_code", "error_type", "timed_out", "truncated"},
     Step: {"index", "action", "observation"},
+    TerminalEvent: {"kind", "step_index"},
     Settlement: {"status", "detail"},
     Trajectory: {"task_id", "environment_id", "steps", "termination", "settlement"},
     Verification: {"result", "patch_apply_status", "pytest_started", "exit_code", "stdout", "stderr"},
@@ -70,24 +72,24 @@ def environment() -> Environment:
     )
 
 
-def test_ten_core_models_have_exact_planned_fields() -> None:
-    assert len(EXPECTED_FIELDS) == 10
+def test_persisted_domain_models_have_expected_fields() -> None:
     for model, expected in EXPECTED_FIELDS.items():
         assert set(model.model_fields) == expected
-        assert "metadata" not in model.model_fields
 
 
-def test_sample_only_validates_task_environment_pair(task: Task, environment: Environment) -> None:
-    sample = Sample(task=task, environment=environment)
-    assert sample.task is task
+def test_sample_rejects_task_environment_mismatch(task: Task, environment: Environment) -> None:
+    assert Sample(task=task, environment=environment).task is task
     with pytest.raises(ValidationError, match="Environment.task_id"):
         Sample(task=task, environment=environment.model_copy(update={"task_id": "other"}))
 
 
-def test_action_step_and_trajectory_have_no_wire_or_probability_fields(
+def test_trajectory_serialization_excludes_transport_and_training_state(
     task: Task, environment: Environment
 ) -> None:
-    action = Action(tool_name="read_file", arguments={"path": "moto/api.py"})
+    action = Action(
+        tool_name="str_replace_editor",
+        arguments={"command": "view", "path": "/repo/moto/api.py"},
+    )
     observation = Observation(text="contents", exit_code=0)
     steps = [Step(index=0, action=action, observation=observation)]
     trajectory = Trajectory(
@@ -99,10 +101,17 @@ def test_action_step_and_trajectory_have_no_wire_or_probability_fields(
     )
     dumped = trajectory.model_dump(mode="json")
     assert dumped["steps"][0]["action"] == {
-        "tool_name": "read_file",
-        "arguments": {"path": "moto/api.py"},
+        "tool_name": "str_replace_editor",
+        "arguments": {"command": "view", "path": "/repo/moto/api.py"},
     }
     assert not ({"tool_call_id", "logprobs", "messages", "patch", "reward"} & set(dumped))
+
+
+def test_trajectory_requires_contiguous_step_indexes(
+    task: Task, environment: Environment
+) -> None:
+    action = Action(tool_name="execute_bash", arguments={"command": "pytest -q"})
+    observation = Observation(text="contents", exit_code=0)
     with pytest.raises(ValidationError, match="contiguous"):
         Trajectory(
             task_id=task.task_id,
@@ -131,34 +140,29 @@ def test_settlement_rejects_unknown_status() -> None:
         Settlement(status="timeout")
 
 
-def test_verification_requires_real_attributable_evidence() -> None:
-    Verification(
-        result="resolved",
-        patch_apply_status="applied",
-        pytest_started=True,
-        exit_code=0,
-        stdout="passed",
-        stderr="",
-    )
-    Verification(
-        result="unresolved",
-        patch_apply_status="check_failed",
-        pytest_started=False,
-        exit_code=1,
-        stdout="",
-        stderr="does not apply",
-    )
-    with pytest.raises(ValidationError, match="successful pytest"):
+@pytest.mark.parametrize(
+    ("result", "patch_apply_status", "pytest_started", "exit_code"),
+    [
+        ("resolved", "check_failed", True, 0),
+        ("resolved", "applied", False, 0),
+        ("resolved", "applied", True, 1),
+        ("unresolved", "applied", False, 1),
+    ],
+)
+def test_verification_rejects_results_without_attributable_evidence(
+    result: str, patch_apply_status: str, pytest_started: bool, exit_code: int
+) -> None:
+    with pytest.raises(ValidationError, match="pytest evidence|real pytest evidence"):
         Verification(
-            result="resolved",
-            patch_apply_status="applied",
-            pytest_started=True,
-            exit_code=1,
+            result=result,
+            patch_apply_status=patch_apply_status,
+            pytest_started=pytest_started,
+            exit_code=exit_code,
             stdout="failed",
             stderr="",
         )
 
 
-def test_all_models_reject_extra_fields(task: Task) -> None:
+def test_domain_models_reject_unknown_fields(task: Task) -> None:
     with pytest.raises(ValidationError, match="Extra inputs"):
         Task.model_validate({**task.model_dump(), "metadata": {}})

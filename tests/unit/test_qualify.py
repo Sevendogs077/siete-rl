@@ -64,10 +64,11 @@ def test_qualify_detects_cross_table_mismatch(monkeypatch: pytest.MonkeyPatch) -
     assert "base_commit" in mismatched[0].detail
 
 
-def test_qualify_detects_offline_transform_tampering() -> None:
+def test_qualify_detects_offline_transform_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config, project_root, _ = load_config(CONFIG_PATH)
     original_transform = qualify.transform_eval_script_offline
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         qualify,
         "transform_eval_script_offline",
@@ -77,4 +78,3 @@ def test_qualify_detects_offline_transform_tampering() -> None:
     assert any(
         check.name.endswith(".offline_transform") and check.ok is False for check in results
     )
-    monkeypatch.undo()

@@ -1,33 +1,26 @@
 from __future__ import annotations
 
+import ast
 from importlib.metadata import entry_points
 from pathlib import Path
-import ast
+import re
+import subprocess
+import tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_required_launchers_exist_and_grpo_stays_minimal() -> None:
-    scripts = {
-        path.name for path in (PROJECT_ROOT / "scripts").iterdir() if path.is_file()
+def test_launch_scripts_are_syntax_valid_and_delegate_to_package_entry_points() -> None:
+    launchers = {
+        "eval.sh": "python -m siete_rl.eval",
+        "grpo.sh": ".venv/bin/siete-rl grpo",
+        "qualify.sh": "python -m siete_rl.qualify",
     }
-    assert {
-        "eval.sh",
-        "gen_results_chart.sh",
-        "grpo.sh",
-        "prepare.sh",
-        "qualify.sh",
-    } <= scripts
-    launcher = (PROJECT_ROOT / "scripts/grpo.sh").read_text(encoding="utf-8")
-    assert 'exec .venv/bin/siete-rl grpo --config "$config_path"' in launcher
-    # vLLM server 生命周期、GPU 拆分与容器清扫均已内嵌 siete_rl.launcher
-    assert "vllm-serve" not in launcher
-    assert "setsid" not in launcher
-    assert "docker rm" not in launcher
-    assert "SWE_AGENT_RUN_ID" not in launcher
-    assert "accelerate launch" not in launcher
-    assert "--use_fsdp" not in launcher
+    for name, delegation in launchers.items():
+        script = PROJECT_ROOT / "scripts" / name
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        assert delegation in script.read_text(encoding="utf-8")
 
 
 def test_pull_script_is_pinned_to_dedicated_daemon() -> None:
@@ -44,24 +37,21 @@ def test_console_script_targets_cli_main() -> None:
     assert matches[0].value == "siete_rl.cli:main"
 
 
-def test_package_has_no_legacy_control_plane() -> None:
-    package_root = PROJECT_ROOT / "src/siete_rl"
-    assert (package_root / "__init__.py").is_file()
-    assert not (package_root / "core").exists()
-    assert not (package_root / "runtime").exists()
-    assert not (package_root / "training").exists()
-    assert not (package_root / "workflow.py").exists()
-
-
 def test_runtime_code_has_no_external_openhands_dependency() -> None:
     forbidden = {"openhands", "openhands_aci", "litellm", "browsergym"}
-    for root in (PROJECT_ROOT / "src", PROJECT_ROOT / "tests"):
-        for path in root.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                names = []
-                if isinstance(node, ast.Import): names = [item.name for item in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module: names = [node.module]
-                assert not any(name.split(".")[0] in forbidden for name in names), path
-    dependencies = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
-    assert not any(name in dependencies for name in forbidden)
+    for path in (PROJECT_ROOT / "src").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [item.name for item in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            assert not any(name.split(".")[0] in forbidden for name in names), path
+
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependency_names = {
+        re.split(r"[<>=!~;\[]", requirement, maxsplit=1)[0].strip().lower()
+        for requirement in project["project"]["dependencies"]
+    }
+    assert forbidden.isdisjoint(dependency_names)

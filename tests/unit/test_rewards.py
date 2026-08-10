@@ -1,8 +1,6 @@
-"""binary_reward 并行 finalize 的保序、异常隔离、串行基线与长尾覆盖。"""
+"""binary_reward 并行 finalize 的保序、异常隔离与调度策略。"""
 
 from __future__ import annotations
-
-import time
 
 import pytest
 
@@ -18,26 +16,16 @@ class FakeEnvironment:
         self,
         index: int,
         *,
-        delay: float = 0.0,
         error: BaseException | None = None,
-        termination: str = "submitted",
+        settlement: str = "unresolved",
     ) -> None:
         self.index = index
-        self.delay = delay
         self.error = error
         self.finalize_calls = 0
-        settlement = "infra_error" if termination == "infra_error" else "unresolved"
-        self.trajectory = type(
-            "Trajectory",
-            (),
-            {"termination": termination, "settlement": Settlement(status=settlement)},
-        )()
-        self.settlement = self.trajectory.settlement
+        self.settlement = Settlement(status=settlement)
 
     def _finalize(self, completion: object) -> float:
         self.finalize_calls += 1
-        if self.delay:
-            time.sleep(self.delay)
         if self.error is not None:
             raise self.error
         return float(self.index) + 0.5
@@ -80,26 +68,40 @@ def test_parallel_finalize_exception_does_not_corrupt_other_environments() -> No
     assert envs_serial[0].finalize_calls == 1 and envs_serial[2].finalize_calls == 0
 
 
-def test_parallel_finalize_wall_time_covers_long_tail() -> None:
-    def make_envs():
-        return [FakeEnvironment(0, delay=1.0)] + [
-            FakeEnvironment(i, delay=0.1) for i in range(1, 8)
-        ]
+def test_parallel_finalize_uses_pool_bounded_by_environment_count(monkeypatch) -> None:
+    created: list[object] = []
 
-    started = time.monotonic()
-    serial = binary_reward([None] * 8, make_envs())
-    serial_time = time.monotonic() - started
-    started = time.monotonic()
-    parallel = binary_reward([None] * 8, make_envs(), max_workers=8)
-    parallel_time = time.monotonic() - started
-    assert parallel == serial
-    assert parallel_time < 0.75 * serial_time
+    class RecordingExecutor:
+        def __init__(self, *, max_workers: int) -> None:
+            self.max_workers = max_workers
+            self.jobs: list[tuple[FakeEnvironment, object]] = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def map(self, function, jobs):
+            self.jobs = list(jobs)
+            return [function(job) for job in self.jobs]
+
+    monkeypatch.setattr("siete_rl.rewards.ThreadPoolExecutor", RecordingExecutor)
+    envs = [FakeEnvironment(i) for i in range(3)]
+
+    rewards = binary_reward([None] * 3, envs, max_workers=99)
+
+    executor = created[0]
+    assert executor.max_workers == 3
+    assert [environment for environment, _ in executor.jobs] == envs
+    assert rewards == [0.5, 1.5, 2.5]
 
 
 @pytest.mark.parametrize("max_workers", [1, 2])
 def test_infra_error_is_unscorable_instead_of_zero_reward(max_workers: int) -> None:
     envs = [
-        FakeEnvironment(0, termination="infra_error"),
+        FakeEnvironment(0, settlement="infra_error"),
         FakeEnvironment(1),
     ]
 

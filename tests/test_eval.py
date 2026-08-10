@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import threading
-import time
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -50,6 +48,45 @@ class Client:
         return self.responses.pop(0)
 
 
+class ImmediateFuture:
+    def __init__(self, function, args, kwargs) -> None:
+        self._function = function
+        self._args = args
+        self._kwargs = kwargs
+        self._resolved = False
+        self._value = None
+
+    def result(self):
+        if not self._resolved:
+            self._value = self._function(*self._args, **self._kwargs)
+            self._resolved = True
+        return self._value
+
+
+class RecordingExecutor:
+    instances: list["RecordingExecutor"] = []
+
+    def __init__(self, *, max_workers: int) -> None:
+        self.max_workers = max_workers
+        self.futures: list[ImmediateFuture] = []
+        self.shutdown_calls: list[tuple[bool, bool]] = []
+        self.instances.append(self)
+
+    def submit(self, function, *args, **kwargs):
+        future = ImmediateFuture(function, args, kwargs)
+        self.futures.append(future)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self.shutdown_calls.append((wait, cancel_futures))
+
+
+def use_recording_executor(monkeypatch: pytest.MonkeyPatch) -> list[RecordingExecutor]:
+    RecordingExecutor.instances = []
+    monkeypatch.setattr(eval_module, "ThreadPoolExecutor", RecordingExecutor)
+    return RecordingExecutor.instances
+
+
 def protocol() -> EvalProtocol:
     return EvalProtocol(
         max_prompt_length=8,
@@ -67,6 +104,48 @@ def protocol() -> EvalProtocol:
         repetition_penalty=1.0,
         gpu_memory_utilization=0.5,
     )
+
+
+def make_eval_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    missing: tuple[str, str] | None = None,
+) -> Path:
+    monkeypatch.setattr(eval_module, "PROJECT_ROOT", tmp_path)
+    base_model = tmp_path / "base-model"
+    base_model.mkdir()
+    run_root = tmp_path / "outputs" / "run-under-test"
+    run_root.mkdir(parents=True)
+    (run_root / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": str(base_model), "r": 8}),
+        encoding="utf-8",
+    )
+    (run_root / "adapter_model.safetensors").write_bytes(b"")
+    config = {
+        "model": {"model_path": str(base_model)},
+        "chat": {"max_prompt_length": 8, "max_observation_chars": 100},
+        "generation": {
+            "max_completion_length": 24,
+            "max_tool_calling_iterations": 4,
+            "max_consecutive_protocol_errors": 2,
+            "repetition_penalty": 1.0,
+        },
+        "vllm": {"max_model_length": 32, "gpu_memory_utilization": 0.5},
+        "docker": {
+            "exec_timeout_sec": 30,
+            "verifier_timeout_sec": 60,
+            "cpus": 1.0,
+            "memory": "1g",
+            "pids_limit": 64,
+        },
+        "runtime": {"base_seed": 1},
+    }
+    if missing is not None:
+        section, field = missing
+        del config[section][field]
+    (run_root / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
+    return run_root
 
 
 @pytest.mark.parametrize("value,expected", [(None, False), ("False", False), ("True", True)])
@@ -162,15 +241,14 @@ def test_sampler_fallback_is_explicit_and_session_scoped(monkeypatch: pytest.Mon
         configure_sampler_backend()
 
 
-# 依赖私有 outputs/ 下的真实评测运行目录。
-@pytest.mark.external_assets
-def test_last_two_real_runs_supply_budget_without_defaults() -> None:
-    for name in ("20260801T235407Z-149b", "20260802T065312Z-b873"):
-        run = load_eval_run(PROJECT_ROOT / "outputs" / name)
-        assert run.protocol.max_tool_calling_iterations == 40
-        assert run.protocol.max_prompt_length == 8192
-        assert run.protocol.max_completion_length == 24576
-        assert run.protocol.max_model_length == 32768
+def test_load_eval_run_reads_protocol_from_run_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = load_eval_run(make_eval_run(tmp_path, monkeypatch))
+
+    assert run.protocol == protocol()
+    assert run.rank == 8
+    assert run.base_model_path == tmp_path / "base-model"
 
 
 def test_harness_resolver_fails_closed_without_eval_harness_python(
@@ -314,34 +392,50 @@ def test_execute_propagates_worker_settings_to_metadata_and_both_variants(
     assert harness_workers == [3, 3, 3]
 
 
-# 依赖 .external 下的真实评测 harness 检出。
-@pytest.mark.external_assets
-def test_harness_resolver_accepts_clean_checkout() -> None:
+def test_harness_resolver_accepts_configured_clean_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "swe-bench"
+    (root / "swebench/harness/constants/fixtures").mkdir(parents=True)
+    (root / "swebench/harness/run_evaluation.py").write_text("", encoding="utf-8")
+    (root / "swebench/harness/constants/fixtures/tokio-rs__tokio-6724.Cargo.lock").write_text(
+        "", encoding="utf-8"
+    )
+    python = tmp_path / "harness-venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("EVAL_HARNESS_ROOT", str(root))
+    monkeypatch.setenv("EVAL_HARNESS_PYTHON", str(python))
+    monkeypatch.setattr(
+        eval_module,
+        "_run_checked",
+        lambda command, **_kwargs: eval_module.HARNESS_REVISION
+        if "rev-parse" in command
+        else "",
+    )
+
     root, python = resolve_harness()
-    assert root.name == "swe-bench"
-    assert python.name == "python"
-    assert python.parent.name == "bin"
-    assert python.parent.parent.name == ".venv"
+
+    assert root == tmp_path / "swe-bench"
+    assert python == tmp_path / "harness-venv/bin/python"
 
 
-# 依赖私有 outputs/ 下的真实评测运行目录。
-@pytest.mark.external_assets
-def test_missing_budget_fails_closed(tmp_path: Path) -> None:
-    source = PROJECT_ROOT / "outputs/20260801T235407Z-149b"
-    run = PROJECT_ROOT / "outputs" / f"pytest-eval-missing-{tmp_path.name}"
-    run.mkdir()
-    try:
-        for name in ("adapter_config.json", "adapter_model.safetensors"):
-            (run / name).symlink_to(source / name)
-        config = (source / "config.yaml").read_text(encoding="utf-8")
-        config = config.replace("  max_tool_calling_iterations: 40\n", "")
-        (run / "config.yaml").write_text(config, encoding="utf-8")
-        with pytest.raises(EvalError, match="max_tool_calling_iterations"):
-            load_eval_run(run)
-    finally:
-        for path in run.iterdir():
-            path.unlink()
-        run.rmdir()
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("chat", "max_prompt_length"),
+        ("generation", "max_completion_length"),
+        ("generation", "max_tool_calling_iterations"),
+        ("vllm", "max_model_length"),
+    ],
+)
+def test_load_eval_run_rejects_missing_generation_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, section: str, field: str
+) -> None:
+    run_root = make_eval_run(tmp_path, monkeypatch, missing=(section, field))
+
+    with pytest.raises(EvalError, match=field):
+        load_eval_run(run_root)
 
 
 def test_public_sample_excludes_private_grader_fields() -> None:
@@ -450,32 +544,25 @@ def test_predictions_keep_empty_and_infrastructure_failures() -> None:
     ]
 
 
-def test_evaluate_variant_runs_multiple_agent_loops_concurrently(
+def test_evaluate_variant_submits_all_agent_loops_before_collecting_results(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     rows = [{"instance_id": f"task-{index}"} for index in range(2)]
-    lock = threading.Lock()
-    concurrent = threading.Event()
-    active = 0
-    peak_active = 0
+    executors = use_recording_executor(monkeypatch)
 
     def make_sample(row, *_args):
         return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
 
     def run_loop(*, sample, **_kwargs):
-        nonlocal active, peak_active
-        with lock:
-            active += 1
-            peak_active = max(peak_active, active)
-            if active == 2:
-                concurrent.set()
-        concurrent.wait(timeout=1)
-        with lock:
-            active -= 1
         return EvalOutcome(sample.task.task_id, "patch", "submitted", None, [], 0.0)
+
+    def submitted_futures(futures):
+        assert len(executors[0].futures) == len(rows)
+        return list(futures)
 
     monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
     monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
+    monkeypatch.setattr(eval_module, "as_completed", submitted_futures)
     eval_module.evaluate_variant(
         name="candidate",
         model_name="candidate",
@@ -488,7 +575,8 @@ def test_evaluate_variant_runs_multiple_agent_loops_concurrently(
         output_dir=tmp_path,
         rollout_workers=2,
     )
-    assert peak_active == 2
+    assert executors[0].max_workers == 2
+    assert executors[0].shutdown_calls == [(True, False)]
 
 
 def test_evaluate_variant_single_worker_prepares_each_sample_lazily(
@@ -532,13 +620,13 @@ def test_evaluate_variant_preserves_order_when_workers_finish_out_of_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     rows = [{"instance_id": f"task-{index}"} for index in range(4)]
+    use_recording_executor(monkeypatch)
 
     def make_sample(row, *_args):
         return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
 
     def run_loop(*, sample, **_kwargs):
         index = int(sample.task.task_id.rsplit("-", 1)[1])
-        time.sleep((3 - index) * 0.01)
         infrastructure_error = "docker unavailable" if index == 2 else None
         patch = "" if infrastructure_error else f"patch-{index}"
         termination = "infra_error" if infrastructure_error else "submitted"
@@ -553,6 +641,9 @@ def test_evaluate_variant_preserves_order_when_workers_finish_out_of_order(
 
     monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
     monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
+    monkeypatch.setattr(
+        eval_module, "as_completed", lambda futures: reversed(list(futures))
+    )
     outcomes = eval_module.evaluate_variant(
         name="candidate",
         model_name="candidate",
@@ -582,27 +673,23 @@ def test_evaluate_variant_cancels_pending_tasks_when_progress_write_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     rows = [{"instance_id": f"task-{index}"} for index in range(6)]
-    release = threading.Event()
-    lock = threading.Lock()
+    executors = use_recording_executor(monkeypatch)
     started: list[str] = []
 
     def make_sample(row, *_args):
         return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
 
     def run_loop(*, sample, **_kwargs):
-        with lock:
-            started.append(sample.task.task_id)
-        if sample.task.task_id != "task-0":
-            release.wait(timeout=1)
+        started.append(sample.task.task_id)
         return EvalOutcome(sample.task.task_id, "patch", "submitted", None, [], 0.0)
 
     def fail_write(*_args, **_kwargs):
-        threading.Timer(0.1, release.set).start()
         raise OSError("disk full")
 
     monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
     monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
     monkeypatch.setattr(eval_module, "_write_json", fail_write)
+    monkeypatch.setattr(eval_module, "as_completed", lambda futures: list(futures))
     with pytest.raises(OSError, match="disk full"):
         eval_module.evaluate_variant(
             name="candidate",
@@ -616,8 +703,8 @@ def test_evaluate_variant_cancels_pending_tasks_when_progress_write_fails(
             output_dir=tmp_path,
             rollout_workers=2,
         )
-    assert "task-0" in started
-    assert len(started) < len(rows)
+    assert started == ["task-0"]
+    assert executors[0].shutdown_calls == [(True, True)]
 
 
 def test_comparison_only_claims_delta_for_complete_local_runs() -> None:

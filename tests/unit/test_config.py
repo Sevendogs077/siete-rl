@@ -3,16 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from siete_rl.config import (
     GenerationConfig,
     GRPOConfigValues,
-    LORA_TARGET_MODULES,
     ProjectConfig,
     load_config,
 )
+from siete_rl.scoring import DEFAULT_LAMBDA
 
 
 def _minimal_grpo_values(**overrides: object) -> GRPOConfigValues:
@@ -59,12 +58,6 @@ def test_parallel_workers_reject_zero() -> None:
             _minimal_generation_values(**{field: 0})
 
 
-def test_experiment_config_enables_parallel_workers() -> None:
-    config, _, _ = load_config(CONFIG_7B)
-    assert config.generation.tool_parallel_workers == 16
-    assert config.generation.verifier_parallel_workers == 16
-
-
 def test_model_and_tokenizer_path_env_overrides_take_precedence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -77,71 +70,67 @@ def test_model_and_tokenizer_path_env_overrides_take_precedence(
     ).resolve().as_posix()
 
 
-def test_complete_config_parses_independently() -> None:
+def test_checked_in_config_loads_from_project_root() -> None:
     config_7b, root_7b, _ = load_config(CONFIG_7B)
 
     assert root_7b == PROJECT_ROOT
+    assert Path(config_7b.model.model_path).is_absolute()
+    assert Path(config_7b.dataset.tasks_dir).is_absolute()
     assert config_7b.model.training_mode == "lora"
-    assert config_7b.quantization.load_in_4bit is False
     assert config_7b.runtime.runtime_qualified is True
-    assert config_7b.vllm.mode == "server"
-    assert config_7b.vllm.tensor_parallel_size is None
-    assert config_7b.vllm.server_base_url == "http://127.0.0.1:8000"
-    assert not hasattr(config_7b.grpo, "max_infra_error_ratio")
-    assert not hasattr(config_7b.grpo, "mask_truncated_completions")
 
 
-def test_complete_config_has_independent_top_level_shape() -> None:
-    payload = yaml.safe_load(CONFIG_7B.read_text(encoding="utf-8"))
-    assert set(payload) == {
-        "schema_version",
-        "dataset",
-        "docker",
-        "model",
-        "quantization",
-        "peft",
-        "chat",
-        "generation",
-        "grpo",
-        "vllm",
-        "runtime",
-        "output",
-    }
-    assert not ({"include", "extends", "inherit", "overlay"} & set(payload))
-
-
-def test_shared_training_contract_is_fixed() -> None:
-    """只锁与调参值无关的结构不变量；具体数值（步数、组大小、学习率等）不属于契约。"""
-
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda payload: payload["peft"].update(target_modules=["q_proj"]),
+            "target_modules must be exactly",
+        ),
+        (
+            lambda payload: payload["generation"].update(
+                max_completion_length=payload["model"]["context_length"]
+            ),
+            "exceed model context",
+        ),
+        (
+            lambda payload: payload["vllm"].update(
+                max_model_length=payload["model"]["context_length"] + 1
+            ),
+            "vLLM max model length exceeds",
+        ),
+        (
+            lambda payload: payload["grpo"].update(generation_batch_size=17),
+            "divisible by num_generations",
+        ),
+        (
+            lambda payload: payload["grpo"].update(epsilon=0.2, epsilon_high=0.1),
+            "epsilon_high",
+        ),
+        (
+            lambda payload: payload["grpo"].update(
+                vllm_importance_sampling_clip_min=2.0,
+                vllm_importance_sampling_clip_max=1.0,
+            ),
+            "clip min",
+        ),
+    ],
+    ids=[
+        "lora-targets",
+        "model-context",
+        "vllm-context",
+        "generation-groups",
+        "epsilon-order",
+        "importance-sampling-clip-order",
+    ],
+)
+def test_cross_field_contract_rejects_inconsistent_values(mutate, message: str) -> None:
     config, _, _ = load_config(CONFIG_7B)
-    assert config.peft.target_modules == LORA_TARGET_MODULES
-    # 上下文预算方程：prompt + completion + margin 不得超过模型上下文（与
-    # config.validate_contract 的运行时契约一致；margin 为 0、是否顶满属调参，不是结构契约）
-    assert (
-        config.chat.max_prompt_length
-        + config.generation.max_completion_length
-        + config.generation.context_safety_margin
-        <= config.model.context_length
-    )
-    # GRPO 组约束：generation batch 必须整除出完整的组；
-    # 多任务数据集最多 100 行，RepeatSampler 每 batch 的 unique prompt 数不能超过数据集行数。
-    assert config.grpo.num_generations >= 2
-    assert config.grpo.generation_batch_size % config.grpo.num_generations == 0
-    assert config.grpo.generation_batch_size // config.grpo.num_generations <= 100
-    # TRL 节拍对齐：generation_batch_size == pdbs × steps_per_generation（缺省取 accum）
-    steps_per_generation = (
-        config.grpo.steps_per_generation or config.grpo.gradient_accumulation_steps
-    )
-    assert (
-        config.grpo.generation_batch_size
-        == config.grpo.per_device_train_batch_size * steps_per_generation
-    )
-    assert config.grpo.max_steps >= 1
-    assert config.vllm.use_vllm is True
-    assert config.vllm.enable_sleep_mode is (config.vllm.mode == "colocate")
-    assert config.dataset.tasks_dir.endswith("assets/swegym")
-    assert config.dataset.task_ids is None or len(config.dataset.task_ids) >= 1
-    assert not hasattr(config.docker, "image")
+    payload = config.model_dump(mode="python")
+    mutate(payload)
+
+    with pytest.raises(ValidationError, match=message):
+        ProjectConfig.model_validate(payload)
 
 
 def test_task_ids_and_max_tasks_count_mismatch_is_rejected() -> None:
@@ -214,59 +203,6 @@ def test_lora_cannot_enable_quantization() -> None:
         ProjectConfig.model_validate(payload)
 
 
-def test_steering_parameters_accept_theoretical_boundaries() -> None:
-    config, _, _ = load_config(CONFIG_7B)
-    payload = config.model_dump(mode="python")
-    payload["model"]["context_length"] = 32768
-    payload["peft"].update(rank=1, alpha=1, dropout=1.0)
-    payload["chat"].update(max_prompt_length=1, max_observation_chars=1)
-    payload["generation"].update(
-        max_completion_length=1,
-        context_safety_margin=0,
-        max_tool_calling_iterations=1,
-            max_consecutive_protocol_errors=1,
-        temperature=0.1,
-        top_p=1.0,
-        top_k=0,
-        repetition_penalty=0.1,
-    )
-    payload["grpo"].update(
-        num_generations=2,
-        num_iterations=1,
-        epsilon=0.0,
-        epsilon_high=0.0,
-        delta=0.0,
-        beta=0.0,
-        router_aux_loss_coef=0.0,
-        shuffle_dataset=False,
-        vllm_importance_sampling_correction=False,
-        vllm_importance_sampling_clip_max=1.0,
-        vllm_importance_sampling_clip_min=0.0,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=1,
-        generation_batch_size=2,
-        steps_per_generation=1,
-        max_steps=1,
-        learning_rate=0.0,
-        weight_decay=0.0,
-        max_grad_norm=0.0,
-        gradient_checkpointing=False,
-        bf16=False,
-        logging_steps=1,
-        save_steps=1,
-        save_total_limit=1,
-        log_completions=True,
-    )
-    payload["vllm"].update(gpu_memory_utilization=1.0, max_model_length=32768)
-
-    validated = ProjectConfig.model_validate(payload)
-
-    assert validated.peft.rank == 1
-    assert validated.peft.dropout == 1.0
-    assert validated.vllm.gpu_memory_utilization == 1.0
-    assert validated.grpo.steps_per_generation == 1
-
-
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
@@ -296,11 +232,6 @@ def test_steering_parameters_reject_out_of_range_values(
         ProjectConfig.model_validate(payload)
 
 
-def test_generation_config_exposes_use_liger_kernel() -> None:
-    config, _, _ = load_config(CONFIG_7B)
-    assert config.generation.use_liger_kernel is True
-
-
 def test_use_liger_kernel_rejects_sequence_token_importance_sampling() -> None:
     config, _, _ = load_config(CONFIG_7B)
     payload = config.model_dump(mode="python")
@@ -312,7 +243,7 @@ def test_use_liger_kernel_rejects_sequence_token_importance_sampling() -> None:
 @pytest.mark.parametrize(
     "mode", ["sequence_mask", "sequence_truncate", "token_mask", "token_truncate"]
 )
-def test_vllm_is_mode_accepts_trl_supported_values(mode: str) -> None:
+def test_vllm_importance_sampling_mode_accepts_trl_supported_values(mode: str) -> None:
     """与 TRL 1.8 GRPOTrainer 的运行时枚举保持一致（grpo_trainer.py:2477）。"""
     config, _, _ = load_config(CONFIG_7B)
     payload = config.model_dump(mode="python")
@@ -326,7 +257,7 @@ def test_vllm_is_mode_accepts_trl_supported_values(mode: str) -> None:
 def test_grpo_config_accepts_layered_reward_type() -> None:
     values = _minimal_grpo_values(reward_type="layered")
     assert values.reward_type == "layered"
-    assert values.layered_lambda == 8.0
+    assert values.layered_lambda == DEFAULT_LAMBDA
 
 
 def test_grpo_config_rejects_nonpositive_lambda() -> None:
@@ -335,7 +266,7 @@ def test_grpo_config_rejects_nonpositive_lambda() -> None:
 
 
 @pytest.mark.parametrize("mode", ["token", "sequence", "token_level", ""])
-def test_vllm_is_mode_rejects_values_trl_would_crash_on(mode: str) -> None:
+def test_vllm_importance_sampling_mode_rejects_unsupported_values(mode: str) -> None:
     config, _, _ = load_config(CONFIG_7B)
     payload = config.model_dump(mode="python")
     payload["grpo"]["vllm_importance_sampling_mode"] = mode

@@ -132,11 +132,14 @@ def test_server_start_and_clean_close(monkeypatch, tmp_path) -> None:
     assert [op["operation"] for op in handle["operations"]] == ["spawn", "health", "terminate"]
 
 
-def test_server_close_escalates_to_kill(monkeypatch, tmp_path) -> None:
+def test_server_close_escalates_to_kill_after_grace_period(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("siete_rl.launcher.TERM_GRACE_SEC", 0.05)
     server, _, signals = make_server(monkeypatch, tmp_path, polls=[None])
 
     server.start()
+    ticks = iter([0.0, 0.0, 0.1])
+    monkeypatch.setattr("siete_rl.launcher.time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr("siete_rl.launcher.time.sleep", lambda _seconds: None)
     handle = server.close()
 
     assert signals == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]

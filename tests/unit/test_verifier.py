@@ -1,23 +1,14 @@
 from __future__ import annotations
 
 from collections import deque
-from pathlib import Path
 from typing import Sequence
 
 import pytest
 
-from siete_rl.config import load_config
 from siete_rl.docker import CommandResult, ContainerCleanupError, DockerRuntimeError
-from siete_rl.models import Evaluation
-from siete_rl.swegym import load_task_instance
+from siete_rl.models import Environment, Evaluation
 from siete_rl.verifier import SWEGymVerifier, VerificationInfrastructureError
 
-# 整个文件都依赖私有 data/assets 下的真实数据集资产（domain fixture）。
-pytestmark = pytest.mark.external_assets
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 PATCH = "diff --git a/x b/x\n"
 TASK_ID = "getmoto__moto-7023"
 
@@ -80,9 +71,25 @@ class FakeSandbox:
 
 @pytest.fixture(scope="module")
 def domain():
-    config, project_root, _ = load_config(CONFIG_PATH)
-    sample, evaluation = load_task_instance(config, project_root, TASK_ID)
-    return sample.environment, evaluation
+    environment = Environment(
+        environment_id=f"swegym:{TASK_ID}",
+        task_id=TASK_ID,
+        image_name="image",
+        expected_image_id="sha256:" + "1" * 64,
+        expected_registry_digest="sha256:" + "2" * 64,
+        workdir="/testbed",
+        cpus=1,
+        memory="1g",
+        pids_limit=64,
+        exec_timeout_sec=30,
+        verifier_timeout_sec=60,
+    )
+    evaluation = Evaluation(
+        offline_eval_script="set -eux\npytest -q\n",
+        fail_to_pass=["tests/test_target.py::test_fix"],
+        pass_to_pass=["tests/test_target.py::test_regression"],
+    )
+    return environment, evaluation
 
 
 def verifier_for(domain, responses: list[CommandResult], *, close_error: bool = False):
@@ -126,7 +133,7 @@ def test_patch_check_and_apply_failures_are_attributable_unresolved(domain) -> N
     assert apply_result.patch_apply_status == "apply_failed"
 
 
-def test_real_pytest_marker_maps_only_exit_code_to_binary_result(domain) -> None:
+def test_pytest_marker_maps_exit_code_to_binary_result(domain) -> None:
     passed, _ = verifier_for(
         domain,
         [command_result(), command_result(), command_result(stdout="+ pytest -n0\n9 passed")],

@@ -101,38 +101,33 @@ def _complete_recorded_group(
     ) == [0.0] * count
 
 
-def test_preflight_is_read_only_and_reports_complete_stage_modules(
+def test_preflight_reports_complete_modules_without_creating_run_output(
     tmp_path: Path,
-    tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 不依赖真实模型文件（CI 无本地资产）：注入最小假模型目录
-    fake_model = tmp_path_factory.mktemp("fake-model")
+    fake_model = tmp_path / "fake-model"
+    fake_model.mkdir()
     (fake_model / "config.json").write_text('{"architectures": ["Qwen2ForCausalLM"]}', encoding="utf-8")
     (fake_model / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("MODEL_PATH", str(fake_model))
     monkeypatch.setenv("TOKENIZER_PATH", str(fake_model))
 
     config, project_root, _ = load_config(CONFIG_7B)
-    output_root = Path(config.output.output_root)
-    before = sorted(path.name for path in output_root.iterdir()) if output_root.exists() else []
+    output_root = tmp_path / "outputs"
+    config = config.model_copy(
+        update={
+            "output": config.output.model_copy(
+                update={"output_root": str(output_root)}
+            )
+        }
+    )
 
     report = preflight(config, project_root)
 
     assert report["status"] == "preflight_passed"
-    assert report["vllm_tensor_parallel_size"] is None
-    assert "models.py" not in report["missing_domain_modules"]
-    assert "swegym.py" not in report["missing_domain_modules"]
-    assert "prompts.py" not in report["missing_domain_modules"]
-    assert "docker.py" not in report["missing_domain_modules"]
-    assert "tools.py" not in report["missing_domain_modules"]
-    assert "verifier.py" not in report["missing_domain_modules"]
-    assert "environment.py" not in report["missing_domain_modules"]
-    assert "rewards.py" not in report["missing_domain_modules"]
+    assert report["vllm_tensor_parallel_size"] == config.vllm.tensor_parallel_size
     assert report["missing_domain_modules"] == []
-    after = sorted(path.name for path in output_root.iterdir()) if output_root.exists() else []
-    assert after == before
-    assert not list(tmp_path.iterdir())
+    assert not output_root.exists()
 
 
 def test_entry_delegates_to_the_supervisor(
@@ -193,13 +188,15 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
     assert build_quantization_config(config) is None
     assert grpo_config.num_generations == config.grpo.num_generations
     assert grpo_config.generation_batch_size == config.grpo.generation_batch_size
-    assert grpo_config.steps_per_generation == config.grpo.gradient_accumulation_steps
-    assert grpo_config.model_init_kwargs == {"dtype": "bfloat16"}
-    assert grpo_config.vllm_mode == "server"
-    assert grpo_config.vllm_server_base_url == "http://127.0.0.1:8000"
-    assert grpo_config.vllm_model_impl == "vllm"
-    assert grpo_config.vllm_max_model_length == 32768
-    assert grpo_config.vllm_enable_sleep_mode is False
+    assert grpo_config.steps_per_generation == (
+        config.grpo.steps_per_generation or config.grpo.gradient_accumulation_steps
+    )
+    assert grpo_config.model_init_kwargs == {"dtype": config.model.dtype}
+    assert grpo_config.vllm_mode == config.vllm.mode
+    assert grpo_config.vllm_server_base_url == config.vllm.server_base_url
+    assert grpo_config.vllm_model_impl == config.vllm.model_impl
+    assert grpo_config.vllm_max_model_length == config.vllm.max_model_length
+    assert grpo_config.vllm_enable_sleep_mode is config.vllm.enable_sleep_mode
     assert grpo_config.max_tool_calling_iterations == config.generation.max_tool_calling_iterations
     assert grpo_config.loss_type == config.grpo.loss_type
     assert grpo_config.beta == config.grpo.beta
@@ -207,20 +204,10 @@ def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> N
         grpo_config.vllm_importance_sampling_correction
         == config.grpo.vllm_importance_sampling_correction
     )
-    assert grpo_config.router_aux_loss_coef == 0.0
-    assert grpo_config.shuffle_dataset is True
+    assert grpo_config.router_aux_loss_coef == config.grpo.router_aux_loss_coef
+    assert grpo_config.shuffle_dataset is config.grpo.shuffle_dataset
+    assert grpo_config.use_liger_kernel is config.generation.use_liger_kernel
     assert grpo_config.mask_truncated_completions is False
-
-
-def test_grpo_config_enables_liger_kernel(tmp_path: Path) -> None:
-    config, _, _ = load_config(CONFIG_7B)
-    grpo_config = build_grpo_config(
-        config,
-        tmp_path / "output",
-        seed=config.runtime.base_seed,
-        use_cpu=True,
-    )
-    assert grpo_config.use_liger_kernel is True
 
 
 def test_liger_runtime_flags_disable_dynamo_when_enabled(
@@ -861,6 +848,7 @@ def test_atexit_sweep_swallows_failures(capsys: pytest.CaptureFixture) -> None:
 
 def test_recording_reward_forwards_verifier_parallel_workers() -> None:
     seen: dict[str, object] = {}
+    requested_workers = 7
 
     def adapter(**kwargs):
         seen.update(kwargs)
@@ -905,7 +893,7 @@ def test_recording_reward_forwards_verifier_parallel_workers() -> None:
             return []
 
     reward = _recording_reward(
-        FakeRecorder(), adapter, verifier_parallel_workers=16
+        FakeRecorder(), adapter, verifier_parallel_workers=requested_workers
     )
     assert reward(
         prompts=[[{"role": "user", "content": "p"}]],
@@ -913,7 +901,7 @@ def test_recording_reward_forwards_verifier_parallel_workers() -> None:
         environments=[FakeEnvironment()],
         task_id=["getmoto__moto-7023"],
     ) == [0.0]
-    assert seen["max_workers"] == 16
+    assert seen["max_workers"] == requested_workers
 
 
 def test_build_trainer_forwards_tool_parallel_workers(
@@ -936,6 +924,6 @@ def test_build_trainer_forwards_tool_parallel_workers(
         environment_factory=lambda: None,
         reward_func=lambda **kwargs: [],
     )
-    assert captured["tool_parallel_workers"] == 16
+    assert captured["tool_parallel_workers"] == config.generation.tool_parallel_workers
     assert captured["use_process_mask"] is True
     assert "process_mask_rules" not in captured

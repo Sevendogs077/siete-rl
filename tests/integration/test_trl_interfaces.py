@@ -17,9 +17,13 @@ pytestmark = pytest.mark.external_assets
 CONFIG_PATH = "configs/grpo_swegym_openhands_7b_lora.yaml"
 
 
-def test_real_tokenizer_renders_only_the_local_openhands_scaffold() -> None:
+@pytest.fixture(scope="module")
+def tokenizer():
     config, _, _ = load_config(CONFIG_PATH)
-    tokenizer = build_processing_class(config)
+    return build_processing_class(config)
+
+
+def test_real_tokenizer_renders_only_the_local_openhands_scaffold(tokenizer) -> None:
     prompt = build_prompt(Task(task_id="probe", repo_name="owner/repo", base_commit="0" * 40, problem_statement="fix"))
     rendered = tokenizer.apply_chat_template(prompt, tools=[{"type": "function", "function": {"name": "legacy"}}], tokenize=False, add_generation_prompt=True)
     assert getattr(tokenizer, "supports_tool_calling", False)
@@ -30,18 +34,14 @@ def test_real_tokenizer_renders_only_the_local_openhands_scaffold() -> None:
     assert "<tool_call>" not in rendered
 
 
-def test_real_tokenizer_parser_handles_openhands_function_text() -> None:
-    config, _, _ = load_config(CONFIG_PATH)
-    tokenizer = build_processing_class(config)
+def test_real_tokenizer_parser_handles_openhands_function_text(tokenizer) -> None:
     text = "<function=finish>\n</function>"
     ids = tokenizer.encode(text, add_special_tokens=False)
     parsed = tokenizer.parse_response(ids, prefix=[])
     assert parsed["tool_calls"][0]["function"] == {"name": "finish", "arguments": {}}
 
 
-def test_real_tokenizer_parser_ignores_only_the_terminal_eos_token() -> None:
-    config, _, _ = load_config(CONFIG_PATH)
-    tokenizer = build_processing_class(config)
+def test_real_tokenizer_parser_ignores_only_the_terminal_eos_token(tokenizer) -> None:
     text = "<function=finish>\n</function>" + tokenizer.eos_token
     ids = tokenizer.encode(text, add_special_tokens=False)
 
@@ -50,9 +50,7 @@ def test_real_tokenizer_parser_ignores_only_the_terminal_eos_token() -> None:
     assert parsed["tool_calls"][0]["function"] == {"name": "finish", "arguments": {}}
 
 
-def test_openhands_user_turn_suffix_is_a_plain_token_list() -> None:
-    config, _, _ = load_config(CONFIG_PATH)
-    tokenizer = build_processing_class(config)
+def test_openhands_user_turn_suffix_is_a_plain_token_list(tokenizer) -> None:
     trainer = object.__new__(SWEGRPOTrainer)
     trainer._tokenizer = tokenizer
     trainer._get_tool_suffix_ids = lambda messages: (_ for _ in ()).throw(AssertionError(messages))
