@@ -156,7 +156,11 @@ def test_pytest_marker_maps_exit_code_to_binary_result(domain) -> None:
     [
         [command_result(timed_out=True)],
         [command_result(), command_result(timed_out=True)],
-        [command_result(), command_result(), command_result(timed_out=True)],
+        [
+            command_result(),
+            command_result(),
+            command_result(timed_out=True, stdout="setup completed"),
+        ],
         [command_result(), command_result(), command_result(stdout="setup completed")],
     ],
 )
@@ -164,6 +168,28 @@ def test_timeout_and_missing_pytest_marker_are_infrastructure(domain, responses)
     verifier, sandboxes = verifier_for(domain, responses)
     with pytest.raises(VerificationInfrastructureError):
         verifier.verify(PATCH)
+    assert sandboxes[0].closed
+
+
+def test_timeout_after_pytest_started_is_unresolved(domain) -> None:
+    verifier, sandboxes = verifier_for(
+        domain,
+        [
+            command_result(),
+            command_result(),
+            command_result(
+                exit_code=124,
+                stdout="+ pytest -n0\n",
+                timed_out=True,
+            ),
+        ],
+    )
+
+    verification = verifier.verify(PATCH)
+    assert verification.result == "unresolved"
+    assert verification.patch_apply_status == "applied"
+    assert verification.pytest_started is True
+    assert verification.exit_code == 124
     assert sandboxes[0].closed
 
 

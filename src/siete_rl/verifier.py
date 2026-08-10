@@ -129,9 +129,13 @@ class SWEGymVerifier:
             input_text=self.evaluation.offline_eval_script,
             timeout_sec=sandbox.environment.verifier_timeout_sec,
         )
-        if evaluated.timed_out:
-            raise VerificationInfrastructureError("offline pytest evaluation timed out")
         pytest_started = _pytest_started(evaluated.stdout, evaluated.stderr)
+        if evaluated.timed_out:
+            if not pytest_started:
+                raise VerificationInfrastructureError(
+                    "offline evaluation timed out before pytest started"
+                )
+            return _verification("unresolved", "applied", True, evaluated)
         if not pytest_started:
             raise VerificationInfrastructureError(
                 "offline evaluator finished without the required pytest start marker"

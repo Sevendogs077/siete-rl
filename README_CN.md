@@ -38,7 +38,7 @@ SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 poli
   </picture>
 </p>
 
-完整本地记录见 [docs/experiment_log.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/experiment_log.md)。
+完整结果与运行记录见 [docs/results.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/results.md)。
 
 ## 复现运行
 

@@ -38,7 +38,7 @@ SieteRL is a GRPO post-training project for software-engineering agents. The ini
   </picture>
 </p>
 
-Full local records: [docs/experiment_log.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/experiment_log.md).
+Full results and run details: [docs/results.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/results.md).
 
 ## Reproduction
 
