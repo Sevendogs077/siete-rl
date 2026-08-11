@@ -154,6 +154,16 @@ class VLLMConfig(StrictConfig):
     max_model_length: int = Field(ge=1)
 
 
+class WandbConfig(StrictConfig):
+    enabled: bool = False
+    project: str = "siete-rl"
+    entity: str | None = None
+    mode: Literal["online", "offline", "disabled"] = "online"
+    group: str | None = None
+    tags: tuple[str, ...] = ()
+    notes: str | None = None
+
+
 class RuntimeConfig(StrictConfig):
     runtime_qualified: bool
     process_count: int = Field(ge=1)
@@ -177,6 +187,7 @@ class ProjectConfig(StrictConfig):
     generation: GenerationConfig
     grpo: GRPOConfigValues
     vllm: VLLMConfig
+    wandb: WandbConfig = Field(default_factory=WandbConfig)
     runtime: RuntimeConfig
     output: OutputConfig
 

@@ -48,6 +48,7 @@ Training requires 2 GPUs; evaluation requires 1 GPU. Follow the [setup guide](do
 uv sync
 bash scripts/prepare.sh          # pull task images and generate assets
 bash scripts/qualify.sh          # check config, data, images, model, and GPU
+export WANDB_API_KEY=<your-key>
 CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # start training
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # start evaluation
 # override the script's 16/4 worker defaults on a smaller host

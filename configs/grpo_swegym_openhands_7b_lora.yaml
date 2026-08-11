@@ -91,6 +91,14 @@ grpo:
   save_total_limit: 3
   log_completions: false
   report_to: []
+wandb:
+  enabled: true
+  project: siete-rl
+  entity: null
+  mode: online
+  group: swegym-openhands-7b-grpo
+  tags: [grpo, swegym, openhands, lora]
+  notes: null
 vllm:
   use_vllm: true
   mode: server

@@ -27,6 +27,7 @@ dependencies = [
   "transformers==5.13.0",
   "trl==1.8.0",
   "vllm==0.22.1+cu129",
+  "wandb==0.28.1",
 ]
 
 [project.urls]

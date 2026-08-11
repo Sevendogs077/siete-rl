@@ -321,6 +321,28 @@ def _run_metrics_callback(recorder: Any) -> Any:
     return RunMetricsCallback()
 
 
+def _wandb_metrics_callback(manager: Any) -> Any:
+    """把 Trainer 已聚合日志转发给 fail-open W&B manager。"""
+
+    from transformers import TrainerCallback
+
+    class WandbMetricsCallback(TrainerCallback):
+        def on_log(
+            self,
+            args: Any,
+            state: Any,
+            control: Any,
+            logs: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            del args, kwargs
+            if logs:
+                manager.log(step=int(state.global_step), logs=dict(logs))
+            return control
+
+    return WandbMetricsCallback()
+
+
 def _sync_recorder_from_trainer(recorder: Any, trainer: Any | None) -> None:
     """在释放 Trainer 前保留实际 step、最后日志和已存在 checkpoint。"""
 
@@ -443,7 +465,7 @@ def _run_once(
 
     from siete_rl.docker import DockerSandbox, SubprocessDockerClient, sweep_run_containers
     from siete_rl.environment import SWEEnvironment
-    from siete_rl.recording import RunRecorder
+    from siete_rl.recording import RunRecorder, WandbRunManager
     from siete_rl.rewards import binary_reward
     from siete_rl.swegym import build_training_dataset, load_task_context
     from siete_rl.verifier import SWEGymVerifier
@@ -464,6 +486,8 @@ def _run_once(
             server_url=vllm_endpoints.base_url,
             group_port=int(vllm_endpoints.group_port),
         )
+    wandb_manager = WandbRunManager(config=config, recorder=recorder)
+    wandb_manager.start()
 
     trainer: Any | None = None
     environments: list[SWEEnvironment] = []
@@ -548,6 +572,8 @@ def _run_once(
         )
         vllm_client = _detach_vllm_client_atexit(trainer, recorder)
         trainer.add_callback(_run_metrics_callback(recorder))
+        if wandb_manager.active:
+            trainer.add_callback(_wandb_metrics_callback(wandb_manager))
         run_processes.update(_new_child_processes(child_process_baseline))
         # vLLM 的 in-process engine 构造会使用自己的固定 seed；恢复本 run seed。
         from transformers import set_seed
@@ -717,6 +743,7 @@ def _run_once(
         f"steps={recorder.run['train']['steps_completed']} "
         f"reward_mean={reward['mean']}"
     )
+    wandb_manager.finish(status=recorder.run["status"])
     return {
         "run_id": recorder.run_id,
         "status": recorder.run["status"],

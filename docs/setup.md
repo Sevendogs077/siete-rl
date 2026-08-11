@@ -179,6 +179,17 @@ CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
 ```
 
+### W&B
+
+The default config logs training metrics to W&B. For an online run:
+
+```bash
+export WANDB_API_KEY=<your-key>
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh
+```
+
+Set `wandb.mode: offline` for local runs, or `wandb.enabled: false` to turn it off.
+
 `scripts/eval.sh` defaults to 16 rollout workers and 4 official-harness workers. Override them to match available CPU and memory:
 
 ```bash

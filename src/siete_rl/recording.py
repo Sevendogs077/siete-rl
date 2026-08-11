@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -35,6 +36,7 @@ DEPENDENCIES = (
     "pyarrow",
     "pydantic",
     "matplotlib",
+    "wandb",
 )
 LAST_METRIC_KEYS = {
     "loss": "loss",
@@ -66,6 +68,68 @@ STEP_METRIC_KEYS = {
         "settlement/recovered_positive_active_tokens"
     ),
 }
+
+
+class WandbRunManager:
+    """将 Trainer 日志发送到一个 W&B run。"""
+
+    def __init__(
+        self,
+        *,
+        config: ProjectConfig,
+        recorder: RunRecorder,
+    ) -> None:
+        self.config = config
+        self.recorder = recorder
+        self._run: Any | None = None
+        self._enabled = config.wandb.enabled and config.wandb.mode != "disabled"
+
+    @property
+    def active(self) -> bool:
+        return self._run is not None
+
+    def start(self) -> None:
+        if not self._enabled or self._run is not None:
+            return
+        settings = self.config.wandb
+        try:
+            self._run = importlib.import_module("wandb").init(
+                id=self.recorder.run_id,
+                name=self.recorder.run_id,
+                project=settings.project,
+                entity=settings.entity,
+                group=settings.group,
+                tags=list(settings.tags),
+                notes=settings.notes,
+                mode=settings.mode,
+                dir=self.recorder.output_dir.as_posix(),
+                config=self.config.model_dump(mode="json"),
+                reinit=True,
+            )
+        except Exception as exc:
+            self._disable(exc)
+
+    def log(self, *, step: int, logs: dict[str, Any]) -> None:
+        if self._run is None:
+            return
+        try:
+            self._run.log(logs, step=step)
+        except Exception as exc:
+            self._disable(exc)
+
+    def finish(self, *, status: str) -> None:
+        run, self._run = self._run, None
+        if run is None:
+            return
+        try:
+            run.finish(exit_code=0 if status == "completed" else 1)
+        except Exception as exc:
+            self._disable(exc)
+
+    def _disable(self, exc: Exception) -> None:
+        self._enabled = False
+        self._run = None
+        self.recorder.log(f"W&B disabled ({type(exc).__name__})")
 
 
 def generate_run_id() -> str:
