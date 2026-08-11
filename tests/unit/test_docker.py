@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from collections import deque
 from pathlib import Path
 from typing import Sequence
@@ -130,6 +131,22 @@ def make_sandbox(client: FakeClient, task, environment) -> DockerSandbox:
         episode_id="episode",
         scope="rollout",
     )
+
+
+def test_subprocess_client_replaces_non_utf8_output() -> None:
+    client = SubprocessDockerClient(docker_host="tcp://unused")
+
+    completed = client.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(b'valid\\xfftail')",
+        ],
+        timeout_sec=5,
+    )
+
+    assert completed.exit_code == 0
+    assert completed.stdout == "valid\ufffdtail"
 
 
 def test_create_command_has_fixed_isolation_and_no_mount(domain) -> None:
