@@ -28,7 +28,7 @@ from siete_rl.docker import CommandResult
 from siete_rl.models import TerminalEvent
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def result(stdout: str = "", *, exit_code: int = 0) -> CommandResult:

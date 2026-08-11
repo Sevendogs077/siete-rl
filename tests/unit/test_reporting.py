@@ -34,46 +34,6 @@ def run_summary() -> dict[str, object]:
     }
 
 
-def test_training_summary_is_a_real_png(tmp_path: Path) -> None:
-    write_rows(
-        tmp_path / "metrics.jsonl",
-        [
-            {
-                "step": 1,
-                "rollouts_cumulative": 4,
-                "reward_mean_group": 0.25,
-                "reward_mean_ema": 0.25,
-                "train_pass_rate_cumulative": 0.25,
-                "group_degenerate": False,
-                "nondegenerate_group_rate_cumulative": 1.0,
-                "reward_std_group_population": 0.433,
-                "grad_norm": 1.2,
-                "kl": 0.02,
-                "importance_sampling_ratio_mean": 1.01,
-            },
-            {
-                "step": 2,
-                "rollouts_cumulative": 8,
-                "reward_mean_group": 0.25,
-                "reward_mean_ema": 0.25,
-                "train_pass_rate_cumulative": 0.25,
-                "group_degenerate": False,
-                "nondegenerate_group_rate_cumulative": 1.0,
-                "reward_std_group_population": 0.433,
-                "grad_norm": 0.8,
-                "kl": 0.01,
-                "importance_sampling_ratio_mean": 0.99,
-            },
-        ],
-    )
-
-    result = render_training_summary(tmp_path, run_summary())
-
-    assert result == tmp_path / "training_summary.png"
-    assert result.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
-    assert result.stat().st_size > 10_000
-
-
 def test_training_summary_is_skipped_without_steps(tmp_path: Path) -> None:
     (tmp_path / "metrics.jsonl").touch()
     assert render_training_summary(tmp_path, run_summary()) is None

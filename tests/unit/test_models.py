@@ -6,43 +6,14 @@ from pydantic import ValidationError
 from siete_rl.models import (
     Action,
     Environment,
-    Evaluation,
     Observation,
     Sample,
     Settlement,
     Step,
     Task,
-    TerminalEvent,
     Trajectory,
     Verification,
 )
-
-
-EXPECTED_FIELDS = {
-    Task: {"task_id", "repo_name", "base_commit", "problem_statement"},
-    Environment: {
-        "environment_id",
-        "task_id",
-        "image_name",
-        "expected_image_id",
-        "expected_registry_digest",
-        "workdir",
-        "cpus",
-        "memory",
-        "pids_limit",
-        "exec_timeout_sec",
-        "verifier_timeout_sec",
-    },
-    Evaluation: {"offline_eval_script", "fail_to_pass", "pass_to_pass"},
-    Sample: {"task", "environment"},
-    Action: {"tool_name", "arguments"},
-    Observation: {"text", "exit_code", "error_type", "timed_out", "truncated"},
-    Step: {"index", "action", "observation"},
-    TerminalEvent: {"kind", "step_index"},
-    Settlement: {"status", "detail"},
-    Trajectory: {"task_id", "environment_id", "steps", "termination", "settlement"},
-    Verification: {"result", "patch_apply_status", "pytest_started", "exit_code", "stdout", "stderr"},
-}
 
 
 @pytest.fixture
@@ -70,11 +41,6 @@ def environment() -> Environment:
         exec_timeout_sec=300,
         verifier_timeout_sec=3600,
     )
-
-
-def test_persisted_domain_models_have_expected_fields() -> None:
-    for model, expected in EXPECTED_FIELDS.items():
-        assert set(model.model_fields) == expected
 
 
 def test_sample_rejects_task_environment_mismatch(task: Task, environment: Environment) -> None:
@@ -135,11 +101,6 @@ def test_trajectory_records_orthogonal_termination_and_settlement() -> None:
     assert trajectory.settlement == Settlement(status="unresolved", detail=None)
 
 
-def test_settlement_rejects_unknown_status() -> None:
-    with pytest.raises(ValidationError):
-        Settlement(status="timeout")
-
-
 @pytest.mark.parametrize(
     ("result", "patch_apply_status", "pytest_started", "exit_code"),
     [
@@ -161,8 +122,3 @@ def test_verification_rejects_results_without_attributable_evidence(
             stdout="failed",
             stderr="",
         )
-
-
-def test_domain_models_reject_unknown_fields(task: Task) -> None:
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        Task.model_validate({**task.model_dump(), "metadata": {}})

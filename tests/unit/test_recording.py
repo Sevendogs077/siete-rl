@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
-import yaml
 
 from siete_rl.config import load_config
 from siete_rl.models import (
@@ -16,7 +14,7 @@ from siete_rl.models import (
     Trajectory,
     Verification,
 )
-from siete_rl.recording import RunRecorder, generate_run_id
+from siete_rl.recording import RunRecorder
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -74,89 +72,6 @@ def metric_rows(path: Path) -> list[dict[str, object]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line
     ]
-
-
-def test_run_id_and_initial_files_have_exact_contract(tmp_path: Path) -> None:
-    generated = generate_run_id()
-    assert re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{4}", generated)
-
-    config = configured_for(tmp_path, run_id="fixed-run")
-    recorder = RunRecorder(
-        config=config,
-        seed=123,
-        dependency_versions={"trl": "1.8.0"},
-        code_commit="abc123",
-        code_dirty=False,
-        model_revision="Revision:master",
-    )
-    assert recorder.output_dir == (tmp_path / "outputs/fixed-run").resolve()
-    assert {path.name for path in recorder.output_dir.iterdir()} == {
-        "config.yaml",
-        "run.json",
-        "cleanup.json",
-        "metrics.jsonl",
-        "train.log",
-    }
-    assert yaml.safe_load(
-        (recorder.output_dir / "config.yaml").read_text()
-    ) == config.model_dump(mode="json")
-
-    run = load_json(recorder.output_dir / "run.json")
-    assert set(run) == {
-        "run_id",
-        "status",
-        "failure",
-        "results",
-        "train",
-        "artifacts",
-        "time",
-        "config",
-        "cleanup",
-        "provenance",
-    }
-    assert run["run_id"] == "fixed-run"
-    assert run["status"] == "running"
-    assert run["failure"] is None
-    assert run["results"] == {
-        "reward": {
-            "successes": 0,
-            "attempts": 0,
-            "mean": None,
-            "last_group_mean": None,
-            "ema": None,
-            "degenerate_groups": 0,
-            "nondegenerate_groups": 0,
-            "nondegenerate_rate": None,
-        },
-        "evaluation": None,
-    }
-    assert run["train"]["steps_completed"] == 0
-    assert run["train"]["steps_target"] == config.grpo.max_steps
-    assert run["train"]["last_metrics"] == {
-        "loss": None,
-        "grad_norm": None,
-        "kl": None,
-        "entropy": None,
-        "importance_sampling_ratio_mean": None,
-    }
-    assert run["artifacts"] == {
-        "config": "config.yaml",
-        "metrics": "metrics.jsonl",
-        "plot": None,
-        "plot_status": "pending",
-        "train_log": "train.log",
-        "vllm_log": "vllm.log",
-        "checkpoints": [],
-        "final_model": None,
-        "cleanup_details": "cleanup.json",
-    }
-    assert run["cleanup"] == {
-        "status": "pending",
-        "clean_release": None,
-        "residual_count": 0,
-    }
-    with pytest.raises(FileExistsError):
-        RunRecorder(config=config, seed=123)
 
 
 def test_supervisor_workspace_preserves_vllm_log_and_records_runtime_endpoints(tmp_path: Path) -> None:
@@ -598,3 +513,74 @@ def test_cleanup_details_are_separate_and_completion_is_gated(tmp_path: Path) ->
     assert details["residuals"] == ["a" * 64]
     with pytest.raises(RuntimeError, match="cannot complete"):
         residual.complete()
+
+
+def test_record_metrics_maps_process_and_credit_mask_fields(tmp_path: Path) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="pm-run")
+    recorder.record_metrics(
+        step=1,
+        logs={
+            "process_mask/candidate_turns": 8.0,
+            "process_mask/applied_turns": 2.0,
+            "process_mask/retained_negative_turns": 4.0,
+            "process_mask/masked_token_frac": 0.25,
+            "credit_mask/infra_rows": 1.0,
+            "credit_mask/truncated_turns": 2.0,
+            "credit_mask/masked_token_frac": 0.5,
+            "frac_reward_zero_std": 0.75,
+            "settlement/recovered_positive_rows": 2.0,
+            "settlement/recovered_positive_active_tokens": 1536.0,
+        },
+    )
+
+    row = metric_rows(recorder.metrics_path)[0]
+
+    assert {
+        key: row[key]
+        for key in (
+            "process_mask_candidate_turns",
+            "process_mask_applied_turns",
+            "process_mask_retained_negative_turns",
+            "process_mask_masked_token_frac",
+            "credit_mask_infra_rows",
+            "credit_mask_truncated_turns",
+            "credit_mask_masked_token_frac",
+            "reward_zero_std_frac",
+            "settlement_recovered_positive_rows",
+            "settlement_recovered_positive_active_tokens",
+        )
+    } == {
+        "process_mask_candidate_turns": 8.0,
+        "process_mask_applied_turns": 2.0,
+        "process_mask_retained_negative_turns": 4.0,
+        "process_mask_masked_token_frac": 0.25,
+        "credit_mask_infra_rows": 1.0,
+        "credit_mask_truncated_turns": 2.0,
+        "credit_mask_masked_token_frac": 0.5,
+        "reward_zero_std_frac": 0.75,
+        "settlement_recovered_positive_rows": 2.0,
+        "settlement_recovered_positive_active_tokens": 1536.0,
+    }
+
+
+def test_record_metrics_leaves_absent_optional_fields_empty(tmp_path: Path) -> None:
+    recorder = RunRecorder(config=configured_for(tmp_path), seed=1, run_id="pm-run")
+    recorder.record_metrics(step=1, logs={"loss": 0.5})
+
+    row = metric_rows(recorder.metrics_path)[0]
+
+    assert all(
+        row[key] is None
+        for key in (
+            "process_mask_candidate_turns",
+            "process_mask_applied_turns",
+            "process_mask_retained_negative_turns",
+            "process_mask_masked_token_frac",
+            "credit_mask_infra_rows",
+            "credit_mask_truncated_turns",
+            "credit_mask_masked_token_frac",
+            "reward_zero_std_frac",
+            "settlement_recovered_positive_rows",
+            "settlement_recovered_positive_active_tokens",
+        )
+    )

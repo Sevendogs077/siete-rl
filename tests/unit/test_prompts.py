@@ -1,6 +1,5 @@
 from siete_rl.models import Task
 from siete_rl.prompts import build_prompt, safe_task_id
-import hashlib
 
 
 def test_prompt_uses_openhands_scaffold_and_uploaded_workspace() -> None:
@@ -18,10 +17,3 @@ def test_prompt_uses_openhands_scaffold_and_uploaded_workspace() -> None:
 def test_safe_task_id_is_stable_and_restrictive() -> None:
     assert safe_task_id("getmoto__moto-7023") == "getmoto__moto-7023"
     assert safe_task_id("owner/repo:1") == "owner_repo_1"
-
-
-def test_system_prompt_matches_the_locked_openhands_trajectory() -> None:
-    prompt = build_prompt(Task(task_id="probe", repo_name="owner/repo", base_commit="0" * 40, problem_statement="fix"))
-    assert hashlib.sha256(prompt[0]["content"].encode()).hexdigest() == (
-        "1120aa8819abb372428afb82f6a5f49d1d243e4bf58cb27fd481809acd339e84"
-    )

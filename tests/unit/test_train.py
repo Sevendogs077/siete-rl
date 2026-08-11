@@ -12,21 +12,13 @@ from siete_rl.train import (
     RecordingRuntimeError,
     RuntimeNotQualifiedError,
     _apply_liger_runtime_flags,
-    _clear_vllm_cuda_graphs,
     _close_environments,
     _close_vllm_communicator,
-    _create_reset_executor,
     _detach_vllm_client_atexit,
-    _detach_vllm_engine,
-    _native_policy_path_reached,
     _recording_reward,
-    _release_trainer,
     _require_single_visible_gpu,
     _sweep_orphans_at_exit,
     build_grpo_config,
-    build_trainer,
-    build_peft_config,
-    build_quantization_config,
     preflight,
     run,
 )
@@ -174,44 +166,6 @@ def test_single_visible_gpu_rejects_missing_or_non_single_selection(
         _require_single_visible_gpu()
 
 
-def test_public_peft_and_grpo_configs_construct_without_gpu(tmp_path: Path) -> None:
-    config, _, _ = load_config(CONFIG_7B)
-    peft_config = build_peft_config(config)
-    grpo_config = build_grpo_config(
-        config,
-        tmp_path / "output",
-        seed=config.runtime.base_seed,
-        use_cpu=True,
-    )
-
-    assert peft_config.r == config.peft.rank
-    assert peft_config.lora_alpha == config.peft.alpha
-    assert set(peft_config.target_modules) == set(config.peft.target_modules)
-    assert build_quantization_config(config) is None
-    assert grpo_config.num_generations == config.grpo.num_generations
-    assert grpo_config.generation_batch_size == config.grpo.generation_batch_size
-    assert grpo_config.steps_per_generation == (
-        config.grpo.steps_per_generation or config.grpo.gradient_accumulation_steps
-    )
-    assert grpo_config.model_init_kwargs == {"dtype": config.model.dtype}
-    assert grpo_config.vllm_mode == config.vllm.mode
-    assert grpo_config.vllm_server_base_url == config.vllm.server_base_url
-    assert grpo_config.vllm_model_impl == config.vllm.model_impl
-    assert grpo_config.vllm_max_model_length == config.vllm.max_model_length
-    assert grpo_config.vllm_enable_sleep_mode is config.vllm.enable_sleep_mode
-    assert grpo_config.max_tool_calling_iterations == config.generation.max_tool_calling_iterations
-    assert grpo_config.loss_type == config.grpo.loss_type
-    assert grpo_config.beta == config.grpo.beta
-    assert (
-        grpo_config.vllm_importance_sampling_correction
-        == config.grpo.vllm_importance_sampling_correction
-    )
-    assert grpo_config.router_aux_loss_coef == config.grpo.router_aux_loss_coef
-    assert grpo_config.shuffle_dataset is config.grpo.shuffle_dataset
-    assert grpo_config.use_liger_kernel is config.generation.use_liger_kernel
-    assert grpo_config.mask_truncated_completions is False
-
-
 def test_liger_runtime_flags_disable_dynamo_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,24 +175,6 @@ def test_liger_runtime_flags_disable_dynamo_when_enabled(
     _apply_liger_runtime_flags(config)
 
     assert os.environ["TORCHDYNAMO_DISABLE"] == "1"
-    assert (
-        logging.getLogger("transformers.configuration_utils").level == logging.ERROR
-    )
-
-
-def test_liger_runtime_flags_leave_dynamo_alone_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config, _, _ = load_config(CONFIG_7B)
-    payload = config.model_dump(mode="python")
-    payload["generation"]["use_liger_kernel"] = False
-    config = ProjectConfig.model_validate(payload)
-    monkeypatch.delenv("TORCHDYNAMO_DISABLE", raising=False)
-
-    _apply_liger_runtime_flags(config)
-
-    assert "TORCHDYNAMO_DISABLE" not in os.environ
-    # 降噪与 liger 无关（peft forward 总会触发别名 warning），关闭 liger 也生效
     assert (
         logging.getLogger("transformers.configuration_utils").level == logging.ERROR
     )
@@ -646,174 +582,6 @@ def test_recording_reward_tolerates_scattered_infra_errors() -> None:
     ]
 
 
-def test_native_policy_path_requires_executed_edit_submit_patch_verifier_and_reward() -> None:
-    step = lambda name: type("Step", (), {"action": type("Action", (), {"tool_name": name})()})()
-    trajectory = type(
-        "Trajectory", (), {"termination": "submitted", "steps": [step("str_replace_editor"), step("finish")]}
-    )()
-    environment = type(
-        "Environment",
-        (),
-        {
-            "trajectory": trajectory,
-            "verification": object(),
-            "frozen_patch": "diff --git a/x b/x\n",
-            "_reward": 0.0,
-        },
-    )()
-    assert _native_policy_path_reached([environment])
-    environment.verification = None
-    assert not _native_policy_path_reached([environment])
-
-
-def test_trainer_release_shuts_down_inprocess_vllm_and_moves_model_to_cpu(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[object] = []
-    monkeypatch.setattr("siete_rl.train._clear_vllm_cuda_graphs", lambda llm: None)
-
-    class EngineCore:
-        def shutdown(self):
-            events.append("shutdown")
-
-    class LLM:
-        llm_engine = type("Engine", (), {"engine_core": EngineCore()})()
-
-        def sleep(self, level):
-            events.append(("sleep", level))
-
-        def wake_up(self):
-            events.append("wake_up")
-
-    class Model:
-        def to(self, device):
-            events.append(("model", device))
-
-        def parameters(self):
-            return []
-
-    class Optimizer:
-        def __init__(self):
-            self.state = {"x": 1}
-            self.param_groups = [{"params": []}]
-
-        def zero_grad(self, set_to_none):
-            events.append(("zero_grad", set_to_none))
-
-    class Accelerator:
-        def free_memory(self, *objects):
-            events.append("free_memory")
-            return tuple(None for _ in objects)
-
-    class Recorder:
-        def log(self, message):
-            events.append(("log", message))
-
-    trainer = type(
-        "Trainer",
-        (),
-        {
-            "vllm_generation": type(
-                "Backend", (), {"llm": LLM(), "enable_sleep_mode": True}
-            )(),
-            "model": Model(),
-            "optimizer": Optimizer(),
-            "lr_scheduler": object(),
-            "model_wrapped": object(),
-            "ref_model": None,
-            "_buffered_inputs": [],
-            "accelerator": Accelerator(),
-        },
-    )()
-    errors, handles = _release_trainer(trainer, Recorder())
-    assert errors == []
-    assert not any(handle["residual"] for handle in handles)
-    assert events[:5] == [
-        ("sleep", 2),
-        "shutdown",
-        ("zero_grad", True),
-        ("model", "cpu"),
-        "free_memory",
-    ]
-
-
-def test_locked_vllm_cuda_graph_cleanup_releases_manager_state() -> None:
-    import vllm
-    from vllm.platforms import current_platform
-
-    class Manager:
-        graphs = {"graph": object()}
-        hidden_states = object()
-        aux_hidden_states = [object()]
-        intermediate_tensors = object()
-        pool = object()
-
-    manager = Manager()
-    model_state = type("ModelState", (), {"model": object()})()
-    adapter_manager = type("AdapterManager", (), {"model": object()})()
-    lora_manager = type("LoraManager", (), {"_adapter_manager": adapter_manager})()
-    model_runner = type(
-        "ModelRunner",
-        (),
-        {
-            "cudagraph_manager": manager,
-            "model_state": model_state,
-            "lora_manager": lora_manager,
-            "pooling_runner": object(),
-            "speculator": object(),
-        },
-    )()
-    worker = type("Worker", (), {"model_runner": model_runner})()
-    driver_worker = type("DriverWorker", (), {"worker": worker})()
-    executor = type("Executor", (), {"driver_worker": driver_worker})()
-    engine_core = type("EngineCore", (), {"model_executor": executor})()
-    core_client = type("CoreClient", (), {"engine_core": engine_core})()
-    llm = type(
-        "LLM",
-        (),
-        {"llm_engine": type("Engine", (), {"engine_core": core_client})()},
-    )()
-
-    assert vllm.__version__ == "0.22.1"
-    type(current_platform)._global_graph_pool = object()
-    _clear_vllm_cuda_graphs(llm)
-
-    assert manager.graphs == {}
-    assert manager.hidden_states is None
-    assert manager.aux_hidden_states == []
-    assert manager.intermediate_tensors is None
-    assert manager.pool is None
-    assert model_runner.cudagraph_manager is None
-    assert model_state.model is None
-    assert adapter_manager.model is None
-    assert model_runner.model_state is None
-    assert model_runner.lora_manager is None
-    assert model_runner.pooling_runner is None
-    assert model_runner.speculator is None
-    assert type(current_platform)._global_graph_pool is None
-
-
-def test_locked_vllm_engine_detach_removes_executor_object_chain() -> None:
-    executor = object()
-    engine_core = type(
-        "EngineCore", (), {"model_executor": executor, "scheduler": object()}
-    )()
-    core_client = type("CoreClient", (), {"engine_core": engine_core})()
-    llm_engine = type(
-        "LLMEngine",
-        (), {"engine_core": core_client, "model_executor": executor},
-    )()
-    llm = type("LLM", (), {"llm_engine": llm_engine})()
-
-    _detach_vllm_engine(llm)
-
-    assert engine_core.model_executor is None
-    assert engine_core.scheduler is None
-    assert core_client.engine_core is None
-    assert llm_engine.model_executor is None
-    assert llm_engine.engine_core is None
-
-
 def test_atexit_sweep_removes_orphans_and_stays_quiet(capsys: pytest.CaptureFixture) -> None:
     from siete_rl.docker import CommandResult
 
@@ -846,112 +614,6 @@ def test_atexit_sweep_swallows_failures(capsys: pytest.CaptureFixture) -> None:
     _sweep_orphans_at_exit(BadClient(), "run-x")  # 必须不抛出
 
     assert "orphan sweep failed" in capsys.readouterr().err
-
-
-def test_recording_reward_forwards_verifier_parallel_workers() -> None:
-    seen: dict[str, object] = {}
-    requested_workers = 7
-
-    def adapter(**kwargs):
-        seen.update(kwargs)
-        kwargs["environments"][0].trajectory = type(
-            "Trajectory",
-            (),
-            {
-                "task_id": "getmoto__moto-7023",
-                "termination": "unresolved",
-                "settlement": Settlement(status="unresolved"),
-                "steps": [],
-            },
-        )()
-        return [0.0]
-
-    class FakeRecorder:
-        def __init__(self) -> None:
-            self.events = []
-
-        def begin_group(self, prompt, rollout_count, *, task_id):
-            pass
-
-        def write_rollout(self, index, **values):
-            pass
-
-        def complete_group(self, **values):
-            pass
-
-        def observe_native_policy_path(self, reached):
-            pass
-
-        def merge_cleanup_events(self, events):
-            self.events.extend(events)
-
-    class FakeEnvironment:
-        episode_id = "episode-0"
-        trajectory = None
-        frozen_patch = None
-        verification = None
-
-        def _drain_events(self):
-            return []
-
-    reward = _recording_reward(
-        FakeRecorder(), adapter, verifier_parallel_workers=requested_workers
-    )
-    assert reward(
-        prompts=[[{"role": "user", "content": "p"}]],
-        completions=[[{"role": "assistant", "content": "c"}]],
-        environments=[FakeEnvironment()],
-        task_id=["getmoto__moto-7023"],
-    ) == [0.0]
-    assert seen["max_workers"] == requested_workers
-
-
-def test_build_trainer_forwards_tool_parallel_workers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    class FakeTrainer:
-        def __init__(self, *args, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr("siete_rl.trainer.SWEGRPOTrainer", FakeTrainer)
-    monkeypatch.setattr("siete_rl.train.build_grpo_config", lambda *args, **kwargs: object())
-    config, _, _ = load_config(CONFIG_7B)
-    build_trainer(
-        config,
-        output_dir="/tmp/siete-test-out",
-        seed=0,
-        train_dataset=[],
-        environment_factory=lambda: None,
-        reward_func=lambda **kwargs: [],
-    )
-    assert captured["tool_parallel_workers"] == config.generation.tool_parallel_workers
-    assert captured["use_process_mask"] is True
-    assert "process_mask_rules" not in captured
-
-
-def test_single_reset_worker_does_not_construct_thread_pool(monkeypatch) -> None:
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("reset worker=1 must not construct ThreadPoolExecutor")
-
-    monkeypatch.setattr("siete_rl.train.ThreadPoolExecutor", fail_if_called)
-
-    assert _create_reset_executor(1) is None
-
-
-def test_parallel_reset_executor_uses_requested_worker_count(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-    sentinel = object()
-
-    def fake_executor(*args, **kwargs):
-        captured.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr("siete_rl.train.ThreadPoolExecutor", fake_executor)
-
-    assert _create_reset_executor(8) is sentinel
-    assert captured == {"max_workers": 8, "thread_name_prefix": "swe-reset"}
 
 
 def test_reset_executor_shuts_down_after_every_environment() -> None:

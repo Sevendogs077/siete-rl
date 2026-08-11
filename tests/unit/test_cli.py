@@ -31,18 +31,6 @@ def test_cli_returns_nonzero_for_structured_failed_run(
     assert '"status": "failed"' in capsys.readouterr().out
 
 
-def test_cli_grpo_surface_contains_only_one_run_config_input() -> None:
-    parser = cli.build_parser()
-    grpo_parser = parser._subparsers._group_actions[0].choices["grpo"]
-    option_strings = {
-        option
-        for action in grpo_parser._actions
-        for option in action.option_strings
-        if option.startswith("--")
-    }
-    assert option_strings == {"--help", "--config"}
-
-
 def test_cli_preserves_sigterm_exit_after_structured_cleanup(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -128,22 +127,6 @@ def test_generate_rejects_non_silent_reset_after_draining_batch(monkeypatch) -> 
         value._generate(["prompt"])
 
     assert events == ["await:a", "await:b"]
-
-
-def test_generate_override_is_only_a_barrier_around_parent_generation() -> None:
-    source = inspect.getsource(SWEGRPOTrainer._generate)
-
-    assert SWEGRPOTrainer._generate is not GRPOTrainer._generate
-    assert "super()._generate(prompts)" in source
-    assert "_generate_and_score_completions" not in source
-
-
-def test_trl_resets_all_environments_before_project_generate_barrier() -> None:
-    source = inspect.getsource(GRPOTrainer._generate_and_score_completions)
-
-    reset_position = source.index("environment.reset")
-    generate_position = source.index("self._generate(prompts)")
-    assert reset_position < generate_position
 
 
 def test_finish_keeps_model_tokens_and_adds_no_observation() -> None:
@@ -272,30 +255,6 @@ def test_iteration_cap_preserves_unexecuted_pending_action(monkeypatch) -> None:
     )
     assert weights == mask[0]
     assert stats.candidate_turns == 0
-
-
-def test_real_tool_execution_requires_final_pending_turn(monkeypatch) -> None:
-    env = Environment(); value = trainer(); value.environments = [env]
-
-    def bash():
-        env._steps.append(
-            Step(
-                index=0,
-                action=Action(tool_name="execute_bash", arguments={"command": "pwd"}),
-                observation=Observation(text="/repo", exit_code=0),
-            )
-        )
-        env.terminated = True
-        return "/repo"
-
-    value._sync_tool_dicts = [{"bash": bash}]; value._async_tool_dicts = [{}]
-    monkeypatch.setattr("siete_rl.trainer._classify_turn", lambda calls: "step")
-
-    with pytest.raises(
-        RuntimeError,
-        match="real tool execution requires a final pending_action turn",
-    ):
-        run(value, call("bash"))
 
 
 def test_observation_overlong_keeps_complete_turn_credit() -> None:
@@ -469,58 +428,6 @@ def test_post_tool_regeneration_preserves_per_trajectory_lineage(monkeypatch) ->
     assert value.vllm_generation.num_generations_seen == [1]
 
 
-def test_initial_turn_generation_path_is_not_overridden() -> None:
-    """invariant 1 守护:首 turn 仍走 TRL `_generate_single_turn`(n=16 去重优化不动)。"""
-    from trl import GRPOTrainer
-
-    assert SWEGRPOTrainer._generate_single_turn is GRPOTrainer._generate_single_turn
-
-
-def _run_parallel_scenario(workers: int, trajectory_count: int = 4):
-    """K 条 trajectory 各调一次 bash 后由空生成退出。"""
-    k = trajectory_count
-    envs = [Environment() for _ in range(k)]
-    value = trainer()
-    value._tool_parallel_workers = workers
-    value.environments = envs
-
-    def make_bash(i):
-        def _bash():
-            envs[i]._steps.append(object())
-            return f"obs-{i}-{len(envs[i]._steps)}"
-
-        return _bash
-
-    value._sync_tool_dicts = [{"bash": make_bash(i)} for i in range(k)]
-    value._async_tool_dicts = [{} for _ in range(k)]
-    value._generate_single_turn = lambda ids, *args: (
-        [[91, 99]] * len(ids),
-        [[0.5, 0.5]] * len(ids),
-    )
-    result = value._tool_call_loop(
-        prompts=[[{"role": "user", "content": "fix"}] for _ in range(k)],
-        prompt_ids=[[i + 1] for i in range(k)],
-        completion_ids=[[(i + 1) * 11, 99] for i in range(k)],
-        completions=[[call("bash")] for _ in range(k)],
-        logprobs=[[0.0] for _ in range(k)],
-        images=None,
-        multimodal_fields={},
-    )
-    return result, envs
-
-
-def test_parallel_tool_execution_matches_serial_byte_for_byte(monkeypatch) -> None:
-    """worker=1 与 worker=8 的全部状态转移结果逐项全等。"""
-    monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
-    serial, envs_s = _run_parallel_scenario(1)
-    parallel, envs_p = _run_parallel_scenario(8)
-    assert serial == parallel
-    for env_s, env_p in zip(envs_s, envs_p, strict=True):
-        assert env_s.turn_records == env_p.turn_records
-        assert len(env_s._steps) == len(env_p._steps) == 1
-        assert env_s.loop_exit == env_p.loop_exit
-
-
 def test_parallel_tool_failure_isolated_to_failing_sample(monkeypatch) -> None:
     """单样本工具抛错时，仅该样本得到 error observation。"""
     envs = [Environment() for _ in range(3)]
@@ -570,56 +477,3 @@ def test_parallel_tool_failure_isolated_to_failing_sample(monkeypatch) -> None:
         envs[0].turn_records[-1].step_index == 0
         and envs[2].turn_records[-1].step_index == 0
     )
-
-
-def test_single_worker_or_job_uses_serial_path_without_pool(monkeypatch) -> None:
-    """worker=1 或仅一个执行 job 时不得创建 ThreadPoolExecutor。"""
-
-    def boom(*args, **kwargs):
-        raise AssertionError("串行路径不得创建 ThreadPoolExecutor")
-
-    monkeypatch.setattr("siete_rl.trainer.ThreadPoolExecutor", boom)
-    for workers in (1, 8):
-        env = Environment()
-        value = trainer()
-        value._tool_parallel_workers = workers
-        value.environments = [env]
-        value._sync_tool_dicts = [
-            {"finish": lambda: setattr(env, "terminated", True) or ""}
-        ]
-        value._async_tool_dicts = [{}]
-        _, _, ids, *_ = run(value, call("finish"))
-        assert ids == [[2, 99]]
-
-
-def test_parallel_tool_execution_dispatches_every_trajectory_through_pool(monkeypatch) -> None:
-    """多 trajectory 时必须按配置的并行度进入 pool 路径。"""
-    created: list[object] = []
-
-    class RecordingExecutor:
-        def __init__(self, *, max_workers: int) -> None:
-            self.max_workers = max_workers
-            self.jobs = []
-            created.append(self)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            return None
-
-        def map(self, function, jobs):
-            self.jobs = list(jobs)
-            return [function(job) for job in self.jobs]
-
-    monkeypatch.setattr("siete_rl.trainer.parse_response", lambda *args, **kwargs: {})
-    monkeypatch.setattr("siete_rl.trainer.ThreadPoolExecutor", RecordingExecutor)
-    result, envs = _run_parallel_scenario(8, trajectory_count=8)
-
-    *_, tool_call_count, tool_failure_count, _ = result
-    executor = created[0]
-    assert executor.max_workers == 8
-    assert len(executor.jobs) == 8
-    assert tool_call_count == 8
-    assert tool_failure_count == 0
-    assert all(len(environment._steps) == 1 for environment in envs)

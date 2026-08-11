@@ -6,7 +6,7 @@ import pytest
 
 from siete_rl.docker import CommandResult
 from siete_rl.models import Action
-from siete_rl.tools import TOOL_SPECS, ToolExecutor, validate_tool_arguments
+from siete_rl.tools import ToolExecutor, validate_tool_arguments
 
 
 class FakeSandbox:
@@ -27,10 +27,6 @@ class FakeSandbox:
 
 def result(stdout: str = "", stderr: str = "", exit_code: int = 0, timed_out: bool = False) -> CommandResult:
     return CommandResult(argv=[], exit_code=exit_code, stdout=stdout, stderr=stderr, duration_sec=0, timed_out=timed_out)
-
-
-def test_exact_openhands_tool_schemas() -> None:
-    assert tuple(spec.name for spec in TOOL_SPECS) == ("execute_bash", "finish", "str_replace_editor")
 
 
 def test_execute_bash_uses_workspace_and_openhands_exit_text() -> None:

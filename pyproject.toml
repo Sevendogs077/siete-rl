@@ -42,7 +42,7 @@ packages = ["src/siete_rl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -m 'not gpu and not docker and not vllm and not system and not external_assets'"
+addopts = "-q"
 markers = [
   "gpu: 需要显式选择 GPU 的测试",
   "docker: 访问固定 SWE-Gym Docker 镜像的测试",

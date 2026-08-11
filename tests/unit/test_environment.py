@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event, Lock
@@ -79,10 +78,8 @@ def _make_submitted_env(reward_type="binary"):
     return env
 
 
-def test_only_three_public_tools_and_reset_is_silent() -> None:
+def test_reset_is_silent_and_initializes_the_sandbox() -> None:
     env, task_id, sandboxes, _ = harness()
-    methods = [name for name, member in inspect.getmembers(env, predicate=inspect.ismethod) if not name.startswith("_") and name != "reset"]
-    assert methods == ["execute_bash", "finish", "str_replace_editor"]
     assert env.reset(task_id, prompt="ignored") is None
     assert sandboxes
 

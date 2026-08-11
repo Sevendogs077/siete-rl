@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  unit-tests:
+  regression:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,5 +14,5 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      # 默认 marker 过滤（非 gpu/docker/vllm/system/external_assets），纯单元测试
-      - run: uv run pytest
+      # CI 只运行无需专用环境的快速回归；本地 pytest 默认运行全量测试。
+      - run: uv run pytest -m "not gpu and not docker and not vllm and not system and not external_assets"
