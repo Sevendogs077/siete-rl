@@ -194,6 +194,7 @@ def _mask_env(
     termination="submitted",
     verification=None,
     settlement="unresolved",
+    reward=0.0,
 ):
     """假 env：只带 process-mask 接线读取的轨迹事实。"""
     return SimpleNamespace(
@@ -204,6 +205,7 @@ def _mask_env(
             settlement=Settlement(status=settlement),
         ),
         verification=verification,
+        _reward=reward,
     )
 
 class _FakeTrainer(SWEGRPOTrainer):
@@ -216,6 +218,7 @@ class _FakeTrainer(SWEGRPOTrainer):
 def _bare_trainer(*, use_process_mask: bool, environments=None):
     trainer = _FakeTrainer()
     trainer._use_process_mask = use_process_mask
+    trainer._extra_reference_rewards = ()
     if environments is not None:
         trainer.environments = environments
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
@@ -238,6 +241,36 @@ def test_credit_mask_requires_liger(monkeypatch, use_process_mask):
 
 
 class TestGenerateAndScoreCompletionsOverride:
+    def test_extra_reference_rewards_give_degenerate_groups_gradient(
+        self, monkeypatch
+    ):
+        output = {
+            "completion_mask": torch.ones(8, 1, dtype=torch.long),
+            "tool_mask": torch.ones(8, 1, dtype=torch.long),
+            "advantages": torch.zeros(8),
+        }
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        trainer = _bare_trainer(
+            use_process_mask=False,
+            environments=[
+                *[_mask_env(reward=0.0) for _ in range(4)],
+                *[_mask_env(reward=1.0) for _ in range(4)],
+            ],
+        )
+        trainer._extra_reference_rewards = (0.0, 1.0)
+        trainer.num_generations = 4
+        trainer.scale_rewards = "none"
+
+        result = trainer._generate_and_score_completions([])
+
+        assert result["advantages"].tolist() == pytest.approx(
+            [-1 / 6] * 4 + [1 / 6] * 4
+        )
+
     def test_disabled_process_mask_still_applies_credit_mask(self, monkeypatch):
         output = {
             "completion_mask": torch.ones(1, 2, dtype=torch.long),

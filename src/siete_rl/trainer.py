@@ -48,6 +48,7 @@ import torch
 from trl import GRPOTrainer
 from trl.chat_template_utils import parse_response
 from trl.extras.profiling import profiling_context
+from trl.trainer.utils import nanstd
 
 from siete_rl.models import LoopExit
 from siete_rl.process_mask import (
@@ -102,6 +103,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         max_consecutive_protocol_errors: int,
         use_process_mask: bool,
         tool_parallel_workers: int = 1,
+        extra_reference_rewards: tuple[float, ...] = (),
         **kwargs,
     ) -> None:
         if max_consecutive_protocol_errors < 1:
@@ -111,6 +113,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         self.max_consecutive_protocol_errors = max_consecutive_protocol_errors
         self._tool_parallel_workers = tool_parallel_workers
         self._use_process_mask = use_process_mask
+        self._extra_reference_rewards = extra_reference_rewards
         super().__init__(*args, **kwargs)
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
@@ -262,6 +265,36 @@ class SWEGRPOTrainer(GRPOTrainer):
     def _generate_and_score_completions(self, inputs):
         output = super()._generate_and_score_completions(inputs)
         environments = self.environments
+        if self._extra_reference_rewards:
+            num_generations = (
+                self.num_generations
+                if self.model.training
+                else self.num_generations_eval
+            )
+            rewards = torch.tensor(
+                [
+                    torch.nan if environment._reward is None else environment._reward
+                    for environment in environments
+                ],
+                dtype=output["advantages"].dtype,
+                device=output["advantages"].device,
+            ).view(-1, num_generations)
+            references = torch.tensor(
+                self._extra_reference_rewards,
+                dtype=rewards.dtype,
+                device=rewards.device,
+            ).expand(rewards.size(0), -1)
+            baseline_rewards = torch.cat((rewards, references), dim=1)
+            advantages = rewards - torch.nanmean(
+                baseline_rewards, dim=1, keepdim=True
+            )
+            if self.scale_rewards == "group":
+                advantages = advantages / (
+                    nanstd(baseline_rewards, dim=1, keepdim=True) + 1e-4
+                )
+            elif self.scale_rewards == "batch":
+                advantages = advantages / (nanstd(baseline_rewards) + 1e-4)
+            output["advantages"] = torch.nan_to_num(advantages, nan=0.0).flatten()
         completion_mask = output["completion_mask"]
         tool_mask = output.get("tool_mask")
         advantages = output.get("advantages")

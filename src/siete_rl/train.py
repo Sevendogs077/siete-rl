@@ -270,6 +270,7 @@ def build_trainer(
         max_consecutive_protocol_errors=config.generation.max_consecutive_protocol_errors,
         use_process_mask=config.generation.use_process_mask,
         tool_parallel_workers=config.generation.tool_parallel_workers,
+        extra_reference_rewards=config.grpo.extra_reference_rewards,
     )
 
 

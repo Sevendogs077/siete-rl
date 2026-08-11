@@ -109,6 +109,7 @@ class GRPOConfigValues(StrictConfig):
     layered_reward_cap: float = Field(
         default=DEFAULT_LAYERED_REWARD_CAP, gt=0.0, lt=1.0
     )
+    extra_reference_rewards: tuple[float, ...] = ()
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
     loss_type: Literal["grpo"]
