@@ -23,7 +23,7 @@ from siete_rl.verifier import VerificationInfrastructureError
 class Sandbox:
     def __init__(self, sample, episode_id, scope) -> None:
         self.environment = sample.environment; self.episode_id = episode_id; self.scope = scope
-        self.container_id = "a" * 64; self.container_name = "fake"; self.responses = deque(); self.diff = ""; self.closed = 0
+        self.container_id = "a" * 64; self.acquired_container_id = self.container_id; self.container_name = "fake"; self.responses = deque(); self.diff = ""; self.closed = 0
     def open(self): return self
     def exec(self, command, *, input_text=None, timeout_sec=None):
         if command[:2] == ["python", "-c"] and len(command) == 4:

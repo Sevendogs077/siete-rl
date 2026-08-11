@@ -33,8 +33,6 @@ def binary_reward(
         environment, completion = pair
         value = environment._finalize(completion)
         settlement = environment.settlement
-        if settlement is None:
-            raise RuntimeError("finalized environment is missing settlement")
         if settlement.status == "infra_error":
             return None
         return value

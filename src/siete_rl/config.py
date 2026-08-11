@@ -9,7 +9,7 @@ from typing import Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from siete_rl.scoring import DEFAULT_LAMBDA
+from siete_rl.scoring import DEFAULT_LAYERED_REWARD_CAP
 
 
 LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
@@ -106,7 +106,9 @@ class GenerationConfig(StrictConfig):
 
 class GRPOConfigValues(StrictConfig):
     reward_type: Literal["binary", "layered"]
-    layered_lambda: float = Field(default=DEFAULT_LAMBDA, gt=0.0)
+    layered_reward_cap: float = Field(
+        default=DEFAULT_LAYERED_REWARD_CAP, gt=0.0, lt=1.0
+    )
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
     loss_type: Literal["grpo"]

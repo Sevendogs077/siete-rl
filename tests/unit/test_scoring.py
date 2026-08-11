@@ -1,13 +1,11 @@
 """分层 outcome reward 评分纯函数测试。"""
 
-import math
-
 import pytest
 
 from siete_rl.models import Verification
 from siete_rl.scoring import layered_score, parse_pytest_summary
 
-LAMBDA = 8.0
+LAYERED_REWARD_CAP = 0.20
 
 
 def _verification(
@@ -47,7 +45,7 @@ def test_parse_pytest_summary_splits_passed_and_failed():
     assert all(" - " not in n for n in failed)
 
 
-@pytest.mark.parametrize("lambda_", [0.5, 8.0, 20.0])
+@pytest.mark.parametrize("layered_reward_cap", [0.1, 0.2, 0.5])
 @pytest.mark.parametrize(
     ("fail_to_pass", "pass_to_pass"),
     [
@@ -55,13 +53,13 @@ def test_parse_pytest_summary_splits_passed_and_failed():
         (["a.py::test_fix"], ["b.py::test_old"]),
     ],
 )
-def test_resolved_is_exactly_one(lambda_, fail_to_pass, pass_to_pass):
+def test_resolved_is_exactly_one(layered_reward_cap, fail_to_pass, pass_to_pass):
     v = _verification(result="resolved", apply_status="applied", exit_code=0)
     assert layered_score(
         verification=v,
         fail_to_pass=fail_to_pass,
         pass_to_pass=pass_to_pass,
-        lambda_=lambda_,
+        layered_reward_cap=layered_reward_cap,
     ) == 1.0
 
 
@@ -69,7 +67,7 @@ def test_apply_failed_is_zero():
     v = _verification(apply_status="apply_failed")
     assert layered_score(
         verification=v, fail_to_pass=["t1"], pass_to_pass=[],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     ) == 0.0
 
 
@@ -77,12 +75,12 @@ def test_check_failed_is_zero():
     v = _verification(apply_status="check_failed")
     assert layered_score(
         verification=v, fail_to_pass=["t1"], pass_to_pass=[],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     ) == 0.0
 
 
-def test_partial_ratio_uses_exponential_shape():
-    # F2P 两个测试过一个：p=0.5，λ=8 → expm1(4)/expm1(8) ≈ 0.018
+def test_partial_ratio_uses_squared_shape_and_cap():
+    # F2P 两个测试过一个：p=0.5 → R = 0.20 * 0.5² = 0.05
     score = layered_score(
         verification=_verification(stdout=PYTEST_STDOUT),
         fail_to_pass=[
@@ -90,14 +88,13 @@ def test_partial_ratio_uses_exponential_shape():
             "mypy/test/teststubgen.py::TestStubgenPythonSuite::testGenericClassTypeVarTuple_semanal",
         ],
         pass_to_pass=[],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == pytest.approx(math.expm1(4.0) / math.expm1(8.0), rel=1e-9)
-    assert score < 0.02  # 线性会给 0.5，指数型必须压到接近 0
+    assert score == pytest.approx(0.05)
 
 
-def test_p2p_keep_rate_discounts_partial_score():
-    # p=0.5；P2P 两个过一个（q=0.5）→ R = f(0.5) · 0.5
+def test_any_p2p_regression_cancels_partial_score():
+    # p=0.5；P2P 两个过一个 → hard gate 取消部分分
     stdout = (
         PYTEST_STDOUT
         + "PASSED mypy/test/teststubgen.py::TestStubgenPythonSuite::testKept\n"
@@ -112,14 +109,13 @@ def test_p2p_keep_rate_discounts_partial_score():
             "mypy/test/teststubgen.py::TestStubgenPythonSuite::testKept",
             "mypy/test/teststubgen.py::TestStubgenPythonSuite::testOtherRegressed",
         ],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    base = math.expm1(4.0) / math.expm1(8.0)
-    assert score == pytest.approx(base * 0.5, rel=1e-9)
+    assert score == 0.0
 
 
 def test_all_f2p_passed_but_all_p2p_failed_is_zero():
-    # F2P 全过但 P2P 全挂 → q=0，「只修新测试不管回归」拿不到部分分
+    # F2P 全过但 P2P 全挂 → 安全门关闭，拿不到部分分
     stdout = """
 PASSED a.py::test_target
 FAILED a.py::test_regressed - RuntimeError
@@ -128,13 +124,13 @@ FAILED a.py::test_regressed - RuntimeError
         verification=_verification(stdout=stdout),
         fail_to_pass=["a.py::test_target"],
         pass_to_pass=["a.py::test_regressed"],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
     assert score == 0.0
 
 
-def test_single_regression_in_large_p2p_suite_costs_little():
-    # 回归率语义：113 个 P2P 挂 6 个 → q=107/113，不再按个数指数归零
+def test_regression_in_large_p2p_suite_cancels_partial_score():
+    # P2P 是安全门：套件再大，真实回归也取消部分分
     passed_p2p = [f"PASSED tests/test_ec2/test_subnets.py::test_p2p_{i}" for i in range(107)]
     failed_p2p = [f"FAILED tests/test_ec2/test_subnets.py::test_p2p_bad_{i} - RuntimeError" for i in range(6)]
     stdout = (
@@ -147,9 +143,9 @@ def test_single_regression_in_large_p2p_suite_costs_little():
         fail_to_pass=["tests/test_subnets.py::test_f2p_target"],
         pass_to_pass=[f"tests/test_ec2/test_subnets.py::test_p2p_{i}" for i in range(107)]
         + [f"tests/test_ec2/test_subnets.py::test_p2p_bad_{i}" for i in range(6)],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == pytest.approx(107 / 113, rel=1e-9)
+    assert score == 0.0
 
 
 def test_unresolved_without_test_vectors_is_zero():
@@ -157,12 +153,12 @@ def test_unresolved_without_test_vectors_is_zero():
         verification=_verification(stdout="PASSED a.py::test_x\n"),
         fail_to_pass=[],
         pass_to_pass=[],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
     assert score == 0.0
 
 
-def test_unresolved_all_listed_tests_pass_but_verifier_fails_is_zero():
+def test_unresolved_all_listed_tests_pass_reaches_layered_reward_cap():
     stdout = """
 PASSED tests/test_target.py::test_fixed
 PASSED tests/test_regression.py::test_preserved
@@ -172,9 +168,9 @@ FAILED tests/test_extra.py::test_unexpected - AssertionError
         verification=_verification(stdout=stdout),
         fail_to_pass=["tests/test_target.py::test_fixed"],
         pass_to_pass=["tests/test_regression.py::test_preserved"],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == 0.0
+    assert score == LAYERED_REWARD_CAP
 
 
 def test_parametrized_and_dotted_names_match_by_last_segment():
@@ -187,9 +183,9 @@ def test_parametrized_and_dotted_names_match_by_last_segment():
             "tests/test_a.py::DatasetSuite::test_missing",
         ],
         pass_to_pass=[],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == pytest.approx(math.expm1(4.0) / math.expm1(8.0), rel=1e-9)
+    assert score == pytest.approx(0.05)
 
 
 def test_bare_dataset_entry_falls_back_to_name_only_match():
@@ -199,9 +195,9 @@ def test_bare_dataset_entry_falls_back_to_name_only_match():
         verification=_verification(stdout=stdout),
         fail_to_pass=["test_case[param]", "test_missing"],
         pass_to_pass=[],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == pytest.approx(math.expm1(4.0) / math.expm1(8.0), rel=1e-9)
+    assert score == pytest.approx(0.05)
 
 
 def test_cross_file_same_bare_name_does_not_collide():
@@ -219,9 +215,9 @@ FAILED mypy/test/teststubgen.py::StubgenPythonSuite::stubgen.test::testCachedPro
         pass_to_pass=[
             "mypy/test/testcheck.py::TypeCheckSuite::check-functools.test::testCachedProperty",
         ],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == 0.0  # p=0、q=1 → R=0；旧裸名匹配会白捡 f(1/1)·2^-1
+    assert score == 0.0  # p=0，P2P 全过也不产生奖励
 
 
 def test_unseen_p2p_counts_as_not_passed():
@@ -231,9 +227,9 @@ def test_unseen_p2p_counts_as_not_passed():
         verification=_verification(stdout=stdout),
         fail_to_pass=["a.py::test_target"],
         pass_to_pass=["a.py::test_not_run"],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
-    assert score == 0.0  # p=1 但 q=0/1
+    assert score == 0.0  # p=1，但 P2P 没有显式通过
 
 
 def test_whole_file_collection_error_scores_zero():
@@ -243,6 +239,6 @@ def test_whole_file_collection_error_scores_zero():
         verification=_verification(stdout=stdout),
         fail_to_pass=["mypy/test/teststubgen.py::TestStubgenPythonSuite::test_x"],
         pass_to_pass=["mypy/test/teststubgen.py::TestStubgenPythonSuite::test_y"],
-        lambda_=LAMBDA,
+        layered_reward_cap=LAYERED_REWARD_CAP,
     )
     assert score == 0.0

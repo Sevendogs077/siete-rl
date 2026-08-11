@@ -1,22 +1,21 @@
-"""分层 outcome reward：指数型 F2P 完成度 × P2P 保留率纯函数。
+"""分层 outcome reward：F2P 完成度平方分 × P2P 无回归门。
 
 设计来源：《Signal Reshaping for GRPO in Weak-Feedback Agentic Code Repair》
 贡献点 1（分层结果奖励）的 test-oracle 改造版——本项目 verifier 直接运行
 pytest，用真实测试结果替代论文中的 LLM judge 语义判定。
 
-公式：R = f(p) · q，f(p) = (e^(λp) − 1)/(e^λ − 1)
+公式：R = α · p²
   p = FAIL_TO_PASS 通过比例（新功能完成程度）；
-  q = PASS_TO_PASS 通过比例（旧功能保留程度），未出现在 summary 里的
-  P2P 测试（未收集/跳过/整文件 ERROR）按未通过计，方向保守。
-只有 verifier resolved 时 R = 1；unresolved 即使清单内 p=q=1，也按 verifier
-最终结论返回 0。F2P 全过但 P2P 全挂时 q=0，「只修新测试不管回归」
-拿不到部分分；大套件里个别回归按比率折扣，不会像 hard gate 那样直接归零。
+  α = unresolved 部分奖励上限。
+PASS_TO_PASS 只作为安全门：任一测试未通过，R = 0。未出现在 summary 里的
+P2P 测试（未收集/跳过/整文件 ERROR）按未通过计，方向保守。
+只有 verifier resolved 时 R = 1；清单内测试全过但 verifier 因清单外失败判为
+unresolved 时，最多获得 α。P2P 全过本身不产生奖励，no-op 仍为 0。
 只重塑 reward 输入信号；GRPO 目标函数与 advantage 计算不变（论文贡献点 4）。
 """
 
 from __future__ import annotations
 
-import math
 import re
 
 from siete_rl.models import Verification
@@ -24,7 +23,7 @@ from siete_rl.models import Verification
 _SUMMARY_LINE = re.compile(r"(?m)^(PASSED|FAILED|ERROR)\s+(\S+)")
 
 # 分层 reward 默认超参；config.py 与 environment.py 共用，避免两处默认值漂移
-DEFAULT_LAMBDA = 8.0
+DEFAULT_LAYERED_REWARD_CAP = 0.20
 
 # 匹配键：(文件路径, 裸测试名)。文件段为 None 表示清单条目未给出文件，
 # 仅按裸名匹配（兼容无路径的旧格式清单）。
@@ -84,7 +83,7 @@ def layered_score(
     verification: Verification,
     fail_to_pass: list[str],
     pass_to_pass: list[str],
-    lambda_: float,
+    layered_reward_cap: float,
 ) -> float:
     """resolved 固定返回 1；仅对 applied-but-unresolved patch 计算部分分。
 
@@ -96,17 +95,13 @@ def layered_score(
 
     if verification.result == "resolved":
         return 1.0
-    if verification.patch_apply_status != "applied" or not verification.pytest_started:
-        # pytest_started 检查是防御性的：Verification.validate_evidence 已保证
-        # applied ⇒ pytest_started，这里防未来模型约束变动。
+    if verification.patch_apply_status != "applied":
         return 0.0
-    passed, failed = parse_pytest_summary(verification.stdout)
-    del failed  # 回归按 P2P 保留率 q 计量，不直接消费 failed 集合
+    passed, _ = parse_pytest_summary(verification.stdout)
     passed_keys = {_match_key(n) for n in passed}
     f2p = {_match_key(t) for t in fail_to_pass}
     p2p = {_match_key(t) for t in pass_to_pass}
-    p = _count_matched(f2p, passed_keys) / len(f2p) if f2p else 1.0
-    q = _count_matched(p2p, passed_keys) / len(p2p) if p2p else 1.0
-    if p == 1.0 and q == 1.0:
+    if not f2p or _count_matched(p2p, passed_keys) != len(p2p):
         return 0.0
-    return math.expm1(lambda_ * p) / math.expm1(lambda_) * q
+    p = _count_matched(f2p, passed_keys) / len(f2p)
+    return layered_reward_cap * p**2

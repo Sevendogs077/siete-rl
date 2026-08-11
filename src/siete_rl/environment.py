@@ -29,7 +29,7 @@ from siete_rl.models import (
     Verification,
 )
 from siete_rl.process_mask import TurnRecord
-from siete_rl.scoring import DEFAULT_LAMBDA, layered_score
+from siete_rl.scoring import DEFAULT_LAYERED_REWARD_CAP, layered_score
 from siete_rl.swegym import TaskContext
 from siete_rl.tools import ToolContractError, ToolExecutor, validate_tool_arguments
 from siete_rl.verifier import SWEGymVerifier
@@ -51,7 +51,7 @@ class SWEEnvironment:
         output_limit_chars: int,
         max_timeout_sec: int,
         reward_type: Literal["binary", "layered"] = "binary",
-        layered_lambda: float = DEFAULT_LAMBDA,
+        layered_reward_cap: float = DEFAULT_LAYERED_REWARD_CAP,
         reset_executor: Executor | None = None,
     ) -> None:
         self._task_context = task_context
@@ -60,7 +60,7 @@ class SWEEnvironment:
         self._output_limit_chars = output_limit_chars
         self._max_timeout_sec = max_timeout_sec
         self._reward_type = reward_type
-        self._layered_lambda = layered_lambda
+        self._layered_reward_cap = layered_reward_cap
         self._reset_executor = reset_executor
         self._pending_reset: Future[None] | None = None
         self._last_reset_started_at: float | None = None
@@ -267,8 +267,6 @@ class SWEEnvironment:
         self._await_reset()
         del completion  # 终止原因不再从 completion 推导
         if self._finalized:
-            if self._reward is None:
-                raise RuntimeError("finalized environment is missing its reward")
             return self._reward
         if self._sample is None or self._evaluation is None or self.episode_id is None:
             raise RuntimeError("environment was finalized before reset")
@@ -286,8 +284,6 @@ class SWEEnvironment:
         if capture_failure is not None:
             return self._finish_settlement(termination, capture_failure, 0.0)
 
-        if self._frozen_patch is None:
-            raise RuntimeError("settled episode is missing its frozen patch")
         if not self._frozen_patch.strip():
             return self._finish_settlement(
                 termination, Settlement(status="empty_patch"), 0.0
@@ -304,13 +300,9 @@ class SWEEnvironment:
             return self._terminal_event.kind
         if self._loop_exit is not None:
             return self._loop_exit
-        if self._infrastructure_error is not None:
-            return "infra_error"
         raise RuntimeError("environment finalized without a terminal event or loop exit")
 
     def _capture_final_patch(self) -> Settlement | None:
-        if self._sandbox is None:
-            raise RuntimeError("healthy episode is missing its rollout sandbox")
         try:
             self._frozen_patch = self._sandbox.get_diff()
         except WorkspaceStateError as exc:
@@ -321,8 +313,6 @@ class SWEEnvironment:
         return None
 
     def _verify_final_patch(self) -> tuple[Settlement, float]:
-        if self._frozen_patch is None or not self._frozen_patch.strip():
-            raise RuntimeError("verifier requires a non-empty frozen patch")
         if self._verifier is None:
             self._verifier = self._verifier_factory(
                 self._sample, self._evaluation, self.episode_id
@@ -341,7 +331,7 @@ class SWEEnvironment:
                 verification=self._verification,
                 fail_to_pass=self._evaluation.fail_to_pass,
                 pass_to_pass=self._evaluation.pass_to_pass,
-                lambda_=self._layered_lambda,
+                layered_reward_cap=self._layered_reward_cap,
             )
         else:
             reward = 0.0
@@ -380,7 +370,7 @@ class SWEEnvironment:
                     "episode_id": self.episode_id,
                     "task_id": sandbox.environment.task_id,
                     "container_name": sandbox.container_name,
-                    "container_id": getattr(sandbox, "acquired_container_id", sandbox.container_id),
+                    "container_id": sandbox.acquired_container_id,
                     "operations": sandbox.drain_cleanup_operations(),
                     "residual": sandbox.container_id is not None,
                 }

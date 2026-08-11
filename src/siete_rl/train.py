@@ -544,7 +544,7 @@ def _run_once(
                 output_limit_chars=config.chat.max_observation_chars,
                 max_timeout_sec=config.docker.exec_timeout_sec,
                 reward_type=config.grpo.reward_type,
-                layered_lambda=config.grpo.layered_lambda,
+                layered_reward_cap=config.grpo.layered_reward_cap,
                 reset_executor=reset_executor,
             )
             environments.append(environment)

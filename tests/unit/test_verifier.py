@@ -33,6 +33,7 @@ class FakeSandbox:
         self.close_error = close_error
         self.container_name = f"verifier-{id(self)}"
         self.container_id: str | None = "a" * 64
+        self.acquired_container_id = self.container_id
         self.opened = False
         self.closed = False
         self.calls: list[tuple[list[str], str | None, int | None]] = []

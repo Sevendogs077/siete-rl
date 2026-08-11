@@ -77,7 +77,7 @@ class SWEGymVerifier:
                     "scope": "verifier",
                     "task_id": sandbox.environment.task_id,
                     "container_name": sandbox.container_name,
-                    "container_id": getattr(sandbox, "acquired_container_id", sandbox.container_id),
+                    "container_id": sandbox.acquired_container_id,
                     "operations": sandbox.drain_cleanup_operations(),
                     "residual": sandbox.container_id is not None,
                 }
