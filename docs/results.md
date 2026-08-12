@@ -2,13 +2,23 @@
 
 Local records for SieteRL training and SWE-bench Verified evaluation, listed newest first under a fixed [evaluation protocol](#evaluation-protocol).
 
+## 2026-08-12 — Credit attribution refinement
+
+[![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)
+
+> **Result:** Refined credit attribution reached 58/500 on SWE-bench Verified while preserving more valid training credit.
+
+| Variant | Mean reward | Non-degenerate groups | SWE-bench Verified |
+|---|---:|---:|---:|
+| **SieteRL-Agent-7B-Credit** | 0.13477 | 36/100 | **58/500 (11.6%)** |
+
+**Analysis.** Layered verifier rewards were combined with sign-aware process masking: invalid or repeated actions lose positive credit but remain exposed to negative advantage. Infrastructure failures are excluded from the group baseline, while valid credit is retained across truncated or iteration-limited trajectories.
+
 ## 2026-08-10 — Reward shaping ablation
 
 [![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)
 
-> **Takeaway:** SieteRL-Agent-7B-v1 produced a richer training signal without improving verified performance.
-
-### Results
+> **Result:** Reward shaping produced a richer training signal without improving Verified performance.
 
 | Variant | Mean reward | Non-degenerate groups | SWE-bench Verified | Δ vs. Base |
 |---|---:|---:|---:|---:|
@@ -16,67 +26,20 @@ Local records for SieteRL training and SWE-bench Verified evaluation, listed new
 | **SieteRL-Agent-7B-Vanilla-GRPO** | 0.10625 | 25/100 | **54/500 (10.8%)** | −2 |
 | **SieteRL-Agent-7B-v1** | 0.11432 | 31/100 | **47/500 (9.4%)** | −9 |
 
-**Method.** Vanilla-GRPO learns only from pass/fail verifier outcomes; v1 reshapes that sparse signal into an exponential transform of the bug-fix-test pass rate multiplied by regression-test retention, while excluding invalid-call and third-or-later repeated-action turns from the policy loss.
-
-**Caveat.** This is not a single-factor ablation: v1 changed both reward shaping and process masking, used one training seed, and evaluated one rollout per task.
-
-<details>
-<summary><strong>Evidence and run details</strong></summary>
-
-| Variant | Run | Trajectories | Exact / partial / zero reward | Scored / empty / error |
-|---|---|---:|---:|---:|
-| SieteRL-Agent-7B-Base | OpenHands-7B-Agent | — | — | 360 / 139 / 1 |
-| SieteRL-Agent-7B-Vanilla-GRPO | `20260808T080700Z-8a86` | 1,600 | 170 / 0 / 1,430 | 352 / 148 / 0 |
-| SieteRL-Agent-7B-v1 | `20260808T065031Z-f4cf` | 1,600 | 177 / 9 / 1,414 | 355 / 144 / 1 |
-
-| Comparison | Newly solved | Regressed | Net change |
-|---|---:|---:|---:|
-| Vanilla-GRPO vs. Base | 12 | 14 | −2 |
-| v1 vs. Base | 12 | 21 | −9 |
-| v1 vs. Vanilla-GRPO | 15 | 22 | −7 |
-
-“Scored” is a non-empty patch that completed harness evaluation; empty patches are separate, and evaluation errors count as unresolved.
-
-- Partial credit reached 9/1,600 trajectories across 4/100 groups; six came from one group, and one scored 0.8333 despite breaking an existing behavior, showing that reward could overstate patch quality.
-- The v1 mask suppressed 148 overlong negative-advantage trajectories; the masked negative/positive candidate-turn count was 807/238.
-- On normal submissions, v1 resolved 2 more tasks than Vanilla-GRPO; on context-limit or iteration-cap exits, it resolved 9 fewer.
-- All three variants shared only 29 resolved tasks. Vanilla-GRPO and v1 shared 32, with 69 in their union.
-- One verified patch from each trained policy included 773 and 669 virtual-environment files, respectively, and was not directly deliverable.
-- A group of 16 zero-reward trajectories produces no GRPO advantage; overlong context tokens receive no gradient.
-
-</details>
+**Analysis.** Vanilla-GRPO uses pass/fail rewards; v1 adds partial credit from bug-fix-test progress and regression retention, together with process masking. Because reward shaping and masking changed together, this single-seed result does not isolate either mechanism.
 
 ## 2026-08-05 — Loss baseline
 
 [![Scaffold v1](https://img.shields.io/badge/Scaffold-v1-04648c.svg)](#scaffold-compatibility)
 
-> **Takeaway:** GRPO resolved three more tasks than DAPO.
-
-### Results
+> **Result:** GRPO resolved three more tasks than DAPO.
 
 | Variant | Mean reward | Non-degenerate groups | SWE-bench Verified | Δ vs. GRPO |
 |---|---:|---:|---:|---:|
 | GRPO | 0.084 | 17/100 | **56/500 (11.2%)** | — |
 | DAPO | 0.074 | 15/100 | **53/500 (10.6%)** | −3 |
 
-**Method.** Both runs used binary verifier rewards; the recorded configuration difference was `loss_type=grpo` versus `loss_type=dapo`.
-
-**Caveat.** The three-task difference is not statistically meaningful under a single 500-task evaluation.
-
-<details>
-<summary><strong>Evidence and run details</strong></summary>
-
-| Run | Submitted unresolved | Context limit | Iteration cap | Infra | Empty patch |
-|---|---:|---:|---:|---:|---:|
-| `20260801T235407Z-149b` | 190 | 173 | 78 | 3 | 152 |
-| `20260802T065312Z-b873` | 179 | 196 | 69 | 3 | 150 |
-
-Run `149b` had 254/500 (50.8%) non-submitting trajectories. Defining a loop as the same tool, command, path, and `old_str` prefix appearing at least three times, loops occurred in 57% of context-limit and 76% of iteration-cap trajectories.
-
-- Common patterns were repeated `str_replace` failures, repeatedly viewing one file without acting, and retrying `pip install` in a network-isolated container.
-- The SFT data assumed an active test environment and network access; Scaffold v2 corrected both training/evaluation mismatches.
-
-</details>
+**Analysis.** Both variants used binary verifier rewards and differed only in `loss_type`. The three-task gap from one 500-task evaluation is directional rather than statistically conclusive.
 
 ## Evaluation protocol
 
@@ -90,7 +53,7 @@ Run `149b` had 254/500 (50.8%) non-submitting trajectories. Defining a loop as t
 
 | Version | Commit | Changes |
 |---|---|---|
-| Scaffold v1 | — | Initial three-tool OpenHands-compatible scaffold; used by runs `149b` and `b873`. |
+| Scaffold v1 | — | Initial three-tool OpenHands-compatible scaffold used for the loss baseline. |
 | Scaffold v2 | `451d0a2` | Matched the SFT truncation marker, injected conda testbed activation for login shells, and added the optional `max_repeat_action` warning. |
 | Scaffold v3 | `d4c57fe` | Removed redundant activation injection; task images activate testbed through `.bashrc`. |
 
@@ -98,4 +61,11 @@ Only results within the same major scaffold version are directly comparable; cro
 
 ## External reference points
 
-For context, SWE-Gym reports 1.8% for Qwen2.5-Coder-7B-Instruct zero-shot and 10.6% for SWE-Gym OpenHands-7B-Agent SFT; SkyRL reports 11.0% for OpenHands-7B-Agent base and 14.6% for SkyRL-Agent-7B-v0. See [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) and [SkyRL](https://github.com/NovaSky-AI/SkyRL). Different scaffolds, budgets, decoding parameters, or versions make these references contextual rather than controlled comparisons.
+| Source | Model | SWE-bench Verified |
+|---|---|---:|
+| [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) | Qwen2.5-Coder-7B-Instruct zero-shot | 1.8% |
+| [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) | SWE-Gym OpenHands-7B-Agent SFT | 10.6% |
+| [SkyRL](https://github.com/NovaSky-AI/SkyRL) | OpenHands-7B-Agent base | 11.0% |
+| [SkyRL](https://github.com/NovaSky-AI/SkyRL) | SkyRL-Agent-7B-v0 | 14.6% |
+
+Different scaffolds, budgets, decoding parameters, or versions make these contextual references rather than controlled comparisons.
