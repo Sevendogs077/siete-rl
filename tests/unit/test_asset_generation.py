@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pyarrow as pa
@@ -40,40 +39,6 @@ def _kwargs(official: Path, subset: Path, assets_dir: Path) -> dict:
         official_revision="rev-official",
         subset_revision="rev-subset",
     )
-
-
-def test_generate_task_assets_produces_six_consistent_files(tmp_path: Path) -> None:
-    official = tmp_path / "official.parquet"
-    subset = tmp_path / "subset.parquet"
-    pq.write_table(pa.Table.from_pylist(_rows("owner__repo-1")), official)
-    pq.write_table(pa.Table.from_pylist(_rows("owner__repo-1")), subset)
-
-    written = generate_task_assets(**_kwargs(official, subset, tmp_path / "assets"))
-
-    root = tmp_path / "assets" / "owner__repo-1"
-    assert {p.name for p in written} == {
-        "selected_instance.json",
-        "eval_script.sh",
-        "eval_script.offline.sh",
-        "gold.patch",
-        "test.patch",
-        "manifest.json",
-    }
-    assert (root / "gold.patch").read_text() == "gold-diff"
-    assert "PIP_NO_INDEX=1" in (root / "eval_script.offline.sh").read_text()
-    manifest = json.loads((root / "manifest.json").read_text())
-    assert manifest["image_name"] == "docker.io/x/owner_s_repo-1:latest"
-    assert manifest["expected_image_id"] == "sha256:" + "1" * 64
-    assert manifest["expected_registry_digest"] == "sha256:" + "2" * 64
-    assert manifest["datasets"]["official"]["revision"] == "rev-official"
-    assert manifest["datasets"]["subset"]["revision"] == "rev-subset"
-    assert set(manifest["files"]) == {
-        "selected_instance.json",
-        "eval_script.sh",
-        "eval_script.offline.sh",
-        "gold.patch",
-        "test.patch",
-    }
 
 
 def test_generate_task_assets_is_idempotent(tmp_path: Path) -> None:

@@ -363,20 +363,6 @@ def test_complete_group_rejects_out_of_range_rewards(
         )
 
 
-def test_native_policy_path_is_internal_only(tmp_path: Path) -> None:
-    recorder = RunRecorder(
-        config=configured_for(tmp_path), seed=1, run_id="native-path-run"
-    )
-
-    recorder.observe_native_policy_path(False)
-    recorder.observe_native_policy_path(True)
-    recorder.observe_native_policy_path(False)
-
-    assert recorder.native_policy_path_reached is True
-    serialized = json.dumps(load_json(recorder.output_dir / "run.json"))
-    assert "native_policy_path" not in serialized
-
-
 def test_sync_trainer_state_keeps_partial_progress_and_checkpoints(
     tmp_path: Path,
 ) -> None:

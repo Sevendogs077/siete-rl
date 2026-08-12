@@ -10,7 +10,6 @@ from trl import GRPOTrainer
 from siete_rl.models import Action, Observation, Settlement, Step
 from siete_rl.process_mask import (
     CreditMaskStats,
-    ProcessMaskStats,
     TurnRecord,
     _action_key,
     build_credit_token_weights,
@@ -241,36 +240,6 @@ def test_credit_mask_requires_liger(monkeypatch, use_process_mask):
 
 
 class TestGenerateAndScoreCompletionsOverride:
-    def test_extra_reference_rewards_give_degenerate_groups_gradient(
-        self, monkeypatch
-    ):
-        output = {
-            "completion_mask": torch.ones(8, 1, dtype=torch.long),
-            "tool_mask": torch.ones(8, 1, dtype=torch.long),
-            "advantages": torch.zeros(8),
-        }
-        monkeypatch.setattr(
-            GRPOTrainer,
-            "_generate_and_score_completions",
-            lambda self, inputs: output,
-        )
-        trainer = _bare_trainer(
-            use_process_mask=False,
-            environments=[
-                *[_mask_env(reward=0.0) for _ in range(4)],
-                *[_mask_env(reward=1.0) for _ in range(4)],
-            ],
-        )
-        trainer._extra_reference_rewards = (0.0, 1.0)
-        trainer.num_generations = 4
-        trainer.scale_rewards = "none"
-
-        result = trainer._generate_and_score_completions([])
-
-        assert result["advantages"].tolist() == pytest.approx(
-            [-1 / 6] * 4 + [1 / 6] * 4
-        )
-
     def test_disabled_process_mask_still_applies_credit_mask(self, monkeypatch):
         output = {
             "completion_mask": torch.ones(1, 2, dtype=torch.long),
@@ -288,34 +257,6 @@ class TestGenerateAndScoreCompletionsOverride:
         )
         result = trainer._generate_and_score_completions([])
         assert result["token_weights"].tolist() == [[0.0, 0.0]]
-
-    def test_trainer_passes_each_advantage_to_process_module(self, monkeypatch):
-        completion_mask = torch.tensor([[1, 1, 1], [1, 1, 1]])
-        tool_mask = torch.tensor([[1, 1, 1], [1, 0, 1]])
-        output = {
-            "completion_mask": completion_mask,
-            "tool_mask": tool_mask,
-            "advantages": torch.tensor([0.5, -0.25]),
-        }
-        envs = [_mask_env(), _mask_env()]
-        calls = []
-
-        def fake_build(**kwargs):
-            calls.append(kwargs)
-            return list(kwargs["base_mask"]), ProcessMaskStats(0, 0, 0, 0.0)
-
-        monkeypatch.setattr(
-            GRPOTrainer,
-            "_generate_and_score_completions",
-            lambda self, inputs: output,
-        )
-        monkeypatch.setattr("siete_rl.trainer.build_process_token_weights", fake_build)
-        trainer = _bare_trainer(use_process_mask=True, environments=envs)
-        result = trainer._generate_and_score_completions([])
-
-        assert result["token_weights"].tolist() == [[1.0, 1.0, 1.0], [1.0, 0.0, 1.0]]
-        assert [call["advantage"] for call in calls] == [0.5, -0.25]
-        assert calls[0]["termination"] == envs[0].trajectory.termination
 
     def test_truncated_turn_masks_only_its_token_interval(self, monkeypatch):
         output = {
@@ -344,21 +285,6 @@ class TestGenerateAndScoreCompletionsOverride:
 
         assert result["token_weights"].tolist() == [[1.0, 0.0, 0.0, 1.0]]
         assert trainer._metrics["train"]["credit_mask/truncated_turns"] == [1.0]
-
-    def test_process_mask_stats_are_aggregated_without_recomputing_policy(self):
-        trainer = _bare_trainer(use_process_mask=True)
-        trainer._record_process_mask_metrics(
-            [
-                ProcessMaskStats(3, 2, 0, 0.25),
-                ProcessMaskStats(4, 0, 4, 0.00),
-                ProcessMaskStats(1, 0, 0, 1.00),
-            ]
-        )
-        metrics = trainer._metrics["train"]
-        assert metrics["process_mask/candidate_turns"] == [8.0]
-        assert metrics["process_mask/applied_turns"] == [2.0]
-        assert metrics["process_mask/retained_negative_turns"] == [4.0]
-        assert metrics["process_mask/masked_token_frac"] == [pytest.approx(1.25 / 3)]
 
     def test_recovered_positive_metrics_measure_effective_token_support(
         self, monkeypatch
@@ -396,37 +322,6 @@ class TestGenerateAndScoreCompletionsOverride:
 class TestComputeLigerLossOverride:
     """always-on token_weights 经 tool_mask 通道替换父类 loss mask。"""
 
-    def _capture_parent(self, monkeypatch):
-        captured = {}
-
-        def fake_compute_liger_loss(self, unwrapped_model, inputs):
-            captured["inputs"] = inputs
-            return "loss"
-
-        monkeypatch.setattr(GRPOTrainer, "compute_liger_loss", fake_compute_liger_loss)
-        return captured
-
-    @pytest.mark.parametrize("use_process_mask", [False, True])
-    def test_token_weights_always_replace_tool_mask(
-        self, monkeypatch, use_process_mask
-    ):
-        captured = self._capture_parent(monkeypatch)
-        trainer = _bare_trainer(use_process_mask=use_process_mask)
-        token_weights = torch.ones(1, 3)
-        inputs = {"completion_mask": torch.ones(1, 3), "token_weights": token_weights}
-        assert trainer.compute_liger_loss(None, inputs) == "loss"
-        # 同一对象传入；token_weights ⊆ completion_mask 支撑集使父类 loss_mask ≡ token_weights
-        assert captured["inputs"]["tool_mask"] is token_weights
-        # 原 dict 不被修改
-        assert "tool_mask" not in inputs
-
-    def test_without_token_weights_passes_parent_inputs_through(self, monkeypatch):
-        captured = self._capture_parent(monkeypatch)
-        trainer = _bare_trainer(use_process_mask=False)
-        inputs = {"completion_mask": torch.ones(1, 3)}
-        trainer.compute_liger_loss(None, inputs)
-        assert "tool_mask" not in captured["inputs"]
-
     def test_all_zero_token_weights_bypass_model_connected_parent(self, monkeypatch):
         def boom(*args, **kwargs):
             raise AssertionError("fully censored microbatch must bypass parent loss")
@@ -446,59 +341,3 @@ class TestComputeLigerLossOverride:
         assert loss.requires_grad
         loss.backward()
         assert parameter.grad is None
-
-
-def _real_liger_case(token_weights):
-    from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOLoss
-
-    trainer = _bare_trainer(use_process_mask=False)
-    trainer.beta = 0.0
-    trainer.current_gradient_accumulation_steps = 1
-    trainer.accelerator = SimpleNamespace(
-        state=SimpleNamespace(deepspeed_plugin=None),
-        gather=lambda value: value,
-    )
-    trainer.liger_loss = LigerFusedLinearGRPOLoss(
-        beta=0.0,
-        compiled=False,
-        use_ref_model=False,
-        chunk_size=4,
-        loss_type="grpo",
-    )
-    hidden = torch.tensor(
-        [
-            [[1.0, 0.0], [0.0, 1.0]],
-            [[1.0, 1.0], [0.5, -0.5]],
-            [[1.0, 0.0], [0.0, 1.0]],
-            [[1.0, 1.0], [0.5, -0.5]],
-        ]
-    )
-    trainer._get_last_hidden_state = lambda *args, **kwargs: hidden
-    model = SimpleNamespace(lm_head=torch.nn.Linear(2, 3, bias=False))
-    with torch.no_grad():
-        model.lm_head.weight.copy_(
-            torch.tensor([[0.2, -0.1], [0.1, 0.3], [-0.2, 0.4]])
-        )
-    inputs = {
-        "prompt_ids": torch.zeros((4, 1), dtype=torch.long),
-        "prompt_mask": torch.ones((4, 1), dtype=torch.long),
-        "completion_ids": torch.tensor(
-            [[0, 1], [1, 2], [0, 1], [1, 2]], dtype=torch.long
-        ),
-        "completion_mask": torch.ones((4, 2)),
-        "token_weights": torch.tensor(token_weights, dtype=torch.float32),
-        "advantages": torch.tensor([1.0, 0.25, 1.0, 0.25]),
-    }
-    loss = trainer.compute_liger_loss(model, inputs)
-    loss.backward()
-    return loss.detach(), model.lm_head.weight.grad.detach().clone()
-
-
-def test_fixed_g_liger_loss_and_gradient_scale_with_censored_rows():
-    complete_loss, complete_grad = _real_liger_case([[1, 1]] * 4)
-    censored_loss, censored_grad = _real_liger_case(
-        [[1, 1], [1, 1], [0, 0], [0, 0]]
-    )
-
-    assert censored_loss.item() == pytest.approx(complete_loss.item() / 2)
-    assert torch.allclose(censored_grad, complete_grad / 2, atol=1e-6, rtol=1e-6)

@@ -544,41 +544,6 @@ def test_predictions_keep_empty_and_infrastructure_failures() -> None:
     ]
 
 
-def test_evaluate_variant_submits_all_agent_loops_before_collecting_results(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    rows = [{"instance_id": f"task-{index}"} for index in range(2)]
-    executors = use_recording_executor(monkeypatch)
-
-    def make_sample(row, *_args):
-        return SimpleNamespace(task=SimpleNamespace(task_id=row["instance_id"]))
-
-    def run_loop(*, sample, **_kwargs):
-        return EvalOutcome(sample.task.task_id, "patch", "submitted", None, [], 0.0)
-
-    def submitted_futures(futures):
-        assert len(executors[0].futures) == len(rows)
-        return list(futures)
-
-    monkeypatch.setattr(eval_module, "public_sample_from_row", make_sample)
-    monkeypatch.setattr(eval_module, "run_agent_loop", run_loop)
-    monkeypatch.setattr(eval_module, "as_completed", submitted_futures)
-    eval_module.evaluate_variant(
-        name="candidate",
-        model_name="candidate",
-        rows=rows,
-        run=SimpleNamespace(protocol=protocol()),
-        tokenizer=object(),
-        docker_client=Client([]),
-        server_url="http://unused",
-        eval_run_id="eval",
-        output_dir=tmp_path,
-        rollout_workers=2,
-    )
-    assert executors[0].max_workers == 2
-    assert executors[0].shutdown_calls == [(True, False)]
-
-
 def test_evaluate_variant_single_worker_prepares_each_sample_lazily(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

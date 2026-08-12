@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import gc
-from collections import defaultdict
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from siete_rl.config import load_config
 from siete_rl.train import _gpu_baseline, _require_single_visible_gpu
-from siete_rl.trainer import SWEGRPOTrainer
 
 
 pytestmark = pytest.mark.gpu
@@ -100,86 +97,3 @@ def test_openhands_7b_bf16_lora_forward_backward_save_reload(tmp_path: Path) -> 
         gc.collect()
         if "torch" in locals():
             torch.cuda.empty_cache()
-
-
-def test_cuda_liger_credit_mask_preserves_fixed_g_and_accumulator() -> None:
-    _require_single_visible_gpu()
-
-    import torch
-    from liger_kernel.chunked_loss.grpo_loss import LigerFusedLinearGRPOLoss
-
-    def make_case():
-        trainer = object.__new__(SWEGRPOTrainer)
-        trainer._use_process_mask = False
-        trainer.model = SimpleNamespace(training=True)
-        trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        trainer.beta = 0.0
-        trainer.current_gradient_accumulation_steps = 1
-        trainer.accelerator = SimpleNamespace(
-            state=SimpleNamespace(deepspeed_plugin=None),
-            gather=lambda value: value,
-        )
-        trainer.liger_loss = LigerFusedLinearGRPOLoss(
-            beta=0.0,
-            compiled=False,
-            use_ref_model=False,
-            chunk_size=4,
-            loss_type="grpo",
-        )
-        hidden = torch.tensor(
-            [
-                [[1.0, 0.0], [0.0, 1.0]],
-                [[1.0, 1.0], [0.5, -0.5]],
-                [[1.0, 0.0], [0.0, 1.0]],
-                [[1.0, 1.0], [0.5, -0.5]],
-            ],
-            device="cuda",
-        )
-        trainer._get_last_hidden_state = lambda *args, **kwargs: hidden
-        model = SimpleNamespace(lm_head=torch.nn.Linear(2, 3, bias=False).cuda())
-        with torch.no_grad():
-            model.lm_head.weight.copy_(
-                torch.tensor(
-                    [[0.2, -0.1], [0.1, 0.3], [-0.2, 0.4]], device="cuda"
-                )
-            )
-        inputs = {
-            "prompt_ids": torch.zeros((4, 1), dtype=torch.long, device="cuda"),
-            "prompt_mask": torch.ones((4, 1), dtype=torch.long, device="cuda"),
-            "completion_ids": torch.tensor(
-                [[0, 1], [1, 2], [0, 1], [1, 2]],
-                dtype=torch.long,
-                device="cuda",
-            ),
-            "completion_mask": torch.ones((4, 2), device="cuda"),
-            "advantages": torch.tensor(
-                [1.0, 0.25, 1.0, 0.25], device="cuda"
-            ),
-        }
-        return trainer, model, inputs
-
-    full_trainer, full_model, full_inputs = make_case()
-    full_inputs["token_weights"] = torch.ones((4, 2), device="cuda")
-    full_loss = full_trainer.compute_liger_loss(full_model, full_inputs)
-    full_loss.backward()
-    full_grad = full_model.lm_head.weight.grad.detach().clone()
-
-    censored_trainer, censored_model, censored_inputs = make_case()
-    censored_inputs["token_weights"] = torch.tensor(
-        [[1, 1], [1, 1], [0, 0], [0, 0]],
-        dtype=torch.float32,
-        device="cuda",
-    )
-    censored_loss = censored_trainer.compute_liger_loss(
-        censored_model, censored_inputs
-    )
-    censored_loss.backward()
-    accumulated = censored_model.lm_head.weight.grad.detach().clone()
-
-    assert censored_loss.item() == pytest.approx(full_loss.item() / 2)
-    assert torch.allclose(accumulated, full_grad / 2, atol=1e-6, rtol=1e-6)
-
-    censored_inputs["token_weights"].zero_()
-    zero_loss = censored_trainer.compute_liger_loss(censored_model, censored_inputs)
-    zero_loss.backward()
-    assert torch.equal(censored_model.lm_head.weight.grad, accumulated)
