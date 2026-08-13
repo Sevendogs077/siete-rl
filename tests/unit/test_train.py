@@ -16,13 +16,12 @@ from siete_rl.train import (
     _close_vllm_communicator,
     _detach_vllm_client_atexit,
     _recording_reward,
-    _require_single_visible_gpu,
-    _sweep_orphans_at_exit,
+    _require_trainer_visible_gpus,
     build_grpo_config,
     preflight,
     run,
 )
-from siete_rl.launcher import VLLMEndpoints
+from siete_rl.launcher import RunEndpoints
 from siete_rl.models import Settlement, Trajectory
 from siete_rl.recording import RunRecorder
 
@@ -145,25 +144,29 @@ def test_entry_delegates_to_the_supervisor(
     assert result == outcome
 
 
-@pytest.mark.parametrize("value, expected", [("1", 1), ("3", 3), ("03", 3)])
-def test_single_visible_gpu_is_selected_only_by_environment(
-    monkeypatch: pytest.MonkeyPatch, value: str, expected: int
+@pytest.mark.parametrize("local_rank, expected", [("0", 2), ("1", 3)])
+def test_trainer_visible_gpu_is_selected_by_local_rank(
+    monkeypatch: pytest.MonkeyPatch, local_rank: str, expected: int
 ) -> None:
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", value)
-    assert _require_single_visible_gpu() == expected
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == str(expected)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("LOCAL_RANK", local_rank)
+    selected = []
+    monkeypatch.setattr("torch.cuda.set_device", selected.append)
+    assert _require_trainer_visible_gpus() == expected
+    assert selected == [int(local_rank)]
 
 
-@pytest.mark.parametrize("value", [None, "", "-1", "gpu3", "2,3"])
-def test_single_visible_gpu_rejects_missing_or_non_single_selection(
+@pytest.mark.parametrize("value", [None, "", "2", "2,3,4"])
+def test_trainer_visible_gpu_rejects_non_pair_selection(
     monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
     if value is None:
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     else:
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", value)
-    with pytest.raises(RuntimeNotQualifiedError, match="exactly one"):
-        _require_single_visible_gpu()
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    with pytest.raises(RuntimeNotQualifiedError, match="exactly two"):
+        _require_trainer_visible_gpus()
 
 
 def test_liger_runtime_flags_disable_dynamo_when_enabled(
@@ -182,7 +185,7 @@ def test_liger_runtime_flags_disable_dynamo_when_enabled(
 
 def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
     config, _, _ = load_config(CONFIG_7B)
-    endpoints = VLLMEndpoints(host="127.0.0.1", server_port=18421, group_port=18422)
+    endpoints = RunEndpoints(host="127.0.0.1", server_port=18421, group_port=18422, ddp_port=18423)
     grpo_config = build_grpo_config(
         config,
         tmp_path / "output",
@@ -277,12 +280,8 @@ def test_adapter_failure_isolated_from_completed_group(
             task_id=[task_b, task_b],
         )
 
-    group_b_dir = recorder.output_dir / "rollouts/batch-0001/group-0000"
     assert _tree_bytes(group_a_dir) == group_a_bytes
-    group_b = json.loads((group_b_dir / "group.json").read_text())
-    assert group_b["task_id"] == task_b
-    assert group_b["state"] == "running"
-    assert list((group_b_dir / "0000").iterdir()) == []
+    assert not (recorder.output_dir / "rollouts/batch-0001").exists()
     assert recorder.run["train"]["groups_generated"] == 1
     assert recorder.run["train"]["rollouts_generated"] == 2
     assert recorder.run["results"]["reward"] == metrics_before
@@ -411,7 +410,7 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
             ],
             task_id=["getmoto__moto-7023"] * 2,
         )
-    assert len(recorder.begun) == 1
+    assert recorder.begun == []
 
 
 class _InfraRecorder:
@@ -490,40 +489,6 @@ def test_recording_reward_tolerates_scattered_infra_errors() -> None:
         1.0,
         1.0,
     ]
-
-
-def test_atexit_sweep_removes_orphans_and_stays_quiet(capsys: pytest.CaptureFixture) -> None:
-    from siete_rl.docker import CommandResult
-
-    class FakeClient:
-        def __init__(self) -> None:
-            self.calls: list[list[str]] = []
-
-        def run(self, argv, **kwargs):
-            argv = list(argv)
-            self.calls.append(argv)
-            stdout = "aa\n" if argv[1] == "ps" else ""
-            return CommandResult(
-                argv=argv, exit_code=0, stdout=stdout, stderr="", duration_sec=0.01
-            )
-
-    client = FakeClient()
-    _sweep_orphans_at_exit(client, "run-x")
-
-    assert client.calls[0][:3] == ["docker", "ps", "-aq"]
-    assert "label=swe_agent.run_id=run-x" in client.calls[0]
-    assert client.calls[1] == ["docker", "rm", "-f", "aa"]
-    assert "swept orphan containers: aa" in capsys.readouterr().err
-
-
-def test_atexit_sweep_swallows_failures(capsys: pytest.CaptureFixture) -> None:
-    class BadClient:
-        def run(self, argv, **kwargs):
-            raise RuntimeError("daemon down")
-
-    _sweep_orphans_at_exit(BadClient(), "run-x")  # 必须不抛出
-
-    assert "orphan sweep failed" in capsys.readouterr().err
 
 
 def test_reset_executor_shutdown_failure_is_a_cleanup_error() -> None:

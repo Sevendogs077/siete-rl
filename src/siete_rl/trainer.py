@@ -70,6 +70,14 @@ _FORMAT_FEEDBACK_TEMPLATE = (
 _PLAIN_MESSAGE_SENTINEL = "swe_agent_plain_message"
 
 
+def _global_active_counts(local_count: int) -> list[int]:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return [local_count]
+    counts: list[int | None] = [None] * torch.distributed.get_world_size()
+    torch.distributed.all_gather_object(counts, local_count)
+    return [int(count) for count in counts]
+
+
 # >>> swe_agent: process mask 的 turn 分类与记录 helper
 def _classify_turn(tool_calls: list) -> str:
     """按生成态分类；真实 tool call 仅在执行成功后回填为 step。"""
@@ -186,6 +194,55 @@ class SWEGRPOTrainer(GRPOTrainer):
             with profiling_context(self, "sync_weights"):
                 self.vllm_generation.sync_weights()
             self._last_loaded_step = self.state.global_step
+        if self.vllm_mode == "server" and torch.distributed.is_initialized():
+            local_images = images if images is not None else [None] * len(prompt_ids)
+            if len(local_images) != len(prompt_ids):
+                raise RuntimeError("post-tool images must align with local prompts")
+            world_size = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+            counts = _global_active_counts(len(prompt_ids))
+            gathered_prompts = [None] * world_size
+            gathered_images = [None] * world_size
+            torch.distributed.all_gather_object(gathered_prompts, prompt_ids)
+            torch.distributed.all_gather_object(gathered_images, local_images)
+            all_prompts = [item for batch in gathered_prompts for item in batch]
+            all_images = [item for batch in gathered_images for item in batch]
+            if all(image is None for image in all_images):
+                all_images = None
+
+            payload = None
+            if rank == 0:
+                generation = self.vllm_generation
+                output = generation.vllm_client.generate(
+                    prompts=all_prompts,
+                    images=all_images,
+                    n=1,
+                    repetition_penalty=generation.repetition_penalty,
+                    temperature=generation.temperature,
+                    top_p=generation.top_p,
+                    top_k=generation.top_k,
+                    min_p=0.0 if getattr(generation, "min_p", None) is None else generation.min_p,
+                    max_tokens=generation.max_completion_length,
+                    logprobs=generation.logprobs,
+                    structured_outputs_regex=getattr(
+                        generation, "structured_outputs_regex", None
+                    ),
+                    generation_kwargs=generation.generation_kwargs,
+                )
+                payload = (output["completion_ids"], output["logprobs"])
+            objects = [payload]
+            torch.distributed.broadcast_object_list(objects, src=0)
+            all_completion_ids, all_logprobs = objects[0]
+            start = sum(counts[:rank])
+            stop = start + len(prompt_ids)
+            completion_ids = all_completion_ids[start:stop]
+            logprobs = all_logprobs[start:stop]
+            logprobs = (
+                [[lp[0] for lp in sequence] for sequence in logprobs]
+                if logprobs is not None
+                else None
+            )
+            return completion_ids, logprobs
         _, completion_ids, logprobs, _ = self.vllm_generation.generate(
             prompts=prompt_ids,
             images=images,
@@ -494,7 +551,10 @@ class SWEGRPOTrainer(GRPOTrainer):
         tool_failure_count = 0
         iteration_num = 0
 
-        while idxs_with_tool and iteration_num < self.max_tool_calling_iterations:
+        while (
+            sum(_global_active_counts(len(idxs_with_tool))) > 0
+            and iteration_num < self.max_tool_calling_iterations
+        ):
             prompt_completion_tools = [prompts[i] for i in idxs_with_tool]  # select only prompts that need tool calls
             # Snapshot state so we can rollback tool results that would exceed max_completion_length
             completions_len_before = {
@@ -656,8 +716,6 @@ class SWEGRPOTrainer(GRPOTrainer):
                 idxs_with_tool = [
                     idx for idx, flag in zip(idxs_with_tool, exit_flags, strict=True) if not flag
                 ]
-                if not idxs_with_tool:
-                    break
             # <<< swe_agent
 
             # Build token IDs by concatenation: prompt + completion + tool_suffix.
@@ -706,8 +764,6 @@ class SWEGRPOTrainer(GRPOTrainer):
             prompt_completion_tool_ids = [
                 pct for pct, o in zip(prompt_completion_tool_ids, overlong, strict=True) if not o
             ]
-            if not idxs_with_tool:
-                break  # all overlong, exit tool loop
 
             # Filter images and multimodal fields to match the current subset (index into full batch).
             # Merge tool response images so the model can see visual feedback during generation.
@@ -725,7 +781,7 @@ class SWEGRPOTrainer(GRPOTrainer):
                 for k, v in multimodal_fields.items():
                     selected = [v[i] for i in idxs_with_tool]
                     # Per-token fields (e.g. token_type_ids) need zero-padding to match extended prompt length
-                    if isinstance(selected[0], list):
+                    if selected and isinstance(selected[0], list):
                         selected = [
                             s + [0] * (len(pct) - len(s))
                             for s, pct in zip(selected, prompt_completion_tool_ids, strict=True)

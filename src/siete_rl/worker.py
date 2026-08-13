@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 from pathlib import Path
 
 from siete_rl import train
 from siete_rl.cli import SignalBoundary, WorkflowTermination
-from siete_rl.launcher import VLLMEndpoints
+from siete_rl.launcher import RunEndpoints
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,16 +19,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-host", required=True)
     parser.add_argument("--server-port", type=int, required=True)
     parser.add_argument("--group-port", type=int, required=True)
-    parser.add_argument("--trainer-gpu", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    endpoints = VLLMEndpoints(
+    endpoints = RunEndpoints(
         host=args.server_host,
         server_port=args.server_port,
         group_port=args.group_port,
+        ddp_port=int(os.environ["MASTER_PORT"]),
     )
     try:
         with SignalBoundary():
@@ -35,7 +36,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.config,
                 run_id=args.run_id,
                 vllm_endpoints=endpoints,
-                trainer_gpu=args.trainer_gpu,
             )
     except train.TrainingInterrupted as exc:
         return 128 + exc.signum

@@ -82,7 +82,11 @@ class WandbRunManager:
         self.config = config
         self.recorder = recorder
         self._run: Any | None = None
-        self._enabled = config.wandb.enabled and config.wandb.mode != "disabled"
+        self._enabled = (
+            recorder.writer
+            and config.wandb.enabled
+            and config.wandb.mode != "disabled"
+        )
 
     @property
     def active(self) -> bool:
@@ -161,11 +165,12 @@ class RunRecorder:
         code_dirty: bool = True,
         model_revision: str | None = None,
         workspace_prepared: bool = False,
+        writer: bool = True,
     ) -> None:
         self.config = config
+        self._writer = writer
         self.run_id = run_id or config.output.run_id or generate_run_id()
         self.output_dir = (Path(config.output.output_root) / self.run_id).resolve()
-        self.output_dir.parent.mkdir(parents=True, exist_ok=True)
         workspace_marker = self.output_dir / ".swe-agent-supervisor-workspace"
         if workspace_prepared:
             try:
@@ -178,7 +183,8 @@ class RunRecorder:
                 raise ValueError(
                     f"supervisor workspace belongs to {marker_run_id!r}, not {self.run_id!r}"
                 )
-        else:
+        elif self.writer:
+            self.output_dir.parent.mkdir(parents=True, exist_ok=True)
             self.output_dir.mkdir(exist_ok=False)
         self.rollouts_root = self.output_dir / "rollouts"
         self.metrics_path = self.output_dir / "metrics.jsonl"
@@ -297,19 +303,26 @@ class RunRecorder:
                 "vllm_endpoints": None,
             },
         }
-        _atomic_write_yaml(
-            self.output_dir / "config.yaml", config.model_dump(mode="json")
-        )
-        _atomic_write_json(self.output_dir / "run.json", self.run)
-        _atomic_write_json(self.cleanup_path, self.cleanup_details)
-        self.metrics_path.touch(exist_ok=False)
-        self.log_path.touch(exist_ok=False)
+        if self.writer:
+            _atomic_write_yaml(
+                self.output_dir / "config.yaml", config.model_dump(mode="json")
+            )
+            _atomic_write_json(self.output_dir / "run.json", self.run)
+            _atomic_write_json(self.cleanup_path, self.cleanup_details)
+            self.metrics_path.touch(exist_ok=False)
+            self.log_path.touch(exist_ok=False)
+
+    @property
+    def writer(self) -> bool:
+        return self._writer
 
     @property
     def native_policy_path_reached(self) -> bool:
         return self._native_policy_path_reached
 
     def log(self, message: str) -> None:
+        if not self.writer:
+            return
         line = f"{_utc_now()} {message.rstrip()}\n"
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(line)
@@ -339,11 +352,13 @@ class RunRecorder:
         batch_index = 0 if self.batch is None else self.batch["batch_index"] + 1
         self._batch_dir = self.rollouts_root / f"batch-{batch_index:04d}"
         self._group_dir = self._batch_dir / "group-0000"
-        self._group_dir.mkdir(parents=True, exist_ok=False)
+        if self.writer:
+            self._group_dir.mkdir(parents=True, exist_ok=False)
         rollout_dirs = []
         for index in range(rollout_count):
             path = self._group_dir / f"{index:04d}"
-            path.mkdir(exist_ok=False)
+            if self.writer:
+                path.mkdir(exist_ok=False)
             rollout_dirs.append(path)
         self.batch = {
             "batch_index": batch_index,
@@ -396,6 +411,8 @@ class RunRecorder:
         verification: Verification | None,
     ) -> None:
         rollout_dir = self._rollout_dir(index)
+        if not self.writer:
+            return
         _atomic_write_json(rollout_dir / "messages.json", messages)
         if trajectory is not None:
             _atomic_write_json(
@@ -562,7 +579,8 @@ class RunRecorder:
         }
         for target, source in STEP_METRIC_KEYS.items():
             row[target] = _numeric(logs.get(source))
-        _append_json_line(self.metrics_path, row)
+        if self.writer:
+            _append_json_line(self.metrics_path, row)
         self._last_recorded_step = step
         self.flush_run()
         return True
@@ -627,6 +645,8 @@ class RunRecorder:
         self.flush_run()
 
     def refresh_checkpoints(self) -> list[str]:
+        if not self.writer:
+            return list(self.run["artifacts"]["checkpoints"])
         checkpoints = sorted(
             (
                 path.name
@@ -790,9 +810,13 @@ class RunRecorder:
         self.flush_run()
 
     def flush_run(self) -> None:
+        if not self.writer:
+            return
         _atomic_write_json(self.output_dir / "run.json", self.run)
 
     def _write_cleanup(self) -> None:
+        if not self.writer:
+            return
         _atomic_write_json(self.cleanup_path, self.cleanup_details)
 
     def _finish_time(self) -> None:
@@ -823,11 +847,15 @@ class RunRecorder:
     def _write_batch(self) -> None:
         if self._batch_dir is None or self.batch is None:
             raise RuntimeError("batch has not been allocated")
+        if not self.writer:
+            return
         _atomic_write_json(self._batch_dir / "batch.json", self.batch)
 
     def _write_group(self) -> None:
         if self._group_dir is None or self.group is None:
             raise RuntimeError("group has not been allocated")
+        if not self.writer:
+            return
         _atomic_write_json(self._group_dir / "group.json", self.group)
 
 

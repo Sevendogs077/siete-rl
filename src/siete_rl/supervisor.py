@@ -112,7 +112,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
                     resolved_config_path,
                     run_id=run_id,
                     endpoints=endpoints,
-                    trainer_gpu=trainer_gpu,
+                    trainer_gpus=trainer_gpu,
                 )
                 state["worker"] = {"pid": worker.pid, "state": "running"}
                 _write_json(state_path, state)
@@ -169,10 +169,19 @@ def _start_worker(
     *,
     run_id: str,
     endpoints: Any,
-    trainer_gpu: str,
+    trainer_gpus: str,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
+        "-m",
+        "accelerate.commands.launch",
+        "--num_processes",
+        "2",
+        "--multi_gpu",
+        "--num_machines",
+        "1",
+        "--main_process_port",
+        str(endpoints.ddp_port),
         "-m",
         "siete_rl.worker",
         "--config",
@@ -185,11 +194,10 @@ def _start_worker(
         str(endpoints.server_port),
         "--group-port",
         str(endpoints.group_port),
-        "--trainer-gpu",
-        trainer_gpu,
     ]
     env = dict(os.environ)
     env["SWE_AGENT_RUN_ID"] = run_id
+    env["CUDA_VISIBLE_DEVICES"] = trainer_gpus
     # TRL 的 VLLMClient 在 trainer 构造阶段以 requests.get 探测本机 server；
     # 该实现不设 timeout，必须确保 loopback 不会被 HTTP(S)_PROXY 截获。
     allow_loopback_without_proxy(env)

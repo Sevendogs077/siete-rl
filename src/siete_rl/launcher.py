@@ -36,20 +36,21 @@ class LauncherError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class VLLMEndpoints:
-    """一个 run 独占的 vLLM HTTP 与权重同步端点。"""
+class RunEndpoints:
+    """一个 run 独占的 HTTP、权重同步与 DDP 端点。"""
 
     host: str
     server_port: int
     group_port: int
+    ddp_port: int
 
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.server_port}"
 
 
-def allocate_vllm_endpoints(config: ProjectConfig) -> VLLMEndpoints:
-    """为单个 run 选择两个不同的本地 TCP 端口。
+def allocate_vllm_endpoints(config: ProjectConfig) -> RunEndpoints:
+    """为单个 run 选择三个不同的本地 TCP 端口。
 
     HTTP 服务端口和 TRL 的 NCCL 权重同步端口都不能跨 run 复用。端口由
     OS 在 loopback 上挑选；若外部进程在释放到 bind 的窗口抢占端口，后续
@@ -63,7 +64,10 @@ def allocate_vllm_endpoints(config: ProjectConfig) -> VLLMEndpoints:
         raise LauncherError("vllm.server_base_url must be an http URL with a hostname")
     server_port = _reserve_ephemeral_port(url.hostname)
     group_port = _reserve_ephemeral_port(url.hostname, excluded={server_port})
-    return VLLMEndpoints(host=url.hostname, server_port=server_port, group_port=group_port)
+    ddp_port = _reserve_ephemeral_port(
+        url.hostname, excluded={server_port, group_port}
+    )
+    return RunEndpoints(url.hostname, server_port, group_port, ddp_port)
 
 
 def _reserve_ephemeral_port(host: str, *, excluded: set[int] | None = None) -> int:
@@ -77,21 +81,6 @@ def _reserve_ephemeral_port(host: str, *, excluded: set[int] | None = None) -> i
     raise LauncherError("could not allocate distinct local vLLM ports")
 
 
-def split_visible_gpus(config: ProjectConfig) -> str | None:
-    """server 模式把多卡 CUDA_VISIBLE_DEVICES 拆成 server/trainer 两张卡。
-
-    当前进程的 CUDA_VISIBLE_DEVICES 改写为 trainer 卡（供后续单卡校验），
-    返回 server 卡索引；非 server 模式返回 None，维持调用方环境。
-    """
-
-    topology = resolve_gpu_topology(config)
-    if topology is None:
-        return None
-    server_gpu, trainer_gpu = topology
-    os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu
-    return server_gpu
-
-
 def resolve_gpu_topology(
     config: ProjectConfig, visible: str | None = None
 ) -> tuple[str, str] | None:
@@ -101,16 +90,15 @@ def resolve_gpu_topology(
         return None
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "") if visible is None else visible
     devices = [value.strip() for value in visible.split(",") if value.strip()]
-    if len(devices) < 2:
+    if len(devices) != 4:
         raise LauncherError(
-            "vllm server mode requires CUDA_VISIBLE_DEVICES to list at least "
-            f"two GPUs (server, trainer); got {visible!r}"
+            "vllm server mode requires CUDA_VISIBLE_DEVICES to list exactly four GPUs; "
+            f"got {visible!r}"
         )
-    server_gpu, trainer_gpu = devices[0], devices[1]
-    return server_gpu, trainer_gpu
+    return ",".join(devices[:2]), ",".join(devices[2:])
 
 
-def build_server_command(config: ProjectConfig, endpoints: VLLMEndpoints | None = None) -> list[str]:
+def build_server_command(config: ProjectConfig, endpoints: RunEndpoints | None = None) -> list[str]:
     """由配置推导 `trl vllm-serve` 参数（对齐原 grpo.sh 的参数表）。"""
 
     if config.vllm.mode != "server" or config.vllm.server_base_url is None:

@@ -43,6 +43,28 @@ class TrainingInterrupted(BaseException):
         self.report = report
 
 
+def _gather_rollout_records(
+    local_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        gathered = [local_records]
+        rank = 0
+    else:
+        gathered = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, local_records)
+        rank = dist.get_rank()
+    if rank != 0:
+        return []
+    return [
+        {**record, "global_slot": global_slot}
+        for global_slot, record in enumerate(
+            record for rank_records in gathered for record in rank_records
+        )
+    ]
+
+
 REQUIRED_DOMAIN_MODULES = (
     "models.py",
     "swegym.py",
@@ -424,7 +446,6 @@ def run_worker(
     *,
     run_id: str,
     vllm_endpoints: Any,
-    trainer_gpu: str,
 ) -> dict[str, Any]:
     """在 supervisor 创建的独立进程中执行真实 GRPO。"""
 
@@ -440,8 +461,7 @@ def run_worker(
 
     os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu
-    physical_device = _require_single_visible_gpu()
+    physical_device = _require_trainer_visible_gpus()
     report = _run_once(
         config=config,
         project_root=project_root,
@@ -468,13 +488,14 @@ def _run_once(
 ) -> dict[str, Any]:
     """创建并终结唯一 output_dir；所有项目 JSON 只由本函数驱动。"""
 
-    from siete_rl.docker import DockerSandbox, SubprocessDockerClient, sweep_run_containers
+    from siete_rl.docker import DockerSandbox, SubprocessDockerClient
     from siete_rl.environment import SWEEnvironment
     from siete_rl.recording import RunRecorder, WandbRunManager
     from siete_rl.rewards import binary_reward
     from siete_rl.swegym import build_training_dataset, load_task_context
     from siete_rl.verifier import SWEGymVerifier
 
+    writer = int(os.environ.get("RANK", "0")) == 0
     commit, dirty = _code_provenance(project_root)
     recorder = RunRecorder(
         config=config,
@@ -484,6 +505,7 @@ def _run_once(
         code_dirty=dirty,
         model_revision=_model_revision(Path(config.model.model_path)),
         workspace_prepared=workspace_prepared,
+        writer=writer,
     )
     recorder.log(f"run started seed={seed} device={physical_device}")
     if vllm_endpoints is not None:
@@ -522,9 +544,6 @@ def _run_once(
                 "environment reset executor ready: "
                 f"workers={config.generation.reset_parallel_workers}"
             )
-        # atexit 兜底：即使 finally 被 KeyboardInterrupt 截断，孤儿容器也会在进程退出时被清扫
-        atexit.register(_sweep_orphans_at_exit, docker_client, recorder.run_id)
-
         def sandbox_factory(sample_arg, episode_id: str, scope: str):
             return DockerSandbox(
                 client=docker_client,
@@ -575,6 +594,10 @@ def _run_once(
             processing_class=tokenizer,
             vllm_endpoints=vllm_endpoints,
         )
+        if bool(trainer.accelerator.is_main_process) != writer:
+            raise RuntimeError(
+                "RANK ownership disagrees with accelerator.is_main_process"
+            )
         vllm_client = _detach_vllm_client_atexit(trainer, recorder)
         trainer.add_callback(_run_metrics_callback(recorder))
         if wandb_manager.active:
@@ -598,26 +621,31 @@ def _run_once(
             raise RuntimeError(
                 f"expected trainer.state.global_step={config.grpo.max_steps}, got {global_step}"
             )
-        recorder.complete_batch(global_step)
+        if writer:
+            recorder.complete_batch(global_step)
         post_step_adapter = _adapter_state(trainer.model)
         lora_changed = _state_digest(pre_step_adapter) != _state_digest(post_step_adapter)
         recorder.set_model_updated(lora_changed)
 
         stage = "save_model"
-        trainer.save_model(recorder.output_dir.as_posix())
-        _require_final_model_files(recorder.output_dir)
-        if not _verify_saved_adapter(recorder.output_dir, post_step_adapter):
-            raise RuntimeError("saved adapter could not be reloaded with identical tensors")
-        checkpoints = recorder.refresh_checkpoints()
-        if not checkpoints or any(
-            re.fullmatch(r"checkpoint-\d+", name) is None for name in checkpoints
-        ):
-            raise RuntimeError(f"expected checkpoint-<step> directories, got {checkpoints}")
-        recorder.set_final_model("adapter_model.safetensors")
-        recorder.log(
-            "GRPO optimizer step completed; post-step policy is "
-            + ("numerically changed" if lora_changed else "numerically unchanged")
-        )
+        trainer.accelerator.wait_for_everyone()
+        if writer:
+            trainer.save_model(recorder.output_dir.as_posix())
+        trainer.accelerator.wait_for_everyone()
+        if writer:
+            _require_final_model_files(recorder.output_dir)
+            if not _verify_saved_adapter(recorder.output_dir, post_step_adapter):
+                raise RuntimeError("saved adapter could not be reloaded with identical tensors")
+            checkpoints = recorder.refresh_checkpoints()
+            if not checkpoints or any(
+                re.fullmatch(r"checkpoint-\d+", name) is None for name in checkpoints
+            ):
+                raise RuntimeError(f"expected checkpoint-<step> directories, got {checkpoints}")
+            recorder.set_final_model("adapter_model.safetensors")
+            recorder.log(
+                "GRPO optimizer step completed; post-step policy is "
+                + ("numerically changed" if lora_changed else "numerically unchanged")
+            )
     except BaseException as exc:
         interrupted = isinstance(exc, KeyboardInterrupt) or type(exc).__name__ == "WorkflowTermination"
         if interrupted:
@@ -659,13 +687,6 @@ def _run_once(
             "vllm_communicator.close",
             lambda: _close_vllm_communicator(vllm_client, recorder),
         )
-        if docker_client is not None:
-            swept = _guarded(
-                "sweep_run_containers",
-                lambda: sweep_run_containers(docker_client, recorder.run_id),
-            )
-            if swept:
-                recorder.log(f"swept orphan containers: {', '.join(swept)}")
         trainer_to_release, trainer = trainer, None
         trainer_refs = _trainer_weakrefs(trainer_to_release)
         trainer_errors, trainer_handles = _guarded(
@@ -728,19 +749,20 @@ def _run_once(
     else:
         recorder.complete()
 
-    try:
-        from siete_rl.reporting import render_training_summary
+    if writer:
+        try:
+            from siete_rl.reporting import render_training_summary
 
-        plot = render_training_summary(recorder.output_dir, recorder.run)
-        if plot is None:
-            recorder.set_plot_skipped("not_generated_no_steps")
-        else:
-            recorder.set_plot(plot.name)
-    except BaseException as plot_error:
-        recorder.log(
-            f"summary plot failed: {type(plot_error).__name__}: {plot_error}"
-        )
-        recorder.set_plot_error(plot_error)
+            plot = render_training_summary(recorder.output_dir, recorder.run)
+            if plot is None:
+                recorder.set_plot_skipped("not_generated_no_steps")
+            else:
+                recorder.set_plot(plot.name)
+        except BaseException as plot_error:
+            recorder.log(
+                f"summary plot failed: {type(plot_error).__name__}: {plot_error}"
+            )
+            recorder.set_plot_error(plot_error)
 
     reward = recorder.run["results"]["reward"]
     recorder.log(
@@ -773,18 +795,14 @@ def _recording_reward(
     ) -> list[float | None]:
         if not (len(prompts) == len(completions) == len(environments)) or not completions:
             raise RecordingRuntimeError("reward requires aligned non-empty rollouts")
-        rewards: list[float | None] = []
+        group_task_id = _callback_group_task_id(
+            kwargs.get("task_id"), len(completions)
+        )
         try:
-            group_task_id = _callback_group_task_id(
-                kwargs.get("task_id"), len(completions)
-            )
             messages = [
                 _join_messages(prompt, completion)
                 for prompt, completion in zip(prompts, completions, strict=True)
             ]
-            recorder.begin_group(
-                prompts[0], len(completions), task_id=group_task_id
-            )
             rewards = reward_adapter(
                 completions=completions,
                 environments=environments,
@@ -799,45 +817,108 @@ def _recording_reward(
                 raise RecordingRuntimeError(
                     "reward adapter must finalize every rollout with a settlement"
                 )
-            trajectory_task_ids = {
-                environment.trajectory.task_id
-                for environment in environments
-                if environment.trajectory is not None
+            local_task_ids = {
+                environment.trajectory.task_id for environment in environments
             }
-            if trajectory_task_ids and trajectory_task_ids != {group_task_id}:
+            if local_task_ids != {group_task_id}:
+                raise RecordingRuntimeError(
+                    "group mixes tasks: "
+                    f"callback={group_task_id!r}, trajectories={sorted(local_task_ids)}"
+                )
+            local_records = []
+            for local_slot, (prompt, rollout_messages, environment, value) in enumerate(
+                zip(prompts, messages, environments, rewards, strict=True)
+            ):
+                local_records.append(
+                    {
+                        "local_slot": local_slot,
+                        "prompt": prompt,
+                        "messages": rollout_messages,
+                        "task_id": group_task_id,
+                        "episode_id": environment.episode_id,
+                        "trajectory": _serialize_record_model(environment.trajectory),
+                        "patch": environment.frozen_patch,
+                        "verification": _serialize_record_model(environment.verification),
+                        "settlement": _serialize_record_model(
+                            environment.trajectory.settlement
+                        ),
+                        "reward": value,
+                        "cleanup_events": environment._drain_events(),
+                        "native_policy_path_reached": _native_policy_path_reached(
+                            [environment]
+                        ),
+                    }
+                )
+            for record in local_records:
+                recorder.merge_cleanup_events(record["cleanup_events"])
+            global_records = _gather_rollout_records(local_records)
+            if not global_records:
+                return rewards
+            for record in global_records[len(local_records):]:
+                recorder.merge_cleanup_events(record["cleanup_events"])
+            trajectory_task_ids = {
+                record["trajectory"]["task_id"]
+                if isinstance(record["trajectory"], dict)
+                else record["trajectory"].task_id
+                for record in global_records
+            }
+            if trajectory_task_ids != {group_task_id}:
                 raise RecordingRuntimeError(
                     "group mixes tasks: "
                     f"callback={group_task_id!r}, trajectories={sorted(trajectory_task_ids)}"
                 )
-            for index, (rollout_messages, environment) in enumerate(
-                zip(messages, environments, strict=True)
-            ):
+            recorder.begin_group(
+                global_records[0]["prompt"],
+                len(global_records),
+                task_id=group_task_id,
+            )
+            from siete_rl.models import Settlement, Trajectory, Verification
+
+            for record in global_records:
                 recorder.write_rollout(
-                    index,
-                    messages=rollout_messages,
-                    trajectory=environment.trajectory,
-                    patch=environment.frozen_patch,
-                    verification=environment.verification,
+                    record["global_slot"],
+                    messages=record["messages"],
+                    trajectory=_restore_record_model(record["trajectory"], Trajectory),
+                    patch=record["patch"],
+                    verification=_restore_record_model(
+                        record["verification"], Verification
+                    ),
                 )
             recorder.complete_group(
-                episode_ids=[environment.episode_id for environment in environments],
-                rewards=rewards,
-                verifications=[environment.verification for environment in environments],
+                episode_ids=[record["episode_id"] for record in global_records],
+                rewards=[record["reward"] for record in global_records],
+                verifications=[
+                    _restore_record_model(record["verification"], Verification)
+                    for record in global_records
+                ],
                 settlements=[
-                    environment.trajectory.settlement
-                    for environment in environments
+                    _restore_record_model(record["settlement"], Settlement)
+                    for record in global_records
                 ],
             )
             recorder.observe_native_policy_path(
-                _native_policy_path_reached(environments)
+                any(record["native_policy_path_reached"] for record in global_records)
             )
             return rewards
-        finally:
+        except BaseException:
             for environment in environments:
                 recorder.merge_cleanup_events(environment._drain_events())
+            raise
 
     reward.__name__ = f"{reward_type}_reward"
     return reward
+
+
+def _serialize_record_model(value: Any) -> Any:
+    if value is not None and hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return value
+
+
+def _restore_record_model(value: Any, model: Any) -> Any:
+    if value is None or isinstance(value, model) or not isinstance(value, dict):
+        return value
+    return model.model_validate(value)
 
 
 def _callback_group_task_id(value: object, rollout_count: int) -> str:
@@ -861,30 +942,37 @@ def _join_messages(prompt: object, completion: object) -> list[object]:
     return [*prompt, *completion]
 
 
-def _require_single_visible_gpu() -> int:
+def _require_trainer_visible_gpus() -> int:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    value = visible.strip() if visible is not None else ""
-    if not value.isdecimal() or "," in value:
+    devices = [value.strip() for value in visible.split(",")] if visible else []
+    if len(devices) != 2 or any(not value.isdecimal() for value in devices):
         raise RuntimeNotQualifiedError(
-            "CUDA_VISIBLE_DEVICES must explicitly select exactly one non-negative integer GPU index"
+            "CUDA_VISIBLE_DEVICES must explicitly select exactly two Trainer GPUs"
         )
-    physical_device = int(value)
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(physical_device)
-    return physical_device
+    local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    if local_rank not in (0, 1):
+        raise RuntimeNotQualifiedError("LOCAL_RANK must be 0 or 1")
+    import torch
+
+    torch.cuda.set_device(local_rank)
+    return int(devices[local_rank])
 
 
 def _gpu_baseline(physical_device: int) -> dict[str, int]:
     import torch
     import vllm._C  # noqa: F401
 
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise RuntimeError("CUDA_VISIBLE_DEVICES does not expose exactly one usable CUDA device")
-    if "A100" not in torch.cuda.get_device_name(0):
-        raise RuntimeError(f"visible CUDA device is not an A100: {torch.cuda.get_device_name(0)}")
-    torch.cuda.synchronize()
+    local_rank = int(os.environ["LOCAL_RANK"])
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 2:
+        raise RuntimeError("CUDA_VISIBLE_DEVICES does not expose exactly two usable CUDA devices")
+    if "A100" not in torch.cuda.get_device_name(local_rank):
+        raise RuntimeError(
+            f"local CUDA device is not an A100: {torch.cuda.get_device_name(local_rank)}"
+        )
+    torch.cuda.synchronize(local_rank)
     return {
-        "allocated": int(torch.cuda.memory_allocated(0)),
-        "reserved": int(torch.cuda.memory_reserved(0)),
+        "allocated": int(torch.cuda.memory_allocated(local_rank)),
+        "reserved": int(torch.cuda.memory_reserved(local_rank)),
         "owner_pid": os.getpid(),
         "physical_device": physical_device,
     }
@@ -907,11 +995,12 @@ def _finalize_gpu_diagnostic(
 
         gc.collect()
         if torch.cuda.is_available():
+            local_rank = int(os.environ["LOCAL_RANK"])
             if not skip_cache_sync:
                 torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            allocated_after = int(torch.cuda.memory_allocated(0))
-            reserved_after = int(torch.cuda.memory_reserved(0))
+                torch.cuda.synchronize(local_rank)
+            allocated_after = int(torch.cuda.memory_allocated(local_rank))
+            reserved_after = int(torch.cuda.memory_reserved(local_rank))
     except BaseException as exc:
         note = f"{type(exc).__name__}: {exc}"
     baseline_allocated = baseline["allocated"] if baseline else None
@@ -1131,24 +1220,6 @@ def _release_trainer(
     gc.collect()
     _log_vllm_model_residual(vllm_model_ref, recorder)
     return errors, handles
-
-
-def _sweep_orphans_at_exit(docker_client: Any, run_id: str) -> None:
-    """atexit 兜底清扫：finally 被 KeyboardInterrupt 截断时，孤儿容器仍有最后一次清理机会。
-
-    幂等（sweep 对空列表是 no-op）；任何失败都只打印，不干扰进程退出。
-    """
-
-    import sys
-
-    from siete_rl.docker import sweep_run_containers
-
-    try:
-        swept = sweep_run_containers(docker_client, run_id)
-        if swept:
-            print(f"atexit: swept orphan containers: {', '.join(swept)}", file=sys.stderr)
-    except BaseException as exc:  # noqa: BLE001 - atexit 必须静默
-        print(f"atexit: orphan sweep failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def _cleanup_operation(
@@ -1449,7 +1520,7 @@ def _log_live_trainer_cuda_references(
     del model
     recorder.log(
         f"post-teardown live_refs={live} cuda_parameter_bytes={cuda_parameter_bytes} "
-        f"allocated={torch.cuda.memory_allocated(0)} reserved={torch.cuda.memory_reserved(0)}"
+        f"allocated={torch.cuda.memory_allocated()} reserved={torch.cuda.memory_reserved()}"
     )
 
 

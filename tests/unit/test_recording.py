@@ -94,6 +94,46 @@ def test_supervisor_workspace_preserves_vllm_log_and_records_runtime_endpoints(t
     }
 
 
+def test_non_writer_recorder_updates_memory_without_writing_files(tmp_path: Path) -> None:
+    config = configured_for(tmp_path, run_id="shared-run")
+    output_dir = tmp_path / "outputs/shared-run"
+    output_dir.mkdir(parents=True)
+    marker = output_dir / ".swe-agent-supervisor-workspace"
+    marker.write_text("shared-run", encoding="utf-8")
+    before = {path.relative_to(output_dir): path.read_bytes() for path in output_dir.rglob("*") if path.is_file()}
+
+    recorder = RunRecorder(
+        config=config, seed=7, workspace_prepared=True, writer=False
+    )
+    recorder.log("rank one")
+    recorder.begin_group("prompt", 1, task_id="getmoto__moto-7023")
+    recorder.write_rollout(
+        0,
+        messages=[],
+        trajectory=trajectory(),
+        patch=None,
+        verification=verification(),
+    )
+    recorder.complete_group(
+        episode_ids=["e0"],
+        rewards=[1.0],
+        verifications=[verification()],
+        settlements=[Settlement(status="resolved")],
+    )
+    recorder.record_metrics(step=1, logs={"loss": 0.1})
+    recorder.merge_cleanup_events([])
+    recorder.set_processes([])
+    recorder.set_runtime_handles([])
+    recorder.set_gpu_diagnostics([])
+    recorder.finalize_cleanup()
+    recorder.complete()
+
+    after = {path.relative_to(output_dir): path.read_bytes() for path in output_dir.rglob("*") if path.is_file()}
+    assert recorder.writer is False
+    assert recorder.run["status"] == "completed"
+    assert after == before
+
+
 def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     recorder = RunRecorder(config=configured_for(tmp_path), seed=7, run_id="run-a")
     prompt = [{"role": "user", "content": "repair it"}]

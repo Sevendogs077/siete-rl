@@ -5,7 +5,7 @@ import signal
 from pathlib import Path
 
 from siete_rl.config import load_config
-from siete_rl.launcher import VLLMEndpoints
+from siete_rl.launcher import RunEndpoints
 from siete_rl import supervisor
 
 
@@ -25,8 +25,8 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
         "preflight",
         lambda loaded, root: {"missing_domain_modules": [], "status": "preflight_passed"},
     )
-    monkeypatch.setattr(supervisor, "resolve_gpu_topology", lambda loaded: ("0", "1"))
-    endpoints = VLLMEndpoints("127.0.0.1", 18421, 18422)
+    monkeypatch.setattr(supervisor, "resolve_gpu_topology", lambda loaded: ("0,1", "2,3"))
+    endpoints = RunEndpoints("127.0.0.1", 18421, 18422, 18423)
     monkeypatch.setattr(supervisor, "allocate_vllm_endpoints", lambda loaded: endpoints)
     monkeypatch.setattr(supervisor, "generate_run_id", lambda: "run-supervised")
 
@@ -78,9 +78,16 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
     command = calls["worker_command"]
     assert command[command.index("--server-port") + 1] == "18421"
     assert command[command.index("--group-port") + 1] == "18422"
-    assert command[command.index("--trainer-gpu") + 1] == "1"
+    assert command[:4] == [
+        command[0], "-m", "accelerate.commands.launch", "--num_processes"
+    ]
+    assert command[command.index("--num_processes") + 1] == "2"
+    assert "--multi_gpu" in command
+    assert command[command.index("--main_process_port") + 1] == "18423"
+    assert command[-2:] != ["--trainer-gpu", "2,3"]
     assert calls["worker_kwargs"]["start_new_session"] is True
     worker_env = calls["worker_kwargs"]["env"]
+    assert worker_env["CUDA_VISIBLE_DEVICES"] == "2,3"
     assert "127.0.0.1" in worker_env["NO_PROXY"]
     assert "localhost" in worker_env["no_proxy"]
 
