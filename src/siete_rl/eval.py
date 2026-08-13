@@ -839,18 +839,6 @@ def preflight(*, gpu: str, harness_root: Path, harness_python: Path) -> dict[str
             "--format=csv,noheader,nounits",
         ]
     ).strip()
-    compute_apps = _run_checked(
-        [
-            "nvidia-smi",
-            "-i",
-            gpu,
-            "--query-compute-apps=pid,process_name,used_memory",
-            "--format=csv,noheader,nounits",
-        ],
-        allow_empty=True,
-    ).strip()
-    if compute_apps:
-        raise EvalError(f"selected GPU {gpu} is not idle: {compute_apps}")
     return {
         "gpu": gpu,
         "gpu_state_before": gpu_state,

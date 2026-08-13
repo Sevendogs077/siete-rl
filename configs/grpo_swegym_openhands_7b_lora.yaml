@@ -37,7 +37,7 @@ peft:
   alpha: 32
   dropout: 0.0
   bias: none
-  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  target_modules: all-linear
   modules_to_save: null
 chat:
   max_prompt_length: 8192
@@ -62,11 +62,11 @@ grpo:
   extra_reference_rewards: [1.0]
   num_generations: 16
   num_iterations: 1
-  loss_type: grpo
+  loss_type: dr_grpo
   scale_rewards: none
   multi_objective_aggregation: sum_then_normalize
-  epsilon: 0.2
-  epsilon_high: null
+  epsilon: 0.16
+  epsilon_high: 0.24
   delta: null
   beta: 0.0
   importance_sampling_level: token

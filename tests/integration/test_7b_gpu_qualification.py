@@ -55,8 +55,6 @@ def test_openhands_7b_bf16_lora_forward_backward_save_reload(tmp_path: Path) -> 
             dtype=torch.bfloat16,
         ).to("cuda")
 
-        module_names = {name.rsplit(".", 1)[-1] for name, _ in model.named_modules()}
-        assert set(config.peft.target_modules) <= module_names
         peft_model = get_peft_model(
             model,
             build_peft_config(config),

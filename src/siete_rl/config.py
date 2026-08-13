@@ -12,9 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from siete_rl.scoring import DEFAULT_LAYERED_REWARD_CAP
 
 
-LORA_TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
-
-
 class StrictConfig(BaseModel):
     """拒绝未知字段，避免配置拼写错误静默改变训练语义。"""
 
@@ -79,7 +76,7 @@ class PeftConfig(StrictConfig):
     alpha: int = Field(gt=0)
     dropout: float = Field(ge=0.0, le=1.0)
     bias: Literal["none", "all", "lora_only"]
-    target_modules: tuple[str, ...]
+    target_modules: Literal["all-linear"] | tuple[str, ...] = Field(min_length=1)
     modules_to_save: None
 
 
@@ -112,7 +109,7 @@ class GRPOConfigValues(StrictConfig):
     extra_reference_rewards: tuple[float, ...] = ()
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
-    loss_type: Literal["grpo"]
+    loss_type: Literal["grpo", "dr_grpo", "dapo"]
     scale_rewards: Literal["group", "batch", "none"]
     multi_objective_aggregation: Literal["sum_then_normalize", "normalize_then_sum"]
     epsilon: float = Field(ge=0.0)
@@ -196,11 +193,6 @@ class ProjectConfig(StrictConfig):
 
     @model_validator(mode="after")
     def validate_contract(self) -> Self:
-        if self.peft.target_modules != LORA_TARGET_MODULES:
-            raise ValueError(
-                "peft.target_modules must be exactly q_proj,k_proj,v_proj,o_proj"
-            )
-
         quantization = self.quantization
         if self.model.training_mode == "lora":
             if quantization.load_in_4bit or any(

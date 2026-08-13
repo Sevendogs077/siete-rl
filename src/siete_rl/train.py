@@ -118,7 +118,11 @@ def build_peft_config(config: ProjectConfig) -> Any:
         lora_alpha=config.peft.alpha,
         lora_dropout=config.peft.dropout,
         bias=config.peft.bias,
-        target_modules=list(config.peft.target_modules),
+        target_modules=(
+            config.peft.target_modules
+            if isinstance(config.peft.target_modules, str)
+            else list(config.peft.target_modules)
+        ),
         modules_to_save=config.peft.modules_to_save,
     )
 
