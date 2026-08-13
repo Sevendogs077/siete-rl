@@ -2,6 +2,19 @@
 
 Local records for SieteRL training and SWE-bench Verified evaluation, listed newest first under a fixed [evaluation protocol](#evaluation-protocol).
 
+## 2026-08-13 — Reference reward ablation
+
+[![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)
+
+> **Result:** Adding a fixed `1.0` reference reward resolved three more tasks, from 54/500 to 57/500, without materially changing training reward diversity.
+
+| Variant | Mean reward | Non-degenerate groups | SWE-bench Verified | Δ vs. No reference |
+|---|---:|---:|---:|---:|
+| No reference reward | 0.13138 | 31/100 | **54/500 (10.8%)** | — |
+| **Reference reward (`1.0`)** | 0.13143 | 32/100 | **57/500 (11.4%)** | +3 |
+
+**Analysis.** The variants differed only in `extra_reference_rewards`: the reference variant included `[1.0]`, while the ablated variant used `[]`. The reference reward is included in the GRPO group baseline but is not a sampled rollout. The 0.6-point Verified gap from one training seed and one deterministic evaluation rollout is directional rather than statistically conclusive.
+
 ## 2026-08-12 — Credit attribution refinement
 
 [![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 将固定外部 7B 参考与 outputs/_selected/ 中的本地评测绘制为 README 对比图。
-# 本地输入：outputs/_selected/<run>/evals/<eval>/base/{rollout-state.json, official-report.json}
+# 将固定外部 7B 参考与选定的本地发布评测绘制为 README 对比图。
+# 本地输入：outputs/_selected/<run>/evals/<eval>/candidate/{rollout-state.json, official-report.json}
 # 输出：docs/assets/results-chart-{light,dark}.png（透明底，按主题切换）
 set -euo pipefail
 
@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
 SELECTED = Path("outputs/_selected")
+RELEASE_RUN = SELECTED / "20260811T171350Z-086c"
+LOCAL_LABEL = "SieteRL-Agent-7B-v0"
 OUT_TEMPLATE = "docs/assets/results-chart-{theme}.png"
 
 # 固定到原始发布来源；数值是各来源报告的 SWE-bench Verified resolved rate。
@@ -53,25 +55,18 @@ RUN_STEP = 1.12
 GROUP_GAP = 0.0
 
 
-def run_label(run_dir: Path) -> str:
-    """selected run 只展示同次评测中的固定 base policy。"""
-
-    del run_dir
-    return "SieteRL-Agent-7B-Base"
-
-
-def latest_base(run_dir: Path) -> Path | None:
-    """按 metadata 选择最新完成且 outcome 齐全的 base 评测。"""
+def latest_candidate(run_dir: Path) -> Path | None:
+    """按 metadata 选择最新完成且 outcome 齐全的 candidate 评测。"""
 
     evals = run_dir / "evals"
     if not evals.is_dir():
         return None
     best: tuple[str, str, Path] | None = None
     for entry in sorted(evals.iterdir()):
-        base = entry / "base"
+        candidate = entry / "candidate"
         metadata_path = entry / "metadata.json"
-        state = base / "rollout-state.json"
-        report = base / "official-report.json"
+        state = candidate / "rollout-state.json"
+        report = candidate / "official-report.json"
         if not metadata_path.is_file() or not report.is_file() or not state.is_file():
             continue
         try:
@@ -92,40 +87,31 @@ def latest_base(run_dir: Path) -> Path | None:
         except (KeyError, TypeError, json.JSONDecodeError, OSError):
             continue
         if best is None or (finished_at, entry.name) >= (best[0], best[1]):
-            best = (finished_at, entry.name, base)
+            best = (finished_at, entry.name, candidate)
     return best[2] if best else None
 
 
 def local_result(run_dir: Path) -> tuple[str, float, str, int] | None:
-    base = latest_base(run_dir)
-    if base is None:
+    candidate = latest_candidate(run_dir)
+    if candidate is None:
         return None
-    outcomes = json.loads((base / "rollout-state.json").read_text(encoding="utf-8"))[
-        "outcomes"
-    ]
+    outcomes = json.loads(
+        (candidate / "rollout-state.json").read_text(encoding="utf-8")
+    )["outcomes"]
     resolved = json.loads(
-        (base / "official-report.json").read_text(encoding="utf-8")
+        (candidate / "official-report.json").read_text(encoding="utf-8")
     )["resolved_ids"]
     total = len(outcomes)
     if total == 0:
         return None
     count = len(resolved)
-    return run_label(run_dir), 100.0 * count / total, f"{count} / {total}", count
+    return LOCAL_LABEL, 100.0 * count / total, f"{count} / {total}", count
 
 
-local_rows = []
-for run_dir in sorted((p for p in SELECTED.iterdir() if p.is_dir()), key=lambda p: p.name):
-    result = local_result(run_dir)
-    if result is None:
-        print(f"skip {run_dir.name}: no completed base eval")
-        continue
-    local_rows.append(result)
-
-if not local_rows:
-    raise SystemExit("no evaluated runs under outputs/_selected/")
-
-# 同类多 run 时按 resolved 数与名称稳定排序。
-local_rows.sort(key=lambda row: (row[3], row[0]))
+result = local_result(RELEASE_RUN)
+if result is None:
+    raise SystemExit(f"no completed candidate eval under {RELEASE_RUN}")
+local_rows = [result]
 
 
 def render(theme: str) -> None:

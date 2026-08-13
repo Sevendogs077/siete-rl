@@ -41,7 +41,7 @@ peft:
   modules_to_save: null
 chat:
   max_prompt_length: 8192
-  max_observation_chars: 30000
+  max_observation_chars: 10000
 generation:
   max_completion_length: 24576
   context_safety_margin: 0
@@ -81,7 +81,7 @@ grpo:
   generation_batch_size: 16
   steps_per_generation: null
   max_steps: 100
-  learning_rate: 1.0e-06
+  learning_rate: 1.0e-05
   weight_decay: 0.0
   max_grad_norm: 1.0
   gradient_checkpointing: true
@@ -112,7 +112,7 @@ vllm:
 runtime:
   runtime_qualified: true
   process_count: 1
-  base_seed: 20260714
+  base_seed: 42
 output:
   output_root: outputs
   run_id: null
