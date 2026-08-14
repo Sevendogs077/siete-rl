@@ -87,8 +87,6 @@ def domain():
         environment_id=f"swegym:{TASK_ID}",
         task_id=TASK_ID,
         image_name="xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest",
-        expected_image_id="sha256:" + "1" * 64,
-        expected_registry_digest="sha256:" + "2" * 64,
         workdir="/testbed",
         cpus=4,
         memory="16g",
@@ -101,7 +99,7 @@ def domain():
 
 def image_inspect(environment, **updates: object) -> CommandResult:
     payload = {
-        "Id": environment.expected_image_id,
+        "Id": "sha256:" + "1" * 64,
         "Os": "linux",
         "Architecture": "amd64",
         "RepoDigests": [],
@@ -245,10 +243,10 @@ def test_ambiguous_create_recovers_exact_id_then_cleans(domain) -> None:
     assert client.calls[-1][0] == ["docker", "rm", "-f", CONTAINER_ID]
 
 
-def test_image_identity_mismatch_fails_before_create(domain) -> None:
+def test_image_platform_mismatch_fails_before_create(domain) -> None:
     task, environment = domain
-    client = FakeClient([image_inspect(environment, Id="sha256:" + "0" * 64)])
-    with pytest.raises(ContainerCreateError, match="image ID"):
+    client = FakeClient([image_inspect(environment, Architecture="arm64")])
+    with pytest.raises(ContainerCreateError, match="linux/amd64"):
         inspect_image(client, environment)
     assert len(client.calls) == 1
 

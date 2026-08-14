@@ -9,7 +9,8 @@ import signal
 import sys
 from pathlib import Path
 
-from siete_rl import train
+from siete_rl import prepare, train
+from siete_rl.config import load_config
 
 
 class WorkflowTermination(BaseException):
@@ -55,11 +56,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     grpo = subparsers.add_parser("grpo", help="运行固定 SWE-Gym GRPO 作业")
     grpo.add_argument("--config", type=Path, required=True)
+    prepare_parser = subparsers.add_parser("prepare", help="准备 Stage 1/2 训练课程")
+    prepare_parser.add_argument("--config", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "prepare":
+        config, project_root, _ = load_config(args.config)
+        output = prepare.prepare_training(project_root, config.runtime.base_seed)
+        print(output)
+        return 0
     try:
         with SignalBoundary():
             report = train.run(args.config)

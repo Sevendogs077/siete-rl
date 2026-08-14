@@ -41,8 +41,6 @@ class Environment(StrictModel):
     environment_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
     image_name: str = Field(min_length=1)
-    expected_image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    expected_registry_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     workdir: str = Field(min_length=1)
     cpus: float = Field(gt=0)
     memory: str = Field(min_length=2)

@@ -32,8 +32,6 @@ def environment() -> Environment:
         environment_id="swegym:getmoto__moto-7023",
         task_id="getmoto__moto-7023",
         image_name="image",
-        expected_image_id="sha256:" + "1" * 64,
-        expected_registry_digest="sha256:" + "2" * 64,
         workdir="/testbed",
         cpus=4,
         memory="16g",

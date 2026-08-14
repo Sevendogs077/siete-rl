@@ -377,23 +377,11 @@ def inspect_image(client: DockerClient, environment: Environment) -> dict[str, o
     if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
         raise ContainerCreateError("docker image inspect returned an invalid structure")
     payload = values[0]
-    if payload.get("Id") != environment.expected_image_id:
-        raise ContainerCreateError("local image ID does not match qualification evidence")
     if payload.get("Os") != "linux" or payload.get("Architecture") != "amd64":
-        raise ContainerCreateError("qualified image platform must be linux/amd64")
-    repo_digests = payload.get("RepoDigests") or []
-    if not isinstance(repo_digests, list) or not all(isinstance(value, str) for value in repo_digests):
-        raise ContainerCreateError("docker image inspect returned invalid RepoDigests")
-    registry_digest_observed = any(
-        value.rpartition("@")[2] == environment.expected_registry_digest for value in repo_digests
-    )
-    if repo_digests and not registry_digest_observed:
-        raise ContainerCreateError("local RepoDigests do not match qualification evidence")
+        raise ContainerCreateError("local image platform must be linux/amd64")
     return {
         "image": environment.image_name,
         "image_id": payload.get("Id"),
-        "repo_digests": repo_digests,
-        "registry_digest_observed": registry_digest_observed,
         "repo_tags": payload.get("RepoTags", []),
         "size_bytes": payload.get("Size"),
         "os": payload.get("Os"),

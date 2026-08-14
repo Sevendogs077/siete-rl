@@ -63,17 +63,33 @@ def test_offline_transform_requires_exactly_one_install_line(script: str) -> Non
         transform_eval_script_offline(script)
 
 
-@pytest.mark.parametrize(
-    "script",
-    [
-        "python -m pip install -r test-requirements.txt; python -m pip install -e .; hash -r\npytest -q\n",
-        "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r;\npytest -q\n",
-        "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r\npytest -q\n",
-    ],
-)
-def test_offline_transform_replaces_mypy_pip_install_line(script: str) -> None:
+REAL_INSTALL_BLOCKS = [
+    "python -m pip install 'numpy<2'; python -m pip install -ve . --no-build-isolation -Ceditable-verbose=true; pip uninstall pytest-qt -y;",
+    "make init",
+    "python -m pip install -ve . --no-build-isolation -Ceditable-verbose=true; pip uninstall pytest-qt -y;",
+    'python -m pip install --upgrade pip wheel GitPython; python -m pip install "cython<3.0.0" && python -m pip install --no-build-isolation pyyaml==5.4.1; python -m pip install git+https://github.com/iterative/mock-ssh-server.git || true; python -m pip install -r tests/requirements.txt || true; python -m pip install -r test-requirements.txt || true; python -m pip install -e ".[tests,dev,all_remotes,all,testing]"; python -m pip install "numpy<=1.20"; python -m pip install "pytest<8";',
+    "sed -i '/^git+https:\\/\\/github.com\\/Project-MONAI\\//d' requirements-dev.txt; python -m pip install types-pkg-resources==0.1.3 pytest; pip install -r requirements-dev.txt;python setup.py develop;",
+    "python -m pip install -r conans/requirements.txt; python -m pip install -r conans/requirements_server.txt; python -m pip install -r conans/requirements_dev.txt ",
+    "python -m pip install --no-deps -e .",
+    "sed -i 's|isort@git+git://github.com/timothycrosley/isort|isort@git+https://github.com/timothycrosley/isort|g' requirements/dev.txt; { tail -n1 requirements/requirements.txt | grep -q \".\" && echo \"\"; } >> requirements/requirements.txt; echo \"pip==24.0\" >> requirements/requirements.txt;pip install \"pip==24.0\"; pip install -r requirements/dev.txt; pip install -e .;",
+    "python -m pip install -e .;",
+    "pip install -r requirements/dev.txt; pip install -e .;",
+    "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r",
+    'export PATH="$HOME/.local/bin:$PATH"; pdm add pre-commit; make install;',
+    "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r;",
+    "echo 'cython<3' > /tmp/constraint.txt; export PIP_CONSTRAINT=/tmp/constraint.txt; python -m pip install -r conans/requirements.txt; python -m pip install -r conans/requirements_server.txt; python -m pip install -r conans/requirements_dev.txt ",
+    "python -m pip install -r test-requirements.txt; python -m pip install -e .; hash -r",
+    "python -m pip install -e .; python -m pip install bokeh_sampledata;",
+]
+
+
+@pytest.mark.parametrize("install_block", REAL_INSTALL_BLOCKS)
+def test_offline_transform_replaces_every_real_install_block(
+    install_block: str,
+) -> None:
+    test_command = "pytest -rA tests/test_real.py\n"
+    script = f"cd /testbed\n{install_block}\n{test_command}"
     offline = transform_eval_script_offline(script)
     assert "PIP_NO_INDEX=1" in offline
-    assert "pip install -r test-requirements.txt" not in offline
-    # OFFLINE_REPLACEMENT 注释里提及 `make init`；这里断言不存在独立的 make init 行。
-    assert all(line != "make init" for line in offline.splitlines())
+    assert install_block not in offline
+    assert offline.endswith(test_command)

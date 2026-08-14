@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -33,12 +34,33 @@ COMPARE_FIELDS = (
     "PASS_TO_PASS",
 )
 
-OFFLINE_REPLACEMENT = """# Offline replacement for `make init`.
-# 镜像中已经预装运行和测试依赖；这里只重新绑定当前 /testbed 源码。
-PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \\
+OFFLINE_REPLACEMENT = """PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \\
   python -m pip install --no-build-isolation --no-deps -e .
 python -m pip check
 """
+
+_INSTALL_BLOCKS = (
+    "python -m pip install 'numpy<2'; python -m pip install -ve . --no-build-isolation -Ceditable-verbose=true; pip uninstall pytest-qt -y;",
+    "make init",
+    "python -m pip install -ve . --no-build-isolation -Ceditable-verbose=true; pip uninstall pytest-qt -y;",
+    'python -m pip install --upgrade pip wheel GitPython; python -m pip install "cython<3.0.0" && python -m pip install --no-build-isolation pyyaml==5.4.1; python -m pip install git+https://github.com/iterative/mock-ssh-server.git || true; python -m pip install -r tests/requirements.txt || true; python -m pip install -r test-requirements.txt || true; python -m pip install -e ".[tests,dev,all_remotes,all,testing]"; python -m pip install "numpy<=1.20"; python -m pip install "pytest<8";',
+    "sed -i '/^git+https:\\/\\/github.com\\/Project-MONAI\\//d' requirements-dev.txt; python -m pip install types-pkg-resources==0.1.3 pytest; pip install -r requirements-dev.txt;python setup.py develop;",
+    "python -m pip install -r conans/requirements.txt; python -m pip install -r conans/requirements_server.txt; python -m pip install -r conans/requirements_dev.txt ",
+    "python -m pip install --no-deps -e .",
+    "sed -i 's|isort@git+git://github.com/timothycrosley/isort|isort@git+https://github.com/timothycrosley/isort|g' requirements/dev.txt; { tail -n1 requirements/requirements.txt | grep -q \".\" && echo \"\"; } >> requirements/requirements.txt; echo \"pip==24.0\" >> requirements/requirements.txt;pip install \"pip==24.0\"; pip install -r requirements/dev.txt; pip install -e .;",
+    "python -m pip install -e .;",
+    "pip install -r requirements/dev.txt; pip install -e .;",
+    "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r",
+    'export PATH="$HOME/.local/bin:$PATH"; pdm add pre-commit; make install;',
+    "python -m pip install -r test-requirements.txt; python -m pip install -e .; pip install pytest pytest-xdist; hash -r;",
+    "echo 'cython<3' > /tmp/constraint.txt; export PIP_CONSTRAINT=/tmp/constraint.txt; python -m pip install -r conans/requirements.txt; python -m pip install -r conans/requirements_server.txt; python -m pip install -r conans/requirements_dev.txt ",
+    "python -m pip install -r test-requirements.txt; python -m pip install -e .; hash -r",
+    "python -m pip install -e .; python -m pip install bokeh_sampledata;",
+)
+_INSTALL_PATTERNS = tuple(
+    re.compile(rf"^{re.escape(block)}(?=\r?$)", re.MULTILINE)
+    for block in _INSTALL_BLOCKS
+)
 
 
 class SWEGymContractError(RuntimeError):
@@ -98,8 +120,6 @@ def load_task_instance(
         environment_id=f"swegym:{task_id}",
         task_id=task_id,
         image_name=manifest["image_name"],
-        expected_image_id=manifest["expected_image_id"],
-        expected_registry_digest=manifest["expected_registry_digest"],
         workdir="/testbed",
         cpus=config.docker.cpus,
         memory=config.docker.memory,
@@ -135,26 +155,17 @@ def build_training_dataset(context: TaskContext) -> Dataset:
 
 
 def transform_eval_script_offline(script: str) -> str:
-    lines = script.splitlines(keepends=True)
-    make_init = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == "make init"]
-    pip_install = [
-        index
-        for index, line in enumerate(lines)
-        if line.rstrip("\r\n").startswith("python -m pip install") and "pip install -e ." in line
-    ]
-    hits = len(make_init) + len(pip_install)
-    if hits != 1:
+    matches = [match for pattern in _INSTALL_PATTERNS for match in pattern.finditer(script)]
+    if len(matches) != 1:
         raise SWEGymContractError(
-            "eval_script must contain exactly one install line "
-            "(standalone make init or python -m pip install); "
-            f"found {hits} (make init: {len(make_init)}, pip install: {len(pip_install)})"
+            "eval_script must contain exactly one recognized install block; "
+            f"found {len(matches)}"
         )
-    index = make_init[0] if make_init else pip_install[0]
+    match = matches[0]
     replacement = OFFLINE_REPLACEMENT
-    if lines[index].endswith("\r\n"):
+    if "\r\n" in script:
         replacement = replacement.replace("\n", "\r\n")
-    lines[index : index + 1] = [replacement]
-    return "".join(lines)
+    return script[: match.start()] + replacement.rstrip("\r\n") + script[match.end() :]
 
 
 def _load_test_list(row: dict[str, Any], field: str, task_id: str) -> list[str]:
