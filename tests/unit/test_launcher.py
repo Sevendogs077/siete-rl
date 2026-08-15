@@ -18,7 +18,7 @@ from siete_rl.launcher import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs/stage1.yaml"
 
 
 def load_project_config():

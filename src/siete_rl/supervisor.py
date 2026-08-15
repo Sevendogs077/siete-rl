@@ -69,7 +69,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
     if topology is None:
         raise RuntimeError("supervised GRPO requires vLLM server mode")
     server_gpu, trainer_gpu = topology
-    run_id = config.output.run_id or generate_run_id()
+    run_id = config.output.run_id or f"stage{config.dataset.stage}-{generate_run_id()}"
     endpoints = allocate_vllm_endpoints(config)
     output_dir = _prepare_workspace(config.output.output_root, run_id)
     state_path = output_dir / "supervisor.json"

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-config_path="${GRPO_CONFIG:-$PROJECT_ROOT/configs/grpo_swegym_openhands_7b_lora.yaml}"
+config_path="${GRPO_CONFIG:-$PROJECT_ROOT/configs/stage1.yaml}"
 if [[ -z "${CUDA_VISIBLE_DEVICES+x}" ]]; then
   export CUDA_VISIBLE_DEVICES=0,1,2,3
 else

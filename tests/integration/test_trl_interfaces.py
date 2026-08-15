@@ -14,7 +14,7 @@ from siete_rl.trainer import SWEGRPOTrainer
 pytestmark = pytest.mark.external_assets
 
 
-CONFIG_PATH = "configs/grpo_swegym_openhands_7b_lora.yaml"
+CONFIG_PATH = "configs/stage1.yaml"
 
 
 @pytest.fixture(scope="module")

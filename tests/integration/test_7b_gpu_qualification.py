@@ -11,7 +11,7 @@ from siete_rl.config import load_config
 pytestmark = pytest.mark.gpu
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs/stage1.yaml"
 
 
 def test_openhands_7b_bf16_lora_forward_backward_save_reload(tmp_path: Path) -> None:

@@ -70,38 +70,10 @@ class SWEGymContractError(RuntimeError):
 TaskContext = Mapping[str, tuple[Sample, Evaluation]]
 
 
-def select_task_ids(config: ProjectConfig, project_root: Path) -> list[str]:
-    """按配置从资产目录选择确定且非空的任务列表。"""
-
-    tasks_dir = _resolve(project_root, config.dataset.tasks_dir)
-    if config.dataset.task_ids is not None:
-        selected = sorted(config.dataset.task_ids)
-    else:
-        try:
-            selected = sorted(path.name for path in tasks_dir.iterdir() if path.is_dir())
-        except OSError as exc:
-            raise SWEGymContractError(f"failed to list task assets under {tasks_dir}: {exc}") from exc
-    if config.dataset.max_tasks is not None:
-        selected = selected[: config.dataset.max_tasks]
-    if not selected:
-        raise SWEGymContractError(f"no task assets found under {tasks_dir}")
-    return selected
-
-
-def load_task_instance(
-    config: ProjectConfig, project_root: Path, task_id: str
+def _load_task_row(
+    config: ProjectConfig, project_root: Path, row: dict[str, Any]
 ) -> tuple[Sample, Evaluation]:
-    """从一个任务的锁定数据和自包含资产构造运行时上下文。"""
-
-    official_path = _resolve(project_root, config.dataset.official_path)
-    subset_path = _resolve(project_root, config.dataset.subset_path)
-
-    official = _read_exact_row(official_path, task_id)
-    subset = _read_exact_row(subset_path, task_id)
-    eval_script = subset.get("eval_script")
-    if not isinstance(eval_script, str) or not eval_script.strip():
-        raise SWEGymContractError(f"{task_id}: derived dataset is missing eval_script")
-
+    task_id = str(row["instance_id"])
     assets_dir = _resolve(project_root, config.dataset.tasks_dir) / task_id
     offline_path = assets_dir / "eval_script.offline.sh"
     try:
@@ -112,9 +84,9 @@ def load_task_instance(
 
     task = Task(
         task_id=task_id,
-        repo_name=str(official["repo"]),
-        base_commit=str(official["base_commit"]),
-        problem_statement=str(official["problem_statement"]),
+        repo_name=str(row["repo"]),
+        base_commit=str(row["base_commit"]),
+        problem_statement=str(row["problem_statement"]),
     )
     environment = Environment(
         environment_id=f"swegym:{task_id}",
@@ -130,18 +102,35 @@ def load_task_instance(
     )
     return Sample(task=task, environment=environment), Evaluation(
         offline_eval_script=offline,
-        fail_to_pass=_load_test_list(official, "FAIL_TO_PASS", task_id),
-        pass_to_pass=_load_test_list(official, "PASS_TO_PASS", task_id),
+        fail_to_pass=_load_test_list(row, "FAIL_TO_PASS", task_id),
+        pass_to_pass=_load_test_list(row, "PASS_TO_PASS", task_id),
     )
 
 
 def load_task_context(config: ProjectConfig, project_root: Path) -> TaskContext:
-    return MappingProxyType(
-        {
-            task_id: load_task_instance(config, project_root, task_id)
-            for task_id in select_task_ids(config, project_root)
-        }
-    )
+    train_path = _resolve(project_root, config.dataset.train_path)
+    if not train_path.is_file():
+        raise SWEGymContractError(f"training table does not exist: {train_path}")
+    try:
+        import pyarrow.parquet as pq
+
+        rows = pq.read_table(train_path).to_pylist()
+    except Exception as exc:
+        raise SWEGymContractError(f"failed to read training table {train_path}: {exc}") from exc
+    if not rows:
+        raise SWEGymContractError("training table must not be empty")
+    stages = [row.get("stage") for row in rows]
+    if any(stage not in (1, 2) for stage in stages) or stages != sorted(stages):
+        raise SWEGymContractError("training table must contain Stage 1 before Stage 2")
+    rows = [row for row in rows if row["stage"] == config.dataset.stage]
+
+    context: dict[str, tuple[Sample, Evaluation]] = {}
+    for row in rows:
+        task_id = str(row["instance_id"])
+        if task_id in context:
+            raise SWEGymContractError(f"duplicate training task: {task_id}")
+        context[task_id] = _load_task_row(config, project_root, row)
+    return MappingProxyType(context)
 
 
 def build_training_dataset(context: TaskContext) -> Dataset:

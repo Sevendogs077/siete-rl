@@ -1,12 +1,8 @@
-schema_version: 1
+schema_version: 2
 dataset:
+  train_path: data/swegym/train.parquet
   tasks_dir: assets/swegym
-  task_ids: null
-  max_tasks: null
-  official_path: data/swegym/SWE-Gym__SWE-Gym/bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb/data/train-00000-of-00001.parquet
-  official_revision: bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb
-  subset_path: data/swegym/SumanthRH__SWE-Gym-Subset/3f22e68f673027edbaebe3424e4c20ae580563fd/data/train-00000-of-00001.parquet
-  subset_revision: 3f22e68f673027edbaebe3424e4c20ae580563fd
+  stage: 1
 docker:
   platform: linux/amd64
   pull_policy: never
@@ -21,6 +17,7 @@ model:
   provenance_id: NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
   model_path: ~/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
   tokenizer_path: ~/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
+  adapter_path: null
   architecture: Qwen2ForCausalLM
   context_length: 32768
   trust_remote_code: true
@@ -60,7 +57,7 @@ grpo:
   reward_type: layered
   layered_reward_cap: 0.20
   extra_reference_rewards: [1.0]
-  num_generations: 16
+  num_generations: 8
   num_iterations: 1
   loss_type: dr_grpo
   scale_rewards: none
@@ -76,11 +73,8 @@ grpo:
   vllm_importance_sampling_mode: token_truncate
   vllm_importance_sampling_clip_max: 3.0
   vllm_importance_sampling_clip_min: null
-  per_device_train_batch_size: 1
-  gradient_accumulation_steps: 16
-  generation_batch_size: 16
-  steps_per_generation: null
-  max_steps: 100
+  num_train_epochs: 3
+  train_batch_size: 2
   learning_rate: 1.0e-05
   weight_decay: 0.0
   max_grad_norm: 1.0
@@ -105,13 +99,13 @@ vllm:
   mode: server
   model_impl: vllm
   enable_sleep_mode: false
-  tensor_parallel_size: null
+  tensor_parallel_size: 2
   server_base_url: http://127.0.0.1:8000
-  gpu_memory_utilization: 0.45
+  gpu_memory_utilization: 0.8
   max_model_length: 32768
 runtime:
   runtime_qualified: true
-  process_count: 1
+  process_count: 2
   base_seed: 42
 output:
   output_root: outputs

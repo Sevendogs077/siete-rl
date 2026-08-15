@@ -27,7 +27,7 @@ from siete_rl.recording import RunRecorder
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_7B = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
+CONFIG_7B = PROJECT_ROOT / "configs/stage1.yaml"
 
 
 def _recording_config(tmp_path: Path) -> ProjectConfig:
@@ -196,6 +196,33 @@ def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
     assert grpo_config.vllm_server_base_url == endpoints.base_url
     assert grpo_config.vllm_server_port == 18421
     assert grpo_config.vllm_group_port == 18422
+
+
+def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(tmp_path: Path) -> None:
+    config, _, _ = load_config(CONFIG_7B)
+    config = config.model_copy(
+        update={
+            "grpo": config.grpo.model_copy(
+                update={
+                    "num_train_epochs": 4,
+                    "train_batch_size": 2,
+                    "num_generations": 8,
+                }
+            )
+        }
+    )
+
+    grpo_config = build_grpo_config(
+        config,
+        tmp_path / "output",
+        seed=config.runtime.base_seed,
+        use_cpu=True,
+    )
+
+    assert grpo_config.num_train_epochs == 4
+    assert grpo_config.max_steps == -1
+    assert grpo_config.generation_batch_size == 16
+    assert grpo_config.gradient_accumulation_steps == 8
 
 
 def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.MonkeyPatch) -> None:

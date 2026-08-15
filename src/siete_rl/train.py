@@ -96,7 +96,16 @@ def preflight(config: ProjectConfig, project_root: Path) -> dict[str, Any]:
     tokenizer_path = Path(config.model.tokenizer_path)
     model_config_path = model_path / "config.json"
     tokenizer_config_path = tokenizer_path / "tokenizer_config.json"
-    for required in (model_config_path, tokenizer_config_path):
+    required_paths = [model_config_path, tokenizer_config_path]
+    if config.model.adapter_path is not None:
+        adapter_path = Path(config.model.adapter_path)
+        required_paths.extend(
+            [
+                adapter_path / "adapter_config.json",
+                adapter_path / "adapter_model.safetensors",
+            ]
+        )
+    for required in required_paths:
         if not required.is_file():
             raise TrainingNotReadyError(f"preflight 缺少本地模型文件: {required}")
 
@@ -117,10 +126,7 @@ def preflight(config: ProjectConfig, project_root: Path) -> dict[str, Any]:
     ]
     return {
         "status": "preflight_passed",
-        "task_selection": {
-            "task_ids": list(config.dataset.task_ids) if config.dataset.task_ids else None,
-            "max_tasks": config.dataset.max_tasks,
-        },
+        "train_path": config.dataset.train_path,
         "model": config.model.provenance_id,
         "model_path": model_path.resolve().as_posix(),
         "vllm_mode": config.vllm.mode,
@@ -200,6 +206,7 @@ def build_grpo_config(
     grpo = config.grpo
     generation = config.generation
     vllm = config.vllm
+    generation_batch_size = grpo.train_batch_size * grpo.num_generations
     return GRPOConfig(
         output_dir=Path(output_dir).as_posix(),
         model_init_kwargs={"dtype": config.model.dtype},
@@ -210,10 +217,10 @@ def build_grpo_config(
         bf16=False if use_cpu else grpo.bf16,
         fp16=False,
         per_device_train_batch_size=grpo.per_device_train_batch_size,
-        gradient_accumulation_steps=grpo.gradient_accumulation_steps,
-        generation_batch_size=grpo.generation_batch_size,
-        steps_per_generation=grpo.steps_per_generation,
-        max_steps=grpo.max_steps,
+        gradient_accumulation_steps=generation_batch_size
+        // (grpo.per_device_train_batch_size * config.runtime.process_count),
+        generation_batch_size=generation_batch_size,
+        num_train_epochs=grpo.num_train_epochs,
         learning_rate=grpo.learning_rate,
         weight_decay=grpo.weight_decay,
         max_grad_norm=grpo.max_grad_norm,
@@ -282,8 +289,26 @@ def build_trainer(
 
     from siete_rl.trainer import SWEGRPOTrainer
 
+    model: Any = config.model.model_path
+    peft_config = build_peft_config(config)
+    if config.model.adapter_path is not None:
+        import torch
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM
+
+        model = AutoModelForCausalLM.from_pretrained(
+            config.model.model_path,
+            dtype=torch.bfloat16,
+            local_files_only=True,
+            trust_remote_code=config.model.trust_remote_code,
+        )
+        model = PeftModel.from_pretrained(
+            model, config.model.adapter_path, is_trainable=True
+        )
+        peft_config = None
+
     return SWEGRPOTrainer(
-        model=config.model.model_path,
+        model=model,
         args=build_grpo_config(
             config, output_dir, seed=seed, vllm_endpoints=vllm_endpoints
         ),
@@ -291,7 +316,7 @@ def build_trainer(
         processing_class=processing_class,
         environment_factory=environment_factory,
         reward_funcs=reward_func,
-        peft_config=build_peft_config(config),
+        peft_config=peft_config,
         quantization_config=build_quantization_config(config),
         max_consecutive_protocol_errors=config.generation.max_consecutive_protocol_errors,
         use_process_mask=config.generation.use_process_mask,
@@ -533,6 +558,11 @@ def _run_once(
         stage = "load_task"
         task_context = load_task_context(config, project_root)
         dataset = build_training_dataset(task_context)
+        expected_steps = (
+            len(dataset) // config.grpo.train_batch_size
+        ) * config.grpo.num_train_epochs
+        recorder.run["train"]["steps_target"] = expected_steps
+        recorder.flush_run()
         recorder.log(f"task context ready: {len(task_context)} tasks")
 
         docker_client = SubprocessDockerClient()
@@ -617,9 +647,9 @@ def _run_once(
         stage = "train"
         trainer.train()
         global_step = int(trainer.state.global_step)
-        if global_step != config.grpo.max_steps:
+        if global_step != expected_steps:
             raise RuntimeError(
-                f"expected trainer.state.global_step={config.grpo.max_steps}, got {global_step}"
+                f"expected trainer.state.global_step={expected_steps}, got {global_step}"
             )
         if writer:
             recorder.complete_batch(global_step)

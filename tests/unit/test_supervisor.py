@@ -10,7 +10,7 @@ from siete_rl import supervisor
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
+CONFIG_PATH = PROJECT_ROOT / "configs/stage1.yaml"
 
 
 def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path: Path) -> None:
@@ -30,9 +30,10 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
     monkeypatch.setattr(supervisor, "allocate_vllm_endpoints", lambda loaded: endpoints)
     monkeypatch.setattr(supervisor, "generate_run_id", lambda: "run-supervised")
 
-    workspace = tmp_path / "run-supervised"
+    expected_run_id = f"stage{config.dataset.stage}-run-supervised"
+    workspace = tmp_path / expected_run_id
     workspace.mkdir()
-    (workspace / ".swe-agent-supervisor-workspace").write_text("run-supervised", encoding="utf-8")
+    (workspace / ".swe-agent-supervisor-workspace").write_text(expected_run_id, encoding="utf-8")
     monkeypatch.setattr(supervisor, "_prepare_workspace", lambda root, run_id: workspace)
 
     class FakeServer:
@@ -67,7 +68,7 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
         lambda command, **kwargs: calls.update(worker_command=command, worker_kwargs=kwargs) or FakeWorker(),
     )
     monkeypatch.setattr(supervisor, "_sweep_run_containers", lambda run_id, state: None)
-    expected = {"run_id": "run-supervised", "status": "completed"}
+    expected = {"run_id": expected_run_id, "status": "completed"}
     monkeypatch.setattr(supervisor, "_load_worker_report", lambda output_dir: expected)
 
     report = supervisor.run(CONFIG_PATH)

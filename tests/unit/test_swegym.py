@@ -6,9 +6,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from siete_rl.asset_generation import generate_task_assets
+from siete_rl.config import DatasetConfig
 from siete_rl import swegym
 from siete_rl.swegym import (
     SWEGymContractError,
+    build_training_dataset,
+    load_task_context,
     transform_eval_script_offline,
 )
 
@@ -95,7 +99,7 @@ def test_offline_transform_replaces_every_real_install_block(
     assert offline.endswith(test_command)
 
 
-def test_runtime_loader_preserves_training_table_row_order(tmp_path: Path) -> None:
+def test_runtime_loader_selects_stage_and_preserves_row_order(tmp_path: Path) -> None:
     rows = []
     for position, (task_id, stage) in enumerate(
         (("stage1-a", 1), ("stage1-b", 1), ("stage2-a", 2))
@@ -122,17 +126,18 @@ def test_runtime_loader_preserves_training_table_row_order(tmp_path: Path) -> No
 
     from siete_rl.config import load_config
 
-    config, _, _ = load_config(Path(__file__).resolve().parents[2] / "configs/grpo_swegym_openhands_7b_lora.yaml")
+    config, _, _ = load_config(Path(__file__).resolve().parents[2] / "configs/stage1.yaml")
     config = config.model_copy(
         update={
             "dataset": DatasetConfig(
                 train_path=str(tmp_path / "train.parquet"),
                 tasks_dir=str(tmp_path / "assets"),
+                stage=1,
             )
         }
     )
     context = load_task_context(config, tmp_path)
     dataset = build_training_dataset(context)
 
-    assert list(context) == ["stage1-a", "stage1-b", "stage2-a"]
-    assert dataset["task_id"] == ["stage1-a", "stage1-b", "stage2-a"]
+    assert list(context) == ["stage1-a", "stage1-b"]
+    assert dataset["task_id"] == ["stage1-a", "stage1-b"]

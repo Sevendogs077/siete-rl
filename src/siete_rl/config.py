@@ -19,25 +19,9 @@ class StrictConfig(BaseModel):
 
 
 class DatasetConfig(StrictConfig):
+    train_path: str = Field(min_length=1)
     tasks_dir: str = Field(min_length=1)
-    task_ids: tuple[str, ...] | None = Field(default=None, min_length=1)
-    max_tasks: int | None = Field(default=None, ge=1)
-    official_path: str
-    official_revision: str = Field(min_length=40, max_length=40)
-    subset_path: str
-    subset_revision: str = Field(min_length=40, max_length=40)
-
-    @model_validator(mode="after")
-    def validate_selection(self) -> Self:
-        if self.task_ids is not None and len(set(self.task_ids)) != len(self.task_ids):
-            raise ValueError("task_ids must not contain duplicates")
-        if (
-            self.task_ids is not None
-            and self.max_tasks is not None
-            and len(self.task_ids) != self.max_tasks
-        ):
-            raise ValueError("task_ids and max_tasks disagree in count")
-        return self
+    stage: Literal[1, 2]
 
 
 class DockerConfig(StrictConfig):
@@ -56,6 +40,7 @@ class ModelConfig(StrictConfig):
     provenance_id: str = Field(min_length=1)
     model_path: str = Field(min_length=1)
     tokenizer_path: str = Field(min_length=1)
+    adapter_path: str | None
     architecture: Literal["Qwen2ForCausalLM", "Qwen3MoeForCausalLM"]
     context_length: int = Field(ge=1)
     trust_remote_code: bool
@@ -125,11 +110,9 @@ class GRPOConfigValues(StrictConfig):
     ]
     vllm_importance_sampling_clip_max: float = Field(gt=0.0)
     vllm_importance_sampling_clip_min: float | None = Field(ge=0.0)
-    per_device_train_batch_size: int = Field(ge=1)
-    gradient_accumulation_steps: int = Field(ge=1)
-    generation_batch_size: int = Field(ge=1)
-    steps_per_generation: int | None = Field(ge=1)
-    max_steps: int = Field(ge=1)
+    num_train_epochs: int = Field(ge=1)
+    train_batch_size: int = Field(ge=1)
+    per_device_train_batch_size: int = Field(default=1, ge=1)
     learning_rate: float = Field(ge=0.0)
     weight_decay: float = Field(ge=0.0)
     max_grad_norm: float = Field(ge=0.0)
@@ -177,7 +160,7 @@ class OutputConfig(StrictConfig):
 
 
 class ProjectConfig(StrictConfig):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     dataset: DatasetConfig
     docker: DockerConfig
     model: ModelConfig
@@ -234,8 +217,6 @@ class ProjectConfig(StrictConfig):
             raise ValueError(
                 "use_liger_kernel requires importance_sampling_level 'token' or 'sequence'"
             )
-        if self.grpo.generation_batch_size % self.grpo.num_generations != 0:
-            raise ValueError("generation_batch_size must be divisible by num_generations")
         if (
             self.grpo.epsilon_high is not None
             and self.grpo.epsilon_high < self.grpo.epsilon
@@ -253,9 +234,10 @@ class ProjectConfig(StrictConfig):
         if self.runtime.runtime_qualified:
             if (
                 self.vllm.mode != "server"
-                or self.vllm.tensor_parallel_size is not None
+                or self.vllm.tensor_parallel_size != 2
                 or self.vllm.server_base_url != "http://127.0.0.1:8000"
                 or self.vllm.enable_sleep_mode
+                or self.runtime.process_count != 2
             ):
                 raise ValueError("qualified runtime requires a separate local vLLM server")
         elif self.vllm.tensor_parallel_size is not None or self.vllm.server_base_url is not None:
@@ -276,15 +258,15 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
 
     config = ProjectConfig.model_validate(payload)
     project_root = find_project_root(config_path)
-    # MODEL_PATH / TOKENIZER_PATH 环境变量优先于 yaml，便于部署时覆盖模型路径。
+    # 环境变量优先于 yaml，便于部署时覆盖模型与阶段 adapter 路径。
     model_path = os.environ.get("MODEL_PATH", "").strip() or config.model.model_path
     tokenizer_path = os.environ.get("TOKENIZER_PATH", "").strip() or config.model.tokenizer_path
+    adapter_path = os.environ.get("MODEL_ADAPTER_PATH", "").strip() or config.model.adapter_path
     resolved = config.model_copy(
         update={
             "dataset": config.dataset.model_copy(
                 update={
-                    "official_path": resolve_path(project_root, config.dataset.official_path),
-                    "subset_path": resolve_path(project_root, config.dataset.subset_path),
+                    "train_path": resolve_path(project_root, config.dataset.train_path),
                     "tasks_dir": resolve_path(project_root, config.dataset.tasks_dir),
                 }
             ),
@@ -292,6 +274,9 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
                 update={
                     "model_path": resolve_path(project_root, model_path),
                     "tokenizer_path": resolve_path(project_root, tokenizer_path),
+                    "adapter_path": (
+                        resolve_path(project_root, adapter_path) if adapter_path else None
+                    ),
                 }
             ),
             "output": config.output.model_copy(
@@ -301,7 +286,10 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
             ),
         }
     )
-    return ProjectConfig.model_validate(resolved.model_dump(mode="python")), project_root, config_path
+    validated = ProjectConfig.model_validate(resolved.model_dump(mode="python"))
+    if validated.dataset.stage == 2 and validated.model.adapter_path is None:
+        raise ValueError("Stage 2 requires MODEL_ADAPTER_PATH")
+    return validated, project_root, config_path
 
 
 def find_project_root(config_path: Path) -> Path:

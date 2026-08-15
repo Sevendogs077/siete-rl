@@ -6,4 +6,4 @@ cd "$PROJECT_ROOT"
 export DOCKER_HOST=unix:///run/docker-swegym/docker.sock
 test -S /run/docker-swegym/docker.sock
 exec .venv/bin/siete-rl prepare \
-  --config configs/grpo_swegym_openhands_7b_lora.yaml
+  --config configs/stage1.yaml
