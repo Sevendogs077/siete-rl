@@ -519,7 +519,6 @@ def sample_factory():
             task_id=task.task_id,
             image_name="image",
             expected_image_id="sha256:" + "1" * 64,
-            expected_registry_digest="sha256:" + "2" * 64,
             workdir="/testbed",
             cpus=1,
             memory="1g",

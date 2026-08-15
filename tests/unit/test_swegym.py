@@ -93,3 +93,46 @@ def test_offline_transform_replaces_every_real_install_block(
     assert "PIP_NO_INDEX=1" in offline
     assert install_block not in offline
     assert offline.endswith(test_command)
+
+
+def test_runtime_loader_preserves_training_table_row_order(tmp_path: Path) -> None:
+    rows = []
+    for position, (task_id, stage) in enumerate(
+        (("stage1-a", 1), ("stage1-b", 1), ("stage2-a", 2))
+    ):
+        row = {
+            "instance_id": task_id,
+            "repo": "owner/repo",
+            "base_commit": f"{position + 1:040x}",
+            "version": "fixture",
+            "problem_statement": f"problem {position}",
+            "patch": "",
+            "test_patch": "",
+            "FAIL_TO_PASS": ["test_a"],
+            "PASS_TO_PASS": [],
+            "eval_script": "make init\npytest -q\n",
+            "stage": stage,
+            "stage_position": position if stage == 1 else 0,
+        }
+        rows.append(row)
+        generate_task_assets(
+            row, tmp_path / "assets", image_id="sha256:" + "1" * 64
+        )
+    pq.write_table(pa.Table.from_pylist(rows), tmp_path / "train.parquet")
+
+    from siete_rl.config import load_config
+
+    config, _, _ = load_config(Path(__file__).resolve().parents[2] / "configs/grpo_swegym_openhands_7b_lora.yaml")
+    config = config.model_copy(
+        update={
+            "dataset": DatasetConfig(
+                train_path=str(tmp_path / "train.parquet"),
+                tasks_dir=str(tmp_path / "assets"),
+            )
+        }
+    )
+    context = load_task_context(config, tmp_path)
+    dataset = build_training_dataset(context)
+
+    assert list(context) == ["stage1-a", "stage1-b", "stage2-a"]
+    assert dataset["task_id"] == ["stage1-a", "stage1-b", "stage2-a"]

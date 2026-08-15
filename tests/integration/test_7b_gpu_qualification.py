@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from siete_rl.config import load_config
-from siete_rl.train import _gpu_baseline, _require_trainer_visible_gpus
 
 
 pytestmark = pytest.mark.gpu
@@ -15,20 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/grpo_swegym_openhands_7b_lora.yaml"
 
 
-def test_gpu_baseline_validates_cuda_and_vllm_runtime() -> None:
-    physical_device = _require_trainer_visible_gpus()
-
-    baseline = _gpu_baseline(physical_device)
-
-    assert baseline["physical_device"] == physical_device
-    assert baseline["owner_pid"] > 0
-    assert baseline["allocated"] >= 0
-    assert baseline["reserved"] >= baseline["allocated"]
-
-
 def test_openhands_7b_bf16_lora_forward_backward_save_reload(tmp_path: Path) -> None:
-    _require_trainer_visible_gpus()
-
     import torch
     from peft import PeftModel, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer

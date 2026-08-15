@@ -716,6 +716,8 @@ class SWEGRPOTrainer(GRPOTrainer):
                 idxs_with_tool = [
                     idx for idx, flag in zip(idxs_with_tool, exit_flags, strict=True) if not flag
                 ]
+            if sum(_global_active_counts(len(idxs_with_tool))) == 0:
+                break
             # <<< swe_agent
 
             # Build token IDs by concatenation: prompt + completion + tool_suffix.
@@ -764,6 +766,8 @@ class SWEGRPOTrainer(GRPOTrainer):
             prompt_completion_tool_ids = [
                 pct for pct, o in zip(prompt_completion_tool_ids, overlong, strict=True) if not o
             ]
+            if sum(_global_active_counts(len(idxs_with_tool))) == 0:
+                break
 
             # Filter images and multimodal fields to match the current subset (index into full batch).
             # Merge tool response images so the model can see visual feedback during generation.

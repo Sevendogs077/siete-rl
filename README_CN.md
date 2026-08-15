@@ -42,14 +42,14 @@ SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 poli
 
 ## 复现运行
 
-训练需要 2 张 GPU，评测需要 1 张。环境、数据、模型、专用 Docker daemon、任务镜像与评测 harness 的准备步骤见[环境与资产准备指南](docs/setup.md)。
+训练需要 4 张 GPU，评测需要 1 张。环境、数据、模型、专用 Docker daemon、任务镜像与评测 harness 的准备步骤见[环境与资产准备指南](docs/setup.md)。
 
 ```bash
 uv sync
 bash scripts/prepare.sh          # 拉取任务镜像并生成 assets
 bash scripts/qualify.sh          # 检查配置、数据、镜像、模型与 GPU
 export WANDB_API_KEY=<your-key>
-CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh                 # 启动训练
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh             # 启动训练
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # 启动评测
 ```
 

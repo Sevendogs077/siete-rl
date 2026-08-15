@@ -46,7 +46,7 @@ class Verifier:
 
 def harness(verification=None, evaluation=None, verifier_cls=None, **env_kwargs):
     task = Task(task_id="owner/repo", repo_name="owner/repo", base_commit="0" * 40, problem_statement="fix")
-    environment = Environment(environment_id="id", task_id=task.task_id, image_name="image", expected_image_id="sha256:" + "0" * 64, expected_registry_digest="sha256:" + "0" * 64, workdir="/testbed", cpus=1, memory="1g", pids_limit=1, exec_timeout_sec=1, verifier_timeout_sec=1)
+    environment = Environment(environment_id="id", task_id=task.task_id, image_name="image", expected_image_id="sha256:" + "0" * 64, workdir="/testbed", cpus=1, memory="1g", pids_limit=1, exec_timeout_sec=1, verifier_timeout_sec=1)
     sandboxes = []; verifiers = []
     def make_sandbox(*args):
         value = Sandbox(*args); sandboxes.append(value); return value

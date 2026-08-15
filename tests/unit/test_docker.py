@@ -87,6 +87,7 @@ def domain():
         environment_id=f"swegym:{TASK_ID}",
         task_id=TASK_ID,
         image_name="xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023:latest",
+        expected_image_id="sha256:" + "1" * 64,
         workdir="/testbed",
         cpus=4,
         memory="16g",
@@ -247,6 +248,16 @@ def test_image_platform_mismatch_fails_before_create(domain) -> None:
     task, environment = domain
     client = FakeClient([image_inspect(environment, Architecture="arm64")])
     with pytest.raises(ContainerCreateError, match="linux/amd64"):
+        inspect_image(client, environment)
+
+
+def test_image_id_mismatch_fails_before_create(domain) -> None:
+    _, environment = domain
+    client = FakeClient(
+        [image_inspect(environment, Id="sha256:" + "2" * 64)]
+    )
+
+    with pytest.raises(ContainerCreateError, match="image ID"):
         inspect_image(client, environment)
     assert len(client.calls) == 1
 

@@ -20,26 +20,16 @@ Dependencies are locked in `uv.lock`; PyTorch and vLLM use CUDA 12.9 wheels.
 
 ## 2. Download the data
 
-Training uses the first two pinned datasets. Evaluation also requires SWE-bench Verified.
+`scripts/prepare.sh` downloads the four pinned training sources automatically. Evaluation requires SWE-bench Verified separately.
 
 ```bash
-# SWE-Gym task metadata, gold patches, and F2P/P2P test lists
-uv run --no-sync hf download SWE-Gym/SWE-Gym --repo-type dataset \
-  --revision bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb \
-  --local-dir data/swegym/SWE-Gym__SWE-Gym/bb94ed9e39bbeb96a7fcbfb533b80f25a7fd59cb
-
-# The 100-task SWE-Gym training subset
-uv run --no-sync hf download SumanthRH/SWE-Gym-Subset --repo-type dataset \
-  --revision 3f22e68f673027edbaebe3424e4c20ae580563fd \
-  --local-dir data/swegym/SumanthRH__SWE-Gym-Subset/3f22e68f673027edbaebe3424e4c20ae580563fd
-
 # The 500-task evaluation split
 uv run --no-sync hf download SWE-bench/SWE-bench_Verified --repo-type dataset \
   --revision 91aa3ed51b709be6457e12d00300a6a596d4c6a3 \
   --local-dir data/swegym/SWE-Bench__SWE-bench_Verified/91aa3ed51b709be6457e12d00300a6a596d4c6a3
 ```
 
-Set `HF_ENDPOINT=https://hf-mirror.com` before these commands if a mirror is required. The first two revisions must match `official_revision` and `subset_revision` in the training config.
+Set `HF_ENDPOINT=https://hf-mirror.com` before this command if a mirror is required.
 
 ## 3. Download the base model
 
@@ -104,13 +94,7 @@ sudo systemctl enable --now docker-swegym
 bash scripts/prepare.sh
 ```
 
-The script pulls the 100 pinned `xingyaoww/sweb.eval.x86_64.*` images into the dedicated daemon and generates `assets/swegym/<task-id>/`. Runtime pulling is disabled by `pull_policy: never`.
-
-The default registry mirror is `docker.1panel.live`. Override the mirror, concurrency, or retry count when needed:
-
-```bash
-MIRROR=docker.io CONCURRENCY=2 RETRIES=3 bash scripts/prepare.sh
-```
+The script builds the pinned 82-task Stage 1 plus 220-task Stage 2 course, pulls its 302 `xingyaoww/sweb.eval.x86_64.*` images into the dedicated daemon, and generates `assets/swegym/<task-id>/`. It tries Docker Hub first and falls back to `dockerproxy.net`; runtime pulling is disabled by `pull_policy: never`. Re-running the command reuses local images and refreshes their manifests.
 
 ## 6. Prepare evaluation
 
@@ -170,12 +154,12 @@ export EVAL_HARNESS_PYTHON="$PWD/.external/swe-bench-venv/bin/python"
 bash scripts/qualify.sh
 ```
 
-Qualification checks the config, datasets, generated assets, dedicated daemon, task images, model, tokenizer, and GPU topology. Do not start training until every check passes.
+Qualification loads the actual training table and runtime assets, then checks the dedicated daemon, task image identities, model, tokenizer, and GPU topology. Do not start training until every check passes.
 
 ## 8. Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
 CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
 ```
 
@@ -185,7 +169,7 @@ The default config logs training metrics to W&B. For an online run:
 
 ```bash
 export WANDB_API_KEY=<your-key>
-CUDA_VISIBLE_DEVICES=0,1 bash scripts/grpo.sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
 ```
 
 Set `wandb.mode: offline` for local runs, or `wandb.enabled: false` to turn it off.

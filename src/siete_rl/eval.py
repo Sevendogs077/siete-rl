@@ -247,12 +247,6 @@ def public_sample_from_row(
     image_id = inspected.get("Id")
     if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
         raise EvalError(f"{task_id}: official image has invalid local ID")
-    repo_digests = inspected.get("RepoDigests") or []
-    digest = image_id
-    if repo_digests:
-        candidate = str(repo_digests[0]).rpartition("@")[2]
-        if candidate.startswith("sha256:"):
-            digest = candidate
     task = Task(
         task_id=task_id,
         repo_name=_required_row_string(row, "repo"),
@@ -264,7 +258,6 @@ def public_sample_from_row(
         task_id=task_id,
         image_name=image_name,
         expected_image_id=image_id,
-        expected_registry_digest=digest,
         workdir="/testbed",
         cpus=protocol.cpus,
         memory=protocol.memory,

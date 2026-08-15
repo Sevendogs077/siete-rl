@@ -8,6 +8,7 @@ import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
@@ -46,6 +47,7 @@ SWEGYM_SCRIPTS = {
 }
 
 HF_MIRROR = "https://hf-mirror.com"
+IMAGE_PULL_WORKERS = 16
 
 
 @dataclass(frozen=True)
@@ -209,33 +211,58 @@ def build_training_table(
     return output_path
 
 
+def _ensure_training_image(image: str, client: DockerClient) -> str:
+    inspected = client.run(["docker", "image", "inspect", image], timeout_sec=30)
+    if inspected.exit_code != 0 or inspected.timed_out:
+        mirror = f"dockerproxy.net/{image.removeprefix('docker.io/')}"
+        for attempt in range(10):
+            source = image if attempt == 0 else mirror
+            pulled = client.run(["docker", "pull", source], timeout_sec=None)
+            if pulled.exit_code == 0 and not pulled.timed_out:
+                break
+        else:
+            raise RuntimeError(f"failed to pull training image: {image}: {pulled.stderr.strip()}")
+        if source == mirror:
+            tagged = client.run(["docker", "tag", mirror, image], timeout_sec=30)
+            if tagged.exit_code != 0 or tagged.timed_out:
+                raise RuntimeError(f"failed to tag training image: {image}")
+            removed = client.run(["docker", "rmi", mirror], timeout_sec=30)
+            if removed.exit_code != 0 or removed.timed_out:
+                raise RuntimeError(f"failed to remove temporary mirror tag: {mirror}")
+    identified = client.run(
+        ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+        timeout_sec=30,
+    )
+    if identified.exit_code != 0 or identified.timed_out:
+        raise RuntimeError(f"failed to identify training image: {image}")
+    return identified.stdout.strip()
+
+
 def prepare_training_assets(
-    rows: list[dict[str, object]], assets_dir: Path, client: DockerClient
+    rows: list[dict[str, object]],
+    assets_dir: Path,
+    client: DockerClient,
+    *,
+    pull_workers: int = IMAGE_PULL_WORKERS,
 ) -> tuple[int, int]:
+    images = [image_tag_for(str(row["instance_id"])) for row in rows]
+    with ThreadPoolExecutor(
+        max_workers=min(len(images), pull_workers),
+        thread_name_prefix="swe-image-pull",
+    ) as executor:
+        image_ids = list(
+            executor.map(lambda image: _ensure_training_image(image, client), images)
+        )
+
     image_count = 0
     asset_count = 0
-    for row in rows:
+    for row, image, image_id in zip(rows, images, image_ids, strict=True):
         task_id = str(row["instance_id"])
-        image = image_tag_for(task_id)
-        inspected = client.run(["docker", "image", "inspect", image], timeout_sec=30)
-        if inspected.exit_code != 0 or inspected.timed_out:
-            pulled = client.run(["docker", "pull", image], timeout_sec=3600)
-            if pulled.exit_code != 0 or pulled.timed_out:
-                mirror = f"dockerproxy.net/{image.removeprefix('docker.io/')}"
-                mirror_pull = client.run(["docker", "pull", mirror], timeout_sec=3600)
-                if mirror_pull.exit_code != 0 or mirror_pull.timed_out:
-                    raise RuntimeError(f"failed to pull training image: {image}")
-                tagged = client.run(["docker", "tag", mirror, image], timeout_sec=30)
-                if tagged.exit_code != 0 or tagged.timed_out:
-                    raise RuntimeError(f"failed to tag training image: {image}")
-                removed = client.run(["docker", "rmi", mirror], timeout_sec=30)
-                if removed.exit_code != 0 or removed.timed_out:
-                    raise RuntimeError(f"failed to remove temporary mirror tag: {mirror}")
-
         environment = Environment(
             environment_id=f"prepare:{task_id}",
             task_id=task_id,
             image_name=image,
+            expected_image_id=image_id,
             workdir="/testbed",
             cpus=1,
             memory="1g",
@@ -247,7 +274,7 @@ def prepare_training_assets(
 
         inspect_image(client, environment)
         image_count += 1
-        generate_task_assets(row, assets_dir)
+        generate_task_assets(row, assets_dir, image_id=image_id)
         asset_count += 1
     return image_count, asset_count
 

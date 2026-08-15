@@ -120,6 +120,7 @@ def load_task_instance(
         environment_id=f"swegym:{task_id}",
         task_id=task_id,
         image_name=manifest["image_name"],
+        expected_image_id=manifest["expected_image_id"],
         workdir="/testbed",
         cpus=config.docker.cpus,
         memory=config.docker.memory,

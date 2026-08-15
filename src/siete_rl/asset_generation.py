@@ -30,7 +30,9 @@ def _require_valid_task_id(task_id: str) -> None:
         raise SWEGymContractError(f"task_id 含非法字符（仅允许 [A-Za-z0-9_.-]）: {task_id!r}")
 
 
-def generate_task_assets(row: Mapping[str, Any], assets_dir: Path) -> list[Path]:
+def generate_task_assets(
+    row: Mapping[str, Any], assets_dir: Path, *, image_id: str
+) -> list[Path]:
     task_id = str(row["instance_id"])
     _require_valid_task_id(task_id)
     image = image_tag_for(task_id)
@@ -62,6 +64,7 @@ def generate_task_assets(row: Mapping[str, Any], assets_dir: Path) -> list[Path]
         "repo_name": row["repo"],
         "base_commit": row["base_commit"],
         "image_name": image,
+        "expected_image_id": image_id,
     }
     manifest_path = root / "manifest.json"
     manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2)

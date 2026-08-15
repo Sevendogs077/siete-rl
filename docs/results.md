@@ -2,6 +2,19 @@
 
 Local records for SieteRL training and SWE-bench Verified evaluation, listed newest first under a fixed [evaluation protocol](#evaluation-protocol).
 
+## 2026-08-14 — All-linear Dr. GRPO trial
+
+[![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)
+
+> **Result:** All-linear Dr. GRPO raised mean training reward from 0.13143 to 0.14251 but resolved one fewer task, reaching 56/500 on SWE-bench Verified.
+
+| Variant | Mean reward | Non-degenerate groups | SWE-bench Verified | Δ vs. Reference GRPO |
+|---|---:|---:|---:|---:|
+| Reference GRPO (`q/k/v/o`) | 0.13143 | 32/100 | **57/500 (11.4%)** | — |
+| **All-linear Dr. GRPO** | **0.14251** | **34/100** | **56/500 (11.2%)** | −1 |
+
+**Analysis.** The candidate jointly expanded LoRA from the four attention projections to all linear layers, changed `loss_type` from `grpo` to `dr_grpo`, and changed clipping from symmetric `0.2` to `0.16/0.24`, so this run does not isolate any one change. The adapter grew from 20.2M to 80.7M parameters and produced more non-empty evaluation patches, while their conditional resolve rate fell slightly. Its lower mean gradient norm (`6.37e-4` versus `4.08e-3`) is consistent with Dr. GRPO normalizing by the global maximum completion length; the observed maximum (`2.22e-3`) remained far below the `1.0` clipping threshold. The one-task Verified gap from one training seed and one deterministic evaluation rollout is directional rather than statistically conclusive.
+
 ## 2026-08-13 — Reference reward ablation
 
 [![Scaffold v3](https://img.shields.io/badge/Scaffold-v3-04648c.svg)](#scaffold-compatibility)

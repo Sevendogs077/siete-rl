@@ -58,7 +58,7 @@ class DockerClient(Protocol):
         argv: Sequence[str],
         *,
         input_text: str | None = None,
-        timeout_sec: int,
+        timeout_sec: int | None,
     ) -> CommandResult: ...
 
 
@@ -86,7 +86,7 @@ class SubprocessDockerClient:
         argv: Sequence[str],
         *,
         input_text: str | None = None,
-        timeout_sec: int,
+        timeout_sec: int | None,
     ) -> CommandResult:
         command = list(argv)
         env = dict(os.environ)
@@ -377,6 +377,8 @@ def inspect_image(client: DockerClient, environment: Environment) -> dict[str, o
     if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
         raise ContainerCreateError("docker image inspect returned an invalid structure")
     payload = values[0]
+    if payload.get("Id") != environment.expected_image_id:
+        raise ContainerCreateError("local image ID does not match qualification evidence")
     if payload.get("Os") != "linux" or payload.get("Architecture") != "amd64":
         raise ContainerCreateError("local image platform must be linux/amd64")
     return {
