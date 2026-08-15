@@ -552,6 +552,7 @@ def _run_once(
     failure: dict[str, str] | None = None
     stage = "gpu_preflight"
     interrupted_signum: int | None = None
+    resume_from_checkpoint = os.environ.get("RESUME_FROM_CHECKPOINT") or None
 
     try:
         gpu_baseline = _gpu_baseline(physical_device)
@@ -645,7 +646,7 @@ def _run_once(
         recorder.log("trainer constructed; rollout policy global_step=0")
 
         stage = "train"
-        trainer.train()
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         global_step = int(trainer.state.global_step)
         if global_step != expected_steps:
             raise RuntimeError(
@@ -667,7 +668,7 @@ def _run_once(
             if not _verify_saved_adapter(recorder.output_dir, post_step_adapter):
                 raise RuntimeError("saved adapter could not be reloaded with identical tensors")
             checkpoints = recorder.refresh_checkpoints()
-            if not checkpoints or any(
+            if (not checkpoints and resume_from_checkpoint is None) or any(
                 re.fullmatch(r"checkpoint-\d+", name) is None for name in checkpoints
             ):
                 raise RuntimeError(f"expected checkpoint-<step> directories, got {checkpoints}")

@@ -48,7 +48,7 @@ import torch
 from trl import GRPOTrainer
 from trl.chat_template_utils import parse_response
 from trl.extras.profiling import profiling_context
-from trl.trainer.utils import nanstd
+from trl.trainer.utils import RepeatSampler, nanstd
 
 from siete_rl.models import LoopExit
 from siete_rl.process_mask import (
@@ -102,6 +102,14 @@ def _record_turn(
 # <<< swe_agent
 
 
+class _EpochRepeatSampler(RepeatSampler):
+    """按 epoch 重建随机顺序，使 checkpoint resume 精确跳过已训练 batch。"""
+
+    def set_epoch(self, epoch: int) -> None:
+        if self.shuffle and self.seed is not None:
+            self.generator.manual_seed(self.seed + epoch)
+
+
 class SWEGRPOTrainer(GRPOTrainer):
     """在官方 GRPOTrainer 上加入环境信号终止；其余行为与 TRL 完全一致。"""
 
@@ -125,6 +133,18 @@ class SWEGRPOTrainer(GRPOTrainer):
         super().__init__(*args, **kwargs)
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
+
+    def _get_train_sampler(self, dataset=None):
+        if dataset is None:
+            dataset = self.train_dataset
+        return _EpochRepeatSampler(
+            data_source=dataset,
+            mini_repeat_count=self.num_generations,
+            batch_size=self.args.generation_batch_size // self.num_generations,
+            repeat_count=self.num_iterations * self.args.steps_per_generation,
+            shuffle=self.shuffle_dataset,
+            seed=self.args.seed,
+        )
 
     def _await_environment_resets(self) -> float | None:
         """收束整批 reset；发生异常时也先 drain 其余 future。"""

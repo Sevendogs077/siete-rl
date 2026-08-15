@@ -168,69 +168,7 @@ def docker_result(exit_code: int = 0, stdout: str = "") -> CommandResult:
     return CommandResult([], exit_code, stdout, "", 0.01)
 
 
-def test_prepare_training_assets_uses_canonical_and_mirror_once(tmp_path: Path) -> None:
-    sources = write_four_source_fixtures(tmp_path)
-    table = build_training_table(sources, tmp_path / "train.parquet", seed=42)
-    rows = pq.read_table(table).to_pylist()
-    client = FakeDockerClient(
-        [
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(1),
-            docker_result(1),
-            docker_result(),
-            docker_result(),
-            docker_result(),
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(stdout=IMAGE_INSPECT),
-            docker_result(stdout=IMAGE_INSPECT),
-        ]
-    )
-
-    image_count, asset_count = prepare_training_assets(
-        rows, tmp_path / "assets", client, pull_workers=1
-    )
-
-    assert (image_count, asset_count) == (4, 4)
-    manifest = json.loads(
-        (tmp_path / "assets/Project-MONAI__MONAI-1/manifest.json").read_text()
-    )
-    assert manifest["expected_image_id"] == IMAGE_ID
-    pull_calls = [call for call in client.calls if call[:2] == ["docker", "pull"]]
-    assert len(pull_calls) == 2
-    assert pull_calls[1][2].startswith("dockerproxy.net/")
-    assert client.pull_timeouts == [None, None]
-
-
-def test_prepare_training_assets_succeeds_on_tenth_pull_attempt(
-    tmp_path: Path,
-) -> None:
-    sources = write_four_source_fixtures(tmp_path)
-    table = build_training_table(sources, tmp_path / "train.parquet", seed=42)
-    rows = pq.read_table(table).to_pylist()[:1]
-    client = FakeDockerClient(
-        [docker_result(1) for _ in range(10)]
-        + [
-            docker_result(),
-            docker_result(),
-            docker_result(),
-            docker_result(stdout=IMAGE_INSPECT),
-        ]
-    )
-
-    assert prepare_training_assets(
-        rows, tmp_path / "assets", client, pull_workers=1
-    ) == (1, 1)
-    pull_calls = [call for call in client.calls if call[:2] == ["docker", "pull"]]
-    assert len(pull_calls) == 10
-    assert pull_calls[0][2].startswith("docker.io/")
-    assert all(call[2].startswith("dockerproxy.net/") for call in pull_calls[1:])
-
-
-def test_prepare_training_assets_exits_after_tenth_pull_failure(
+def test_prepare_training_assets_exits_after_failed_mirror_pull(
     tmp_path: Path,
 ) -> None:
     sources = write_four_source_fixtures(tmp_path)
@@ -242,7 +180,8 @@ def test_prepare_training_assets_exits_after_tenth_pull_failure(
         prepare_training_assets(rows, tmp_path / "assets", client, pull_workers=1)
 
     pull_calls = [call for call in client.calls if call[:2] == ["docker", "pull"]]
-    assert len(pull_calls) == 10
+    assert len(pull_calls) == 1
+    assert pull_calls[0][2].startswith("dockerproxy.net/")
 
 
 def test_prepare_training_assets_pulls_missing_images_concurrently(

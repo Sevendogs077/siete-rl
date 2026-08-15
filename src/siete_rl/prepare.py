@@ -215,20 +215,15 @@ def _ensure_training_image(image: str, client: DockerClient) -> str:
     inspected = client.run(["docker", "image", "inspect", image], timeout_sec=30)
     if inspected.exit_code != 0 or inspected.timed_out:
         mirror = f"dockerproxy.net/{image.removeprefix('docker.io/')}"
-        for attempt in range(10):
-            source = image if attempt == 0 else mirror
-            pulled = client.run(["docker", "pull", source], timeout_sec=None)
-            if pulled.exit_code == 0 and not pulled.timed_out:
-                break
-        else:
+        pulled = client.run(["docker", "pull", mirror], timeout_sec=None)
+        if pulled.exit_code != 0 or pulled.timed_out:
             raise RuntimeError(f"failed to pull training image: {image}: {pulled.stderr.strip()}")
-        if source == mirror:
-            tagged = client.run(["docker", "tag", mirror, image], timeout_sec=30)
-            if tagged.exit_code != 0 or tagged.timed_out:
-                raise RuntimeError(f"failed to tag training image: {image}")
-            removed = client.run(["docker", "rmi", mirror], timeout_sec=30)
-            if removed.exit_code != 0 or removed.timed_out:
-                raise RuntimeError(f"failed to remove temporary mirror tag: {mirror}")
+        tagged = client.run(["docker", "tag", mirror, image], timeout_sec=30)
+        if tagged.exit_code != 0 or tagged.timed_out:
+            raise RuntimeError(f"failed to tag training image: {image}")
+        removed = client.run(["docker", "rmi", mirror], timeout_sec=30)
+        if removed.exit_code != 0 or removed.timed_out:
+            raise RuntimeError(f"failed to remove temporary mirror tag: {mirror}")
     identified = client.run(
         ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
         timeout_sec=30,
