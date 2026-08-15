@@ -46,7 +46,10 @@ class FakePopen:
 
 @pytest.mark.parametrize(
     ("visible", "expected"),
-    [("0,1,2,3", ("0,1", "2,3")), ("4,6,1,7", ("4,6", "1,7"))],
+    [
+        ("0,1,2,3", ("0,1,2,3", "0,1,2,3")),
+        ("4,6,1,7", ("4,6,1,7", "4,6,1,7")),
+    ],
 )
 def test_resolve_gpu_topology_preserves_visible_order(visible, expected) -> None:
     assert resolve_gpu_topology(load_project_config(), visible) == expected
@@ -65,12 +68,20 @@ def test_run_endpoints_are_distinct_and_override_fixed_config_port(monkeypatch) 
     endpoints = allocate_vllm_endpoints(config)
     assert endpoints.host == "127.0.0.1"
     assert len({endpoints.server_port, endpoints.group_port, endpoints.ddp_port}) == 3
-    command = build_server_command(config, endpoints)
-    assert command[command.index("--port") + 1] == str(endpoints.server_port)
 
 
 def test_build_server_command_matches_config() -> None:
     config = load_project_config()
+    config = config.model_copy(
+        update={
+            "vllm": config.vllm.model_copy(
+                update={
+                    "mode": "server",
+                    "server_base_url": "http://127.0.0.1:8000",
+                }
+            )
+        }
+    )
     command = build_server_command(config)
     assert command[1] == "vllm-serve"
     assert config.model.model_path in command

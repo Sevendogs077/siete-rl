@@ -428,6 +428,36 @@ def test_post_tool_regeneration_preserves_per_trajectory_lineage(monkeypatch) ->
     assert value.vllm_generation.num_generations_seen == [1]
 
 
+def test_colocated_post_tool_regeneration_resyncs_after_level_two_sleep() -> None:
+    class SleepingColocatedVLLM:
+        enable_sleep_mode = True
+
+        def __init__(self) -> None:
+            self.sync_count = 0
+
+        def sync_weights(self) -> None:
+            self.sync_count += 1
+
+        def generate(self, *, prompts, images, num_generations, profiler=None):
+            del images, num_generations, profiler
+            return prompts, [[7] for _ in prompts], [[[0.0]] for _ in prompts], None
+
+    value = trainer()
+    value.use_vllm = True
+    value.vllm_mode = "colocate"
+    value.state = SimpleNamespace(global_step=0)
+    value._last_loaded_step = 0
+    value.args = SimpleNamespace(report_to=[])
+    value.accelerator = SimpleNamespace(is_main_process=True)
+    value.vllm_generation = SleepingColocatedVLLM()
+
+    completion_ids, logprobs = value._generate_tool_loop_turn([[1]], None, {})
+
+    assert completion_ids == [[7]]
+    assert logprobs == [[0.0]]
+    assert value.vllm_generation.sync_count == 1
+
+
 def test_parallel_tool_failure_isolated_to_failing_sample(monkeypatch) -> None:
     """单样本工具抛错时，仅该样本得到 error observation。"""
     envs = [Environment() for _ in range(3)]

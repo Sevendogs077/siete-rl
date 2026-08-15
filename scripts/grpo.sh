@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 薄启动器：supervisor 负责 vLLM 生命周期、GPU 拆分与容器清扫。
+# 薄启动器：supervisor 负责四卡 colocate worker 生命周期与容器清扫。
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

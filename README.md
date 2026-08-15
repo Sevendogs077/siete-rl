@@ -46,20 +46,11 @@ Training requires 4 GPUs; evaluation requires 1 GPU. Follow the [setup guide](do
 
 ```bash
 uv sync
-bash scripts/prepare.sh          # pull task images and generate assets
-bash scripts/qualify.sh          # check config, data, images, model, and GPU
-export WANDB_API_KEY=<your-key>
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh             # start training
-CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # start evaluation
-# override the script's 16/4 worker defaults on a smaller host
-EVAL_ROLLOUT_WORKERS=8 EVAL_HARNESS_WORKERS=2 CUDA_VISIBLE_DEVICES=0 \
-  bash scripts/eval.sh outputs/<run-id>
+bash scripts/prepare.sh
+bash scripts/qualify.sh
+WANDB_API_KEY=<your-key> CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
 ```
-
-`scripts/eval.sh` defaults rollout/harness workers to `16/4`; explicit environment
-values override them. Direct `python -m siete_rl.eval` calls retain safe `1/1` defaults.
-Each simultaneous evaluation process has its own worker pool, so size the combined
-Docker CPU and memory limits across all running evaluations.
 
 > [!WARNING]
 > The agent executes model-generated code. Only connect a dedicated, non-production Docker daemon.

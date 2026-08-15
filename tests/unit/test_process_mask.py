@@ -240,6 +240,49 @@ def test_credit_mask_requires_liger(monkeypatch, use_process_mask):
 
 
 class TestGenerateAndScoreCompletionsOverride:
+    @pytest.mark.parametrize(
+        ("process_index", "local_reward", "expected_advantage"),
+        [(0, 0.0, -1 / 9), (2, 1.0, 0.0)],
+    )
+    def test_reference_reward_group_can_span_processes(
+        self,
+        monkeypatch,
+        process_index,
+        local_reward,
+        expected_advantage,
+    ):
+        output = {
+            "completion_mask": torch.ones(4, 1, dtype=torch.long),
+            "tool_mask": torch.ones(4, 1, dtype=torch.long),
+            "advantages": torch.zeros(4),
+        }
+        monkeypatch.setattr(
+            GRPOTrainer,
+            "_generate_and_score_completions",
+            lambda self, inputs: output,
+        )
+        trainer = _bare_trainer(
+            use_process_mask=False,
+            environments=[_mask_env(reward=local_reward) for _ in range(4)],
+        )
+        trainer._extra_reference_rewards = (1.0,)
+        trainer.num_generations = 8
+        trainer.scale_rewards = "none"
+        trainer.accelerator = SimpleNamespace(
+            process_index=process_index,
+            gather=lambda rewards: torch.tensor(
+                [0.0] * 8 + [1.0] * 8,
+                dtype=rewards.dtype,
+                device=rewards.device,
+            ),
+        )
+
+        result = trainer._generate_and_score_completions([])
+
+        assert result["advantages"].tolist() == pytest.approx(
+            [expected_advantage] * 4
+        )
+
     def test_disabled_process_mask_still_applies_credit_mask(self, monkeypatch):
         output = {
             "completion_mask": torch.ones(1, 2, dtype=torch.long),

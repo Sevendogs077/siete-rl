@@ -57,17 +57,18 @@ def allocate_vllm_endpoints(config: ProjectConfig) -> RunEndpoints:
     server/client 初始化会明确失败，而不会误连到另一个 run。
     """
 
-    if config.vllm.mode != "server" or config.vllm.server_base_url is None:
-        raise LauncherError("vLLM endpoint allocation requires server mode with server_base_url")
-    url = urlparse(config.vllm.server_base_url)
-    if url.scheme != "http" or url.hostname is None:
-        raise LauncherError("vllm.server_base_url must be an http URL with a hostname")
-    server_port = _reserve_ephemeral_port(url.hostname)
-    group_port = _reserve_ephemeral_port(url.hostname, excluded={server_port})
+    host = "127.0.0.1"
+    if config.vllm.server_base_url is not None:
+        url = urlparse(config.vllm.server_base_url)
+        if url.scheme != "http" or url.hostname is None:
+            raise LauncherError("vllm.server_base_url must be an http URL with a hostname")
+        host = url.hostname
+    server_port = _reserve_ephemeral_port(host)
+    group_port = _reserve_ephemeral_port(host, excluded={server_port})
     ddp_port = _reserve_ephemeral_port(
-        url.hostname, excluded={server_port, group_port}
+        host, excluded={server_port, group_port}
     )
-    return RunEndpoints(url.hostname, server_port, group_port, ddp_port)
+    return RunEndpoints(host, server_port, group_port, ddp_port)
 
 
 def _reserve_ephemeral_port(host: str, *, excluded: set[int] | None = None) -> int:
@@ -84,17 +85,20 @@ def _reserve_ephemeral_port(host: str, *, excluded: set[int] | None = None) -> i
 def resolve_gpu_topology(
     config: ProjectConfig, visible: str | None = None
 ) -> tuple[str, str] | None:
-    """只解析 server/trainer 卡，不修改调用方环境。"""
+    """解析 rollout/trainer 卡，不修改调用方环境。"""
 
-    if config.vllm.mode != "server":
+    if not config.runtime.runtime_qualified:
         return None
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "") if visible is None else visible
     devices = [value.strip() for value in visible.split(",") if value.strip()]
     if len(devices) != 4:
         raise LauncherError(
-            "vllm server mode requires CUDA_VISIBLE_DEVICES to list exactly four GPUs; "
+            "qualified runtime requires CUDA_VISIBLE_DEVICES to list exactly four GPUs; "
             f"got {visible!r}"
         )
+    if config.vllm.mode == "colocate":
+        selected = ",".join(devices)
+        return selected, selected
     return ",".join(devices[:2]), ",".join(devices[2:])
 
 

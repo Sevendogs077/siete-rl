@@ -96,16 +96,16 @@ wandb:
   notes: null
 vllm:
   use_vllm: true
-  mode: server
+  mode: colocate
   model_impl: vllm
-  enable_sleep_mode: false
-  tensor_parallel_size: 2
-  server_base_url: http://127.0.0.1:8000
-  gpu_memory_utilization: 0.8
+  enable_sleep_mode: true
+  tensor_parallel_size: 4
+  server_base_url: null
+  gpu_memory_utilization: 0.5
   max_model_length: 32768
 runtime:
   runtime_qualified: true
-  process_count: 2
+  process_count: 4
   base_seed: 42
 output:
   output_root: outputs

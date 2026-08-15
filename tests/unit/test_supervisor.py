@@ -5,7 +5,6 @@ import signal
 from pathlib import Path
 
 from siete_rl.config import load_config
-from siete_rl.launcher import RunEndpoints
 from siete_rl import supervisor
 
 
@@ -13,8 +12,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/stage1.yaml"
 
 
-def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path: Path) -> None:
+def test_supervisor_starts_four_gpu_colocated_worker(monkeypatch, tmp_path: Path) -> None:
     config, project_root, resolved_config_path = load_config(CONFIG_PATH)
+    config = config.model_copy(
+        update={
+            "vllm": config.vllm.model_copy(
+                update={
+                    "mode": "colocate",
+                    "enable_sleep_mode": True,
+                    "tensor_parallel_size": 4,
+                    "server_base_url": None,
+                }
+            ),
+            "runtime": config.runtime.model_copy(update={"process_count": 4}),
+        }
+    )
     calls: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -25,9 +37,12 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
         "preflight",
         lambda loaded, root: {"missing_domain_modules": [], "status": "preflight_passed"},
     )
-    monkeypatch.setattr(supervisor, "resolve_gpu_topology", lambda loaded: ("0,1", "2,3"))
-    endpoints = RunEndpoints("127.0.0.1", 18421, 18422, 18423)
-    monkeypatch.setattr(supervisor, "allocate_vllm_endpoints", lambda loaded: endpoints)
+    monkeypatch.setattr(supervisor, "resolve_gpu_topology", lambda loaded: ("0,1,2,3", "0,1,2,3"))
+    monkeypatch.setattr(
+        supervisor,
+        "allocate_vllm_endpoints",
+        lambda loaded: type("Endpoints", (), {"ddp_port": 18423})(),
+    )
     monkeypatch.setattr(supervisor, "generate_run_id", lambda: "run-supervised")
 
     expected_run_id = f"stage{config.dataset.stage}-run-supervised"
@@ -37,19 +52,9 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
     monkeypatch.setattr(supervisor, "_prepare_workspace", lambda root, run_id: workspace)
 
     class FakeServer:
-        pid = 441
-
         def __init__(self, command, **kwargs) -> None:
-            calls["server_command"] = command
-            calls["server_kwargs"] = kwargs
-
-        def start(self, *, cancelled=None) -> None:
-            del cancelled
-            calls["server_started"] = True
-
-        def close(self):
-            calls["server_closed"] = True
-            return {"scope": "vllm_server", "final_state": "terminated", "residual": False}
+            del command, kwargs
+            raise AssertionError("colocate mode must not start a separate vLLM server")
 
     class FakeWorker:
         pid = 442
@@ -74,23 +79,18 @@ def test_supervisor_owns_server_and_starts_isolated_worker(monkeypatch, tmp_path
     report = supervisor.run(CONFIG_PATH)
 
     assert report == expected
-    assert calls["server_started"] is True
-    assert calls["server_closed"] is True
     command = calls["worker_command"]
-    assert command[command.index("--server-port") + 1] == "18421"
-    assert command[command.index("--group-port") + 1] == "18422"
     assert command[:4] == [
         command[0], "-m", "accelerate.commands.launch", "--num_processes"
     ]
-    assert command[command.index("--num_processes") + 1] == "2"
+    assert command[command.index("--num_processes") + 1] == "4"
     assert "--multi_gpu" in command
     assert command[command.index("--main_process_port") + 1] == "18423"
-    assert command[-2:] != ["--trainer-gpu", "2,3"]
+    assert "--server-port" not in command
+    assert "--group-port" not in command
     assert calls["worker_kwargs"]["start_new_session"] is True
     worker_env = calls["worker_kwargs"]["env"]
-    assert worker_env["CUDA_VISIBLE_DEVICES"] == "2,3"
-    assert "127.0.0.1" in worker_env["NO_PROXY"]
-    assert "localhost" in worker_env["no_proxy"]
+    assert worker_env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
 
 
 def test_supervisor_marks_stale_worker_report_interrupted(tmp_path: Path) -> None:

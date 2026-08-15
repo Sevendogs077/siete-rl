@@ -144,11 +144,11 @@ def test_entry_delegates_to_the_supervisor(
     assert result == outcome
 
 
-@pytest.mark.parametrize("local_rank, expected", [("0", 2), ("1", 3)])
+@pytest.mark.parametrize("local_rank, expected", [("0", 0), ("1", 1), ("2", 2), ("3", 3)])
 def test_trainer_visible_gpu_is_selected_by_local_rank(
     monkeypatch: pytest.MonkeyPatch, local_rank: str, expected: int
 ) -> None:
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.setenv("LOCAL_RANK", local_rank)
     selected = []
     monkeypatch.setattr("torch.cuda.set_device", selected.append)
@@ -156,8 +156,8 @@ def test_trainer_visible_gpu_is_selected_by_local_rank(
     assert selected == [int(local_rank)]
 
 
-@pytest.mark.parametrize("value", [None, "", "2", "2,3,4"])
-def test_trainer_visible_gpu_rejects_non_pair_selection(
+@pytest.mark.parametrize("value", [None, "", "0", "0,1,2", "0,1,2,3,4"])
+def test_trainer_visible_gpu_rejects_non_four_gpu_selection(
     monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
     if value is None:
@@ -165,19 +165,25 @@ def test_trainer_visible_gpu_rejects_non_pair_selection(
     else:
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", value)
     monkeypatch.setenv("LOCAL_RANK", "0")
-    with pytest.raises(RuntimeNotQualifiedError, match="exactly two"):
+    with pytest.raises(RuntimeNotQualifiedError, match="exactly four"):
         _require_trainer_visible_gpus()
 
 
-def test_liger_runtime_flags_disable_dynamo_when_enabled(
+@pytest.mark.parametrize(("mode", "disabled"), [("colocate", False), ("server", True)])
+def test_liger_runtime_flags_do_not_disable_colocate_vllm_compile(
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    disabled: bool,
 ) -> None:
     config, _, _ = load_config(CONFIG_7B)
+    config = config.model_copy(
+        update={"vllm": config.vllm.model_copy(update={"mode": mode})}
+    )
     monkeypatch.delenv("TORCHDYNAMO_DISABLE", raising=False)
 
     _apply_liger_runtime_flags(config)
 
-    assert os.environ["TORCHDYNAMO_DISABLE"] == "1"
+    assert (os.environ.get("TORCHDYNAMO_DISABLE") == "1") is disabled
     assert (
         logging.getLogger("transformers.configuration_utils").level == logging.ERROR
     )
@@ -222,7 +228,7 @@ def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(tmp_path: Path) -> None
     assert grpo_config.num_train_epochs == 4
     assert grpo_config.max_steps == -1
     assert grpo_config.generation_batch_size == 16
-    assert grpo_config.gradient_accumulation_steps == 8
+    assert grpo_config.gradient_accumulation_steps == 4
 
 
 def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,6 +397,83 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
     assert recorder.begun == [
         (prompts[0], 4, "getmoto__moto-7023"),
         (prompts[0], 4, "getmoto__moto-7023"),
+    ]
+
+
+def test_recording_reward_splits_a_global_generation_batch_by_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_a = "getmoto__moto-5321"
+    task_b = "getmoto__moto-5502"
+
+    class FakeRecorder:
+        def __init__(self) -> None:
+            self.task_id = None
+            self.begun = []
+            self.slots = []
+
+        def begin_group(self, prompt, rollout_count, *, task_id):
+            del prompt
+            self.task_id = task_id
+            self.begun.append((task_id, rollout_count))
+
+        def write_rollout(self, index, **values):
+            del values
+            self.slots.append((self.task_id, index))
+
+        def complete_group(self, **values):
+            del values
+
+        def observe_native_policy_path(self, reached):
+            del reached
+
+        def merge_cleanup_events(self, events):
+            del events
+
+    def gather(local_records):
+        records = []
+        for task_id in (task_a, task_b):
+            for _ in range(2):
+                for record in local_records:
+                    trajectory = {**record["trajectory"], "task_id": task_id}
+                    records.append(
+                        {
+                            **record,
+                            "task_id": task_id,
+                            "trajectory": trajectory,
+                            "global_slot": len(records),
+                        }
+                    )
+        return records
+
+    monkeypatch.setattr("siete_rl.train._gather_rollout_records", gather)
+    environments = [_RecordingEnvironment(0), _RecordingEnvironment(1)]
+
+    def adapter(*, environments, **kwargs):
+        del kwargs
+        for environment in environments:
+            environment.trajectory = _trajectory_for(task_a)
+        return [0.0, 0.0]
+
+    recorder = FakeRecorder()
+    reward = _recording_reward(recorder, adapter)
+    reward(
+        prompts=[[{"role": "user", "content": "prompt"}]] * 2,
+        completions=[[{"role": "assistant", "content": "done"}]] * 2,
+        environments=environments,
+        task_id=[task_a, task_a],
+    )
+
+    assert recorder.begun == [(task_a, 4), (task_b, 4)]
+    assert recorder.slots == [
+        (task_a, 0),
+        (task_a, 1),
+        (task_a, 2),
+        (task_a, 3),
+        (task_b, 0),
+        (task_b, 1),
+        (task_b, 2),
+        (task_b, 3),
     ]
 
 

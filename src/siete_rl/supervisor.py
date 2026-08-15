@@ -54,7 +54,7 @@ class _SignalLatch:
 
 
 def run(config_path: str | Path) -> dict[str, Any]:
-    """启动 vLLM 与 worker，并在 worker 卡死时仍能完成有界收束。"""
+    """启动训练 worker，并在 worker 卡死时仍能完成有界收束。"""
 
     config, project_root, resolved_config_path = load_config(config_path)
     report = preflight(config, project_root)
@@ -67,7 +67,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
         )
     topology = resolve_gpu_topology(config)
     if topology is None:
-        raise RuntimeError("supervised GRPO requires vLLM server mode")
+        raise RuntimeError("supervised GRPO requires a qualified GPU topology")
     server_gpu, trainer_gpu = topology
     run_id = config.output.run_id or f"stage{config.dataset.stage}-{generate_run_id()}"
     endpoints = allocate_vllm_endpoints(config)
@@ -77,35 +77,47 @@ def run(config_path: str | Path) -> dict[str, Any]:
         "run_id": run_id,
         "state": "starting",
         "started_at": _utc_now(),
-        "endpoints": {
-            "server_url": endpoints.base_url,
-            "server_port": endpoints.server_port,
-            "group_port": endpoints.group_port,
-        },
+        "endpoints": (
+            {
+                "server_url": endpoints.base_url,
+                "server_port": endpoints.server_port,
+                "group_port": endpoints.group_port,
+                "ddp_port": endpoints.ddp_port,
+            }
+            if config.vllm.mode == "server"
+            else {"ddp_port": endpoints.ddp_port}
+        ),
         "worker": None,
         "server": None,
         "cleanup": {"containers_removed": [], "errors": []},
     }
     _write_json(state_path, state)
 
-    server = VLLMServer(
-        build_server_command(config, endpoints),
-        server_gpu=server_gpu,
-        base_url=endpoints.base_url,
-        log_path=output_dir / "vllm.log",
-    )
+    server = None
+    if config.vllm.mode == "server":
+        server = VLLMServer(
+            build_server_command(config, endpoints),
+            server_gpu=server_gpu,
+            base_url=endpoints.base_url,
+            log_path=output_dir / "vllm.log",
+        )
     worker: subprocess.Popen[bytes] | None = None
     interrupted_signum: int | None = None
     try:
         with _SignalLatch() as latch:
-            try:
-                server.start(cancelled=lambda: latch.signum is not None)
-            except LauncherError:
-                if latch.signum is None:
-                    raise
-                interrupted_signum = latch.signum
+            if server is not None:
+                try:
+                    server.start(cancelled=lambda: latch.signum is not None)
+                except LauncherError:
+                    if latch.signum is None:
+                        raise
+                    interrupted_signum = latch.signum
             if interrupted_signum is None:
-                state["server"] = {"pid": server.pid, "state": "ready"}
+                state["server"] = (
+                    {"pid": server.pid, "state": "ready"}
+                    if server is not None
+                    else {"pid": None, "state": "colocated"}
+                )
                 state["state"] = "running"
                 _write_json(state_path, state)
                 worker = _start_worker(
@@ -113,6 +125,8 @@ def run(config_path: str | Path) -> dict[str, Any]:
                     run_id=run_id,
                     endpoints=endpoints,
                     trainer_gpus=trainer_gpu,
+                    process_count=config.runtime.process_count,
+                    vllm_mode=config.vllm.mode,
                 )
                 state["worker"] = {"pid": worker.pid, "state": "running"}
                 _write_json(state_path, state)
@@ -127,7 +141,11 @@ def run(config_path: str | Path) -> dict[str, Any]:
     finally:
         if worker is not None and worker.poll() is None:
             _terminate_process_group(worker, signal.SIGTERM, WORKER_TERM_GRACE_SEC)
-        server_handle = server.close()
+        server_handle = (
+            server.close()
+            if server is not None
+            else {"scope": "vllm_server", "final_state": "colocated", "residual": False}
+        )
         state["server"] = server_handle
         _sweep_run_containers(run_id, state)
         state["finished_at"] = _utc_now()
@@ -170,13 +188,15 @@ def _start_worker(
     run_id: str,
     endpoints: Any,
     trainer_gpus: str,
+    process_count: int,
+    vllm_mode: str,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
         "-m",
         "accelerate.commands.launch",
         "--num_processes",
-        "2",
+        str(process_count),
         "--multi_gpu",
         "--num_machines",
         "1",
@@ -188,19 +208,23 @@ def _start_worker(
         config_path.as_posix(),
         "--run-id",
         run_id,
-        "--server-host",
-        endpoints.host,
-        "--server-port",
-        str(endpoints.server_port),
-        "--group-port",
-        str(endpoints.group_port),
     ]
+    if vllm_mode == "server":
+        command.extend(
+            [
+                "--server-host",
+                endpoints.host,
+                "--server-port",
+                str(endpoints.server_port),
+                "--group-port",
+                str(endpoints.group_port),
+            ]
+        )
     env = dict(os.environ)
     env["SWE_AGENT_RUN_ID"] = run_id
     env["CUDA_VISIBLE_DEVICES"] = trainer_gpus
-    # TRL 的 VLLMClient 在 trainer 构造阶段以 requests.get 探测本机 server；
-    # 该实现不设 timeout，必须确保 loopback 不会被 HTTP(S)_PROXY 截获。
-    allow_loopback_without_proxy(env)
+    if vllm_mode == "server":
+        allow_loopback_without_proxy(env)
     return subprocess.Popen(command, env=env, start_new_session=True)
 
 

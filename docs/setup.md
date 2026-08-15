@@ -6,7 +6,7 @@ This guide takes a clean checkout to a qualified SieteRL runtime. Run every comm
 
 - Linux x86_64 with Docker and an NVIDIA driver.
 - Python 3.12 and [uv](https://docs.astral.sh/uv/). The repository pins Python 3.12.13.
-- Two GPUs for training—one for the vLLM server and one for the trainer—or one GPU for evaluation. The reference system uses A100 80 GB GPUs; trainer memory peaks near 42 GB, so a 48 GB GPU is sufficient.
+- Four GPUs for training with the qualified `colocate` configuration, or one GPU for evaluation. The reference system uses A100 80 GB GPUs.
 - At least 400 GB of free disk space: task images use about 284 GB, and the base model uses about 15 GB.
 - Root access to start a dedicated Docker daemon.
 

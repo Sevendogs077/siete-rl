@@ -46,11 +46,10 @@ SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 poli
 
 ```bash
 uv sync
-bash scripts/prepare.sh          # 拉取任务镜像并生成 assets
-bash scripts/qualify.sh          # 检查配置、数据、镜像、模型与 GPU
-export WANDB_API_KEY=<your-key>
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh             # 启动训练
-CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>  # 启动评测
+bash scripts/prepare.sh
+bash scripts/qualify.sh
+WANDB_API_KEY=<your-key> CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
 ```
 
 > [!WARNING]

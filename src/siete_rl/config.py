@@ -233,13 +233,13 @@ class ProjectConfig(StrictConfig):
 
         if self.runtime.runtime_qualified:
             if (
-                self.vllm.mode != "server"
-                or self.vllm.tensor_parallel_size != 2
-                or self.vllm.server_base_url != "http://127.0.0.1:8000"
-                or self.vllm.enable_sleep_mode
-                or self.runtime.process_count != 2
+                self.vllm.mode != "colocate"
+                or self.vllm.tensor_parallel_size != 4
+                or self.vllm.server_base_url is not None
+                or not self.vllm.enable_sleep_mode
+                or self.runtime.process_count != 4
             ):
-                raise ValueError("qualified runtime requires a separate local vLLM server")
+                raise ValueError("qualified runtime requires four-GPU colocate mode")
         elif self.vllm.tensor_parallel_size is not None or self.vllm.server_base_url is not None:
             raise ValueError("an unqualified runtime must not activate GPU topology")
         return self

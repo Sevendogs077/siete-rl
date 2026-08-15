@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import traceback
 import weakref
@@ -161,7 +162,7 @@ def _apply_liger_runtime_flags(config: ProjectConfig) -> None:
     - 降噪：peft 0.19 仍读 ``config.use_return_dict``（transformers v5 改名
       ``return_dict`` 后的兼容别名），每进程首次 PEFT forward 打一条 warning_once；
       行为无害，按模块精准降噪。与 liger 无关，恒生效。
-    - dynamo 绕行（仅 liger 开启时）：torch 2.11 的 dynamo 在 liger 0.8 chunked GRPO
+    - dynamo 绕行（仅 server + liger）：torch 2.11 的 dynamo 在 liger 0.8 chunked GRPO
       loss 遇到新 shape 重编译时，于 ``produce_guards_verbose`` 对无 source 的
       symbol 抛 ``IndexError: list index out of range``（见 run 20260727T120045Z-592f
       step 2 崩溃）。liger 的显存节省来自分块而非 compile，eager 回退不改变显存
@@ -170,7 +171,7 @@ def _apply_liger_runtime_flags(config: ProjectConfig) -> None:
     """
 
     logging.getLogger("transformers.configuration_utils").setLevel(logging.ERROR)
-    if config.generation.use_liger_kernel:
+    if config.generation.use_liger_kernel and config.vllm.mode == "server":
         os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 
@@ -470,7 +471,7 @@ def run_worker(
     config_path: str | Path,
     *,
     run_id: str,
-    vllm_endpoints: Any,
+    vllm_endpoints: Any | None,
 ) -> dict[str, Any]:
     """在 supervisor 创建的独立进程中执行真实 GRPO。"""
 
@@ -688,7 +689,10 @@ def _run_once(
             "stage": stage,
             "interrupted": str(interrupted),
         }
-        recorder.log(traceback.format_exc())
+        failure_traceback = traceback.format_exc()
+        recorder.log(failure_traceback)
+        if not writer:
+            print(failure_traceback, file=sys.stderr, flush=True)
     finally:
         oom_suspected = failure is not None and "out of memory" in failure["message"].lower()
 
@@ -887,49 +891,40 @@ def _recording_reward(
                 return rewards
             for record in global_records[len(local_records):]:
                 recorder.merge_cleanup_events(record["cleanup_events"])
-            trajectory_task_ids = {
-                record["trajectory"]["task_id"]
-                if isinstance(record["trajectory"], dict)
-                else record["trajectory"].task_id
-                for record in global_records
-            }
-            if trajectory_task_ids != {group_task_id}:
-                raise RecordingRuntimeError(
-                    "group mixes tasks: "
-                    f"callback={group_task_id!r}, trajectories={sorted(trajectory_task_ids)}"
-                )
-            recorder.begin_group(
-                global_records[0]["prompt"],
-                len(global_records),
-                task_id=group_task_id,
-            )
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for record in global_records:
+                groups.setdefault(record["task_id"], []).append(record)
             from siete_rl.models import Settlement, Trajectory, Verification
 
-            for record in global_records:
-                recorder.write_rollout(
-                    record["global_slot"],
-                    messages=record["messages"],
-                    trajectory=_restore_record_model(record["trajectory"], Trajectory),
-                    patch=record["patch"],
-                    verification=_restore_record_model(
-                        record["verification"], Verification
-                    ),
+            for task_id, records in groups.items():
+                recorder.begin_group(
+                    records[0]["prompt"], len(records), task_id=task_id
                 )
-            recorder.complete_group(
-                episode_ids=[record["episode_id"] for record in global_records],
-                rewards=[record["reward"] for record in global_records],
-                verifications=[
-                    _restore_record_model(record["verification"], Verification)
-                    for record in global_records
-                ],
-                settlements=[
-                    _restore_record_model(record["settlement"], Settlement)
-                    for record in global_records
-                ],
-            )
-            recorder.observe_native_policy_path(
-                any(record["native_policy_path_reached"] for record in global_records)
-            )
+                for slot, record in enumerate(records):
+                    recorder.write_rollout(
+                        slot,
+                        messages=record["messages"],
+                        trajectory=_restore_record_model(record["trajectory"], Trajectory),
+                        patch=record["patch"],
+                        verification=_restore_record_model(
+                            record["verification"], Verification
+                        ),
+                    )
+                recorder.complete_group(
+                    episode_ids=[record["episode_id"] for record in records],
+                    rewards=[record["reward"] for record in records],
+                    verifications=[
+                        _restore_record_model(record["verification"], Verification)
+                        for record in records
+                    ],
+                    settlements=[
+                        _restore_record_model(record["settlement"], Settlement)
+                        for record in records
+                    ],
+                )
+                recorder.observe_native_policy_path(
+                    any(record["native_policy_path_reached"] for record in records)
+                )
             return rewards
         except BaseException:
             for environment in environments:
@@ -976,13 +971,13 @@ def _join_messages(prompt: object, completion: object) -> list[object]:
 def _require_trainer_visible_gpus() -> int:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     devices = [value.strip() for value in visible.split(",")] if visible else []
-    if len(devices) != 2 or any(not value.isdecimal() for value in devices):
+    if len(devices) != 4 or any(not value.isdecimal() for value in devices):
         raise RuntimeNotQualifiedError(
-            "CUDA_VISIBLE_DEVICES must explicitly select exactly two Trainer GPUs"
+            "CUDA_VISIBLE_DEVICES must explicitly select exactly four Trainer GPUs"
         )
     local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
-    if local_rank not in (0, 1):
-        raise RuntimeNotQualifiedError("LOCAL_RANK must be 0 or 1")
+    if local_rank not in (0, 1, 2, 3):
+        raise RuntimeNotQualifiedError("LOCAL_RANK must be between 0 and 3")
     import torch
 
     torch.cuda.set_device(local_rank)
@@ -994,8 +989,8 @@ def _gpu_baseline(physical_device: int) -> dict[str, int]:
     import vllm._C  # noqa: F401
 
     local_rank = int(os.environ["LOCAL_RANK"])
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 2:
-        raise RuntimeError("CUDA_VISIBLE_DEVICES does not expose exactly two usable CUDA devices")
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 4:
+        raise RuntimeError("CUDA_VISIBLE_DEVICES does not expose exactly four usable CUDA devices")
     if "A100" not in torch.cuda.get_device_name(local_rank):
         raise RuntimeError(
             f"local CUDA device is not an A100: {torch.cuda.get_device_name(local_rank)}"

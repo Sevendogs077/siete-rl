@@ -16,20 +16,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="siete_rl.worker")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--server-host", required=True)
-    parser.add_argument("--server-port", type=int, required=True)
-    parser.add_argument("--group-port", type=int, required=True)
+    parser.add_argument("--server-host")
+    parser.add_argument("--server-port", type=int)
+    parser.add_argument("--group-port", type=int)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    endpoints = RunEndpoints(
-        host=args.server_host,
-        server_port=args.server_port,
-        group_port=args.group_port,
-        ddp_port=int(os.environ["MASTER_PORT"]),
-    )
+    endpoints = None
+    if args.server_host is not None:
+        endpoints = RunEndpoints(
+            host=args.server_host,
+            server_port=args.server_port,
+            group_port=args.group_port,
+            ddp_port=int(os.environ["MASTER_PORT"]),
+        )
     try:
         with SignalBoundary():
             report = train.run_worker(

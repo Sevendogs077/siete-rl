@@ -133,6 +133,8 @@ class SWEGRPOTrainer(GRPOTrainer):
         super().__init__(*args, **kwargs)
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
+        if self.vllm_mode == "colocate":
+            self.liger_loss.compiled = False
 
     def _get_train_sampler(self, dataset=None):
         if dataset is None:
@@ -210,7 +212,10 @@ class SWEGRPOTrainer(GRPOTrainer):
         """
         if not self.use_vllm:
             return self._generate_single_turn(prompt_ids, images, multimodal_fields)
-        if self.state.global_step != self._last_loaded_step:
+        if self.state.global_step != self._last_loaded_step or (
+            self.vllm_mode == "colocate"
+            and self.vllm_generation.enable_sleep_mode
+        ):
             with profiling_context(self, "sync_weights"):
                 self.vllm_generation.sync_weights()
             self._last_loaded_step = self.state.global_step
@@ -348,14 +353,17 @@ class SWEGRPOTrainer(GRPOTrainer):
                 if self.model.training
                 else self.num_generations_eval
             )
-            rewards = torch.tensor(
+            local_rewards = torch.tensor(
                 [
                     torch.nan if environment._reward is None else environment._reward
                     for environment in environments
                 ],
                 dtype=output["advantages"].dtype,
                 device=output["advantages"].device,
-            ).view(-1, num_generations)
+            )
+            rewards = self.accelerator.gather(local_rewards).view(
+                -1, num_generations
+            )
             references = torch.tensor(
                 self._extra_reference_rewards,
                 dtype=rewards.dtype,
@@ -371,7 +379,9 @@ class SWEGRPOTrainer(GRPOTrainer):
                 )
             elif self.scale_rewards == "batch":
                 advantages = advantages / (nanstd(baseline_rewards) + 1e-4)
-            output["advantages"] = torch.nan_to_num(advantages, nan=0.0).flatten()
+            advantages = torch.nan_to_num(advantages, nan=0.0).flatten()
+            start = self.accelerator.process_index * len(local_rewards)
+            output["advantages"] = advantages[start : start + len(local_rewards)]
         completion_mask = output["completion_mask"]
         tool_mask = output.get("tool_mask")
         advantages = output.get("advantages")

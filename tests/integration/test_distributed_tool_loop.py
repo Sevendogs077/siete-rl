@@ -33,6 +33,21 @@ class FakeClient:
         }
 
 
+class FakeColocatedVLLM:
+    enable_sleep_mode = True
+
+    def sync_weights(self) -> None:
+        pass
+
+    def generate(self, *, prompts, images, num_generations, profiler=None):
+        del num_generations, profiler
+        gathered_prompts = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered_prompts, prompts)
+        self.gathered_sizes = [len(batch) for batch in gathered_prompts]
+        completion_ids = [[prompt[0] + 100] for prompt in prompts]
+        return prompts, completion_ids, [[[float(ids[0])]] for ids in completion_ids], None
+
+
 class Environment:
     def __init__(self) -> None:
         self.terminated = False
@@ -141,6 +156,30 @@ def worker(result_dir: Path) -> None:
     dist.destroy_process_group()
 
 
+def colocate_worker(result_dir: Path) -> None:
+    dist.init_process_group("gloo")
+    rank = dist.get_rank()
+    counts = [2, 1, 0, 1]
+    prompts = [[rank * 10 + index + 1] for index in range(counts[rank])]
+    images = [[f"image-{rank}-{index}"] for index in range(counts[rank])] or None
+    trainer = make_trainer(rank)
+    trainer.vllm_mode = "colocate"
+    trainer._tokenizer = SimpleNamespace(eos_token_id=99)
+    trainer.vllm_generation = FakeColocatedVLLM()
+
+    completion_ids, _ = trainer._generate_tool_loop_turn(prompts, images, {})
+
+    (result_dir / f"colocate-rank-{rank}.json").write_text(
+        json.dumps(
+            {
+                "completion_ids": completion_ids,
+                "gathered_sizes": trainer.vllm_generation.gathered_sizes,
+            }
+        )
+    )
+    dist.destroy_process_group()
+
+
 def test_uneven_post_tool_generation_preserves_rank_lineage(tmp_path: Path) -> None:
     command = [
         sys.executable,
@@ -171,8 +210,40 @@ def test_uneven_post_tool_generation_preserves_rank_lineage(tmp_path: Path) -> N
     assert rank1["gathered_records"] == []
 
 
+def test_colocate_tp4_preserves_uneven_active_prompts(
+    tmp_path: Path,
+) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=4",
+        __file__,
+        "--colocate-worker",
+        str(tmp_path),
+    ]
+    subprocess.run(command, check=True, timeout=30)
+
+    results = [
+        json.loads((tmp_path / f"colocate-rank-{rank}.json").read_text())
+        for rank in range(4)
+    ]
+    assert [result["completion_ids"] for result in results] == [
+        [[101], [102]],
+        [[111]],
+        [],
+        [[131]],
+    ]
+    assert [result["gathered_sizes"] for result in results] == [[2, 1, 0, 1]] * 4
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", type=Path)
+    parser.add_argument("--colocate-worker", type=Path)
     args = parser.parse_args()
-    worker(args.worker)
+    if args.worker:
+        worker(args.worker)
+    else:
+        colocate_worker(args.colocate_worker)
