@@ -91,9 +91,10 @@ def resolve_gpu_topology(
         return None
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "") if visible is None else visible
     devices = [value.strip() for value in visible.split(",") if value.strip()]
-    if len(devices) != 4:
+    expected = config.runtime.process_count
+    if len(devices) != expected:
         raise LauncherError(
-            "qualified runtime requires CUDA_VISIBLE_DEVICES to list exactly four GPUs; "
+            f"qualified runtime requires CUDA_VISIBLE_DEVICES to list exactly {expected} GPUs; "
             f"got {visible!r}"
         )
     if config.vllm.mode == "colocate":

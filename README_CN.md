@@ -17,16 +17,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-6e7781.svg" alt="MIT License"></a>
 </p>
 
-SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 policy 为 SWE-Gym OpenHands-7B-Agent（基于 Qwen2.5-Coder-7B 的 SFT checkpoint）。Agent 在隔离容器中进行多轮仓库级 bug 修复；提交的补丁由任务自带的可执行测试验证，verifier 结果即为奖励。训练后的 policy 在 SWE-bench Verified 上统一评测。
+SieteRL 使用强化学习训练软件工程 Agent。项目以 SWE-Gym OpenHands-7B-Agent 为起点，Agent 在隔离容器中通过多轮交互解决仓库级任务，训练结果统一在 SWE-bench Verified 上评测。
 
 > [!NOTE]
 > SieteRL 仍在积极开发中，项目结构、接口与实验配置可能变动。
-
-## 项目核心
-
-**OpenHands 兼容 scaffold** — 本仓库自行实现与 SWE-Gym OpenHands-7B-Agent 对齐的三工具交互协议。Agent 在隔离的任务容器中通过 `execute_bash` 运行命令、通过 `str_replace_editor` 浏览和修改仓库，并以 `finish` 提交当前 patch；训练与 SWE-bench Verified 评测共用同一套 prompt、工具解析器和多轮状态机。
-
-**Liger Kernel** — 训练默认通过 TRL 启用 Liger Kernel：chunked loss 不保存完整 logits，降低 32K 上下文、7B LoRA GRPO 的显存开销。重要性采样校正按 token 级计算，因为长 Agent 轨迹上序列级权重会趋近于零。
 
 ## 实验结果
 
@@ -38,18 +32,27 @@ SieteRL 是一个面向软件工程 Agent 的 GRPO 后训练项目。初始 poli
   </picture>
 </p>
 
-完整结果与运行记录见 [docs/results.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/results.md)。
+完整结果与运行记录见 [docs/results.md](docs/results.md)。
+
+## Details
+
+- **Layered Rewards** — 完全修复得 `1.0`；未完全修复的补丁仅在成功应用且全部 P2P 测试通过时获得 `0.20p²`，其中 `p` 为 F2P 通过率。
+- **NGRPO Advantage Calibration** — 计算组均值时加入不参与采样和 loss 的虚拟满分 `1.0`，让全失败组仍产生负优势；本项目不做组内标准差归一化。
+- **Sign-aware Process Mask** — 正优势下屏蔽格式错误及第 3 次起完全相同的 Bash/editor 动作；负优势下保留这些 token，让错误步骤接受惩罚而不是分享正奖励。
+- **Failure-aware Rollout Handling** — 基础设施失败不进入组内均值，也不产生梯度；物理截断仅屏蔽最后一个不完整 turn，其余异常结束的最终补丁仍会参与验证。
+- **Dr. GRPO Objective** — 使用全局最大生成长度归一化 loss，并结合 `0.16/0.24` 非对称裁剪与 token 级 vLLM 重要性修正训练 32K 工具调用轨迹。
 
 ## 复现运行
 
-训练需要 4 张 GPU，评测需要 1 张。环境、数据、模型、专用 Docker daemon、任务镜像与评测 harness 的准备步骤见[环境与资产准备指南](docs/setup.md)。
+默认使用 4 张 GPU 训练、GPU 0 评测，双卡配置及环境准备见[环境与资产准备指南](docs/setup.md)。
 
 ```bash
 uv sync
 bash scripts/prepare.sh
 bash scripts/qualify.sh
-WANDB_API_KEY=<your-key> CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
-CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
+bash scripts/stage1.sh
+bash scripts/stage2.sh outputs/<stage1-run-id>
+bash scripts/eval.sh outputs/<stage2-run-id>
 ```
 
 > [!WARNING]
@@ -68,14 +71,14 @@ docs/           实验文档与补充说明
 ## 参考与来源
 
 <p align="center">
-  <a href="https://github.com/huggingface/trl">TRL</a> ·
-  <a href="https://github.com/SWE-Gym/SWE-Gym">SWE-Gym</a> ·
-  <a href="https://github.com/SWE-bench/SWE-bench">SWE-bench</a> ·
-  <a href="https://github.com/All-Hands-AI/OpenHands">OpenHands</a> ·
   <a href="https://github.com/linkedin/Liger-Kernel">Liger Kernel</a> ·
+  <a href="https://github.com/OpenHands/OpenHands">OpenHands</a> ·
+  <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a> ·
+  <a href="https://huggingface.co/datasets/SumanthRH/SWE-Gym">SumanthRH/SWE-Gym</a> ·
+  <a href="https://github.com/SWE-bench/SWE-bench">SWE-bench</a> ·
+  <a href="https://github.com/SWE-Gym/SWE-Gym">SWE-Gym</a> ·
   <a href="https://huggingface.co/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent">SWE-Gym OpenHands-7B-Agent</a> ·
-  <a href="https://huggingface.co/datasets/SumanthRH/SWE-Gym-Subset">SumanthRH/SWE-Gym-Subset</a> ·
-  <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a>
+  <a href="https://github.com/huggingface/trl">TRL</a>
 </p>
 
 ## 开源许可

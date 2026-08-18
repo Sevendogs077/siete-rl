@@ -318,6 +318,11 @@ class DockerSandbox:
                 "container base commit mismatch: "
                 f"expected={self.task.base_commit}, actual={head.stdout.strip()}"
             )
+        reset = self.exec(
+            ["git", "-C", self.environment.workdir, "reset", "--hard", self.task.base_commit]
+        )
+        if reset.exit_code != 0 or reset.timed_out:
+            raise ContainerCreateError(_failure("failed to restore container worktree", reset))
         status = self.exec(["git", "-C", self.environment.workdir, "status", "--porcelain"])
         if status.exit_code != 0 or status.timed_out:
             raise ContainerCreateError(_failure("failed to inspect container worktree", status))

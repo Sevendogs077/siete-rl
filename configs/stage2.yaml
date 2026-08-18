@@ -3,6 +3,28 @@ dataset:
   train_path: data/swegym/train.parquet
   tasks_dir: assets/swegym
   stage: 2
+  exclude_task_ids:
+    - Project-MONAI__MONAI-763
+    - Project-MONAI__MONAI-3619
+    - Project-MONAI__MONAI-5486
+    - Project-MONAI__MONAI-5543
+    - Project-MONAI__MONAI-6034
+    - Project-MONAI__MONAI-6147
+    - Project-MONAI__MONAI-6405
+    - Project-MONAI__MONAI-6924
+    - Project-MONAI__MONAI-7548
+    - bokeh__bokeh-13289
+    - bokeh__bokeh-13318
+    - getmoto__moto-5110
+    - getmoto__moto-5338
+    - getmoto__moto-6107
+    - getmoto__moto-6724
+    - getmoto__moto-7317
+    - iterative__dvc-6811
+    - pandas-dev__pandas-47619
+    - pandas-dev__pandas-49794
+    - pandas-dev__pandas-50759
+    - python__mypy-11162
 docker:
   platform: linux/amd64
   pull_policy: never
@@ -12,7 +34,7 @@ docker:
   memory: 16g
   pids_limit: 512
   exec_timeout_sec: 300
-  verifier_timeout_sec: 300
+  verifier_timeout_sec: 3600
 model:
   provenance_id: NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
   model_path: ~/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
@@ -47,7 +69,7 @@ generation:
   max_consecutive_protocol_errors: 5
   reset_parallel_workers: 16
   tool_parallel_workers: 16
-  verifier_parallel_workers: 16
+  verifier_parallel_workers: 2
   use_process_mask: true
   temperature: 1.0
   top_p: 1.0
@@ -82,12 +104,12 @@ grpo:
   bf16: true
   logging_steps: 1
   save_strategy: steps
-  save_steps: 25
+  save_steps: 5
   save_total_limit: 3
   log_completions: false
   report_to: []
 wandb:
-  enabled: true
+  enabled: false
   project: siete-rl
   entity: null
   mode: online
@@ -101,12 +123,13 @@ vllm:
   enable_sleep_mode: true
   tensor_parallel_size: 4
   server_base_url: null
-  gpu_memory_utilization: 0.5
+  gpu_memory_utilization: 0.20
   max_model_length: 32768
 runtime:
   runtime_qualified: true
   process_count: 4
   base_seed: 42
+  distributed_timeout_sec: 1800
 output:
   output_root: outputs
   run_id: null

@@ -365,15 +365,15 @@ class TestGenerateAndScoreCompletionsOverride:
 class TestComputeLigerLossOverride:
     """always-on token_weights 经 tool_mask 通道替换父类 loss mask。"""
 
-    def test_all_zero_token_weights_bypass_model_connected_parent(self, monkeypatch):
+    def test_all_zero_token_weights_keep_ddp_gradients_connected(self, monkeypatch):
         def boom(*args, **kwargs):
             raise AssertionError("fully censored microbatch must bypass parent loss")
 
         monkeypatch.setattr(GRPOTrainer, "compute_liger_loss", boom)
         trainer = _bare_trainer(use_process_mask=False)
-        parameter = torch.nn.Parameter(torch.tensor(2.0))
+        model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
         loss = trainer.compute_liger_loss(
-            SimpleNamespace(lm_head=SimpleNamespace(weight=parameter, bias=None)),
+            model,
             {
                 "completion_mask": torch.ones(1, 2),
                 "token_weights": torch.zeros(1, 2),
@@ -383,4 +383,5 @@ class TestComputeLigerLossOverride:
         assert loss.item() == 0.0
         assert loss.requires_grad
         loss.backward()
-        assert parameter.grad is None
+        assert all(parameter.grad is not None for parameter in model.parameters())
+        assert all(torch.count_nonzero(parameter.grad) == 0 for parameter in model.parameters())

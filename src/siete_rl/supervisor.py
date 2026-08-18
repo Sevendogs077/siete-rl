@@ -123,6 +123,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
                 worker = _start_worker(
                     resolved_config_path,
                     run_id=run_id,
+                    output_dir=output_dir,
                     endpoints=endpoints,
                     trainer_gpus=trainer_gpu,
                     process_count=config.runtime.process_count,
@@ -154,8 +155,13 @@ def run(config_path: str | Path) -> dict[str, Any]:
         state["state"] = "interrupted" if interrupted_signum is not None else "finished"
         _write_json(state_path, state)
 
-    if interrupted_signum is not None and worker is not None and worker.poll() is not None:
-        _mark_interrupted_run(output_dir, interrupted_signum)
+    if worker is not None and worker.poll() is not None:
+        _mark_stale_worker_run(
+            output_dir,
+            returncode=int(worker.poll()),
+            interrupted_signum=interrupted_signum,
+            cleanup_errors=state["cleanup"]["errors"],
+        )
     worker_report = _load_worker_report(output_dir)
     if worker_report is None:
         return {
@@ -186,6 +192,7 @@ def _start_worker(
     config_path: Path,
     *,
     run_id: str,
+    output_dir: Path,
     endpoints: Any,
     trainer_gpus: str,
     process_count: int,
@@ -202,6 +209,10 @@ def _start_worker(
         "1",
         "--main_process_port",
         str(endpoints.ddp_port),
+        "--tee",
+        "3",
+        "--log_dir",
+        (output_dir / "worker_logs").as_posix(),
         "-m",
         "siete_rl.worker",
         "--config",
@@ -270,33 +281,49 @@ def _load_worker_report(output_dir: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _mark_interrupted_run(output_dir: Path, signum: int) -> None:
-    """在 worker 已退出时接管其未完成的 run.json 终态。
-
-    正常中断由 worker 自己写入终态。只有 supervisor 已确认 worker 退出、却仍
-    看到旧的 ``running`` 状态时才接管，避免 SIGKILL 后把磁盘记录永久留在运行中。
-    ``supervisor.json`` 仍是 server 与容器收束的详细记录。
-    """
+def _mark_stale_worker_run(
+    output_dir: Path,
+    *,
+    returncode: int,
+    interrupted_signum: int | None,
+    cleanup_errors: list[str],
+) -> None:
+    """worker 硬退出时接管仍为 running 的磁盘终态。"""
 
     path = output_dir / "run.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    if not isinstance(payload, dict) or payload.get("status") == "interrupted":
+    if not isinstance(payload, dict) or payload.get("status") != "running":
         return
-    signal_name = signal.Signals(signum).name
-    payload["status"] = "interrupted"
+    interrupted = interrupted_signum is not None
+    status = "interrupted" if interrupted else "failed"
+    message = (
+        f"supervisor received {signal.Signals(interrupted_signum).name}; "
+        "worker exited before normal cleanup"
+        if interrupted
+        else f"worker exited with return code {returncode} before normal run finalization"
+    )
+    payload["status"] = status
     payload["failure"] = {
-        "category": "interrupted",
-        "type": "SupervisorTermination",
-        "message": f"supervisor received {signal_name}; worker exited before normal cleanup",
+        "category": "interrupted" if interrupted else "supervisor",
+        "type": "SupervisorTermination" if interrupted else "WorkerProcessError",
+        "message": message,
         "stage": "supervisor",
-        "log": "train.log",
+        "log": "worker_logs",
     }
+    clean_release = not cleanup_errors
+    payload["cleanup"].update(
+        {
+            "status": "completed" if clean_release else "failed",
+            "clean_release": clean_release,
+            "residual_count": 0,
+        }
+    )
     time_info = payload.get("time")
+    finished_at = _utc_now()
     if isinstance(time_info, dict):
-        finished_at = _utc_now()
         time_info["finished_at"] = finished_at
         try:
             started_at = datetime.fromisoformat(str(time_info["started_at"]).replace("Z", "+00:00"))
@@ -305,6 +332,30 @@ def _mark_interrupted_run(output_dir: Path, signum: int) -> None:
         except (KeyError, TypeError, ValueError):
             pass
     _write_json(path, payload)
+
+    cleanup_path = output_dir / "cleanup.json"
+    try:
+        cleanup = json.loads(cleanup_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        cleanup = None
+    if isinstance(cleanup, dict):
+        cleanup["status"] = "completed" if clean_release else "failed"
+        cleanup["clean_release"] = clean_release
+        if clean_release:
+            cleanup["residuals"] = []
+        _write_json(cleanup_path, cleanup)
+
+    batches = sorted((output_dir / "rollouts").glob("batch-*/batch.json"))
+    if batches:
+        batch_path = batches[-1]
+        try:
+            batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            batch = None
+        if isinstance(batch, dict) and batch.get("state") == "running":
+            batch["state"] = status
+            batch["finished_at"] = finished_at
+            _write_json(batch_path, batch)
 
 
 def _worker_state(process: subprocess.Popen[bytes] | None) -> dict[str, Any] | None:

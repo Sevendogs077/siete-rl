@@ -323,6 +323,7 @@ def build_trainer(
         use_process_mask=config.generation.use_process_mask,
         tool_parallel_workers=config.generation.tool_parallel_workers,
         extra_reference_rewards=config.grpo.extra_reference_rewards,
+        distributed_timeout_sec=config.runtime.distributed_timeout_sec,
     )
 
 
@@ -487,7 +488,7 @@ def run_worker(
 
     os.environ.setdefault("TRL_EXPERIMENTAL_SILENCE", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    physical_device = _require_trainer_visible_gpus()
+    physical_device = _require_trainer_visible_gpus(config.runtime.process_count)
     report = _run_once(
         config=config,
         project_root=project_root,
@@ -556,7 +557,7 @@ def _run_once(
     resume_from_checkpoint = os.environ.get("RESUME_FROM_CHECKPOINT") or None
 
     try:
-        gpu_baseline = _gpu_baseline(physical_device)
+        gpu_baseline = _gpu_baseline(physical_device, config.runtime.process_count)
         stage = "load_task"
         task_context = load_task_context(config, project_root)
         dataset = build_training_dataset(task_context)
@@ -968,29 +969,31 @@ def _join_messages(prompt: object, completion: object) -> list[object]:
     return [*prompt, *completion]
 
 
-def _require_trainer_visible_gpus() -> int:
+def _require_trainer_visible_gpus(process_count: int) -> int:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     devices = [value.strip() for value in visible.split(",")] if visible else []
-    if len(devices) != 4 or any(not value.isdecimal() for value in devices):
+    if len(devices) != process_count or any(not value.isdecimal() for value in devices):
         raise RuntimeNotQualifiedError(
-            "CUDA_VISIBLE_DEVICES must explicitly select exactly four Trainer GPUs"
+            f"CUDA_VISIBLE_DEVICES must explicitly select exactly {process_count} Trainer GPUs"
         )
     local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
-    if local_rank not in (0, 1, 2, 3):
-        raise RuntimeNotQualifiedError("LOCAL_RANK must be between 0 and 3")
+    if local_rank not in range(process_count):
+        raise RuntimeNotQualifiedError(f"LOCAL_RANK must be between 0 and {process_count - 1}")
     import torch
 
     torch.cuda.set_device(local_rank)
     return int(devices[local_rank])
 
 
-def _gpu_baseline(physical_device: int) -> dict[str, int]:
+def _gpu_baseline(physical_device: int, process_count: int) -> dict[str, int]:
     import torch
     import vllm._C  # noqa: F401
 
     local_rank = int(os.environ["LOCAL_RANK"])
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 4:
-        raise RuntimeError("CUDA_VISIBLE_DEVICES does not expose exactly four usable CUDA devices")
+    if not torch.cuda.is_available() or torch.cuda.device_count() != process_count:
+        raise RuntimeError(
+            f"CUDA_VISIBLE_DEVICES does not expose exactly {process_count} usable CUDA devices"
+        )
     if "A100" not in torch.cuda.get_device_name(local_rank):
         raise RuntimeError(
             f"local CUDA device is not an A100: {torch.cuda.get_device_name(local_rank)}"

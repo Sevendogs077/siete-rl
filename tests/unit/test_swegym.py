@@ -95,14 +95,15 @@ def test_offline_transform_replaces_every_real_install_block(
     script = f"cd /testbed\n{install_block}\n{test_command}"
     offline = transform_eval_script_offline(script)
     assert "PIP_NO_INDEX=1" in offline
+    assert "pip check" not in offline
     assert install_block not in offline
     assert offline.endswith(test_command)
 
 
-def test_runtime_loader_selects_stage_and_preserves_row_order(tmp_path: Path) -> None:
+def test_runtime_loader_applies_course_selection_in_source_order(tmp_path: Path) -> None:
     rows = []
     for position, (task_id, stage) in enumerate(
-        (("stage1-a", 1), ("stage1-b", 1), ("stage2-a", 2))
+        (("stage1-a", 1), ("stage1-b", 1), ("stage1-c", 1), ("stage2-a", 2))
     ):
         row = {
             "instance_id": task_id,
@@ -133,11 +134,12 @@ def test_runtime_loader_selects_stage_and_preserves_row_order(tmp_path: Path) ->
                 train_path=str(tmp_path / "train.parquet"),
                 tasks_dir=str(tmp_path / "assets"),
                 stage=1,
+                exclude_task_ids=("stage1-b",),
             )
         }
     )
     context = load_task_context(config, tmp_path)
     dataset = build_training_dataset(context)
 
-    assert list(context) == ["stage1-a", "stage1-b"]
-    assert dataset["task_id"] == ["stage1-a", "stage1-b"]
+    assert list(context) == ["stage1-a", "stage1-c"]
+    assert dataset["task_id"] == ["stage1-a", "stage1-c"]

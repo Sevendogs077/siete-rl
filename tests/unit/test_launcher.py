@@ -55,9 +55,15 @@ def test_resolve_gpu_topology_preserves_visible_order(visible, expected) -> None
     assert resolve_gpu_topology(load_project_config(), visible) == expected
 
 
+def test_resolve_two_gpu_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPU_COUNT", "2")
+
+    assert resolve_gpu_topology(load_project_config(), "4,6") == ("4,6", "4,6")
+
+
 @pytest.mark.parametrize("visible", ["0,1,2", "0,1,2,3,4"])
-def test_resolve_gpu_topology_requires_exactly_four_devices(visible) -> None:
-    with pytest.raises(LauncherError, match="exactly four"):
+def test_resolve_gpu_topology_requires_configured_device_count(visible) -> None:
+    with pytest.raises(LauncherError, match="CUDA_VISIBLE_DEVICES"):
         resolve_gpu_topology(load_project_config(), visible)
 
 

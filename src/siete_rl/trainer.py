@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import timedelta
 
 import torch
 from trl import GRPOTrainer
@@ -120,6 +121,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         use_process_mask: bool,
         tool_parallel_workers: int = 1,
         extra_reference_rewards: tuple[float, ...] = (),
+        distributed_timeout_sec: int = 3600,
         **kwargs,
     ) -> None:
         if max_consecutive_protocol_errors < 1:
@@ -130,11 +132,23 @@ class SWEGRPOTrainer(GRPOTrainer):
         self._tool_parallel_workers = tool_parallel_workers
         self._use_process_mask = use_process_mask
         self._extra_reference_rewards = extra_reference_rewards
+        self._distributed_timeout_sec = distributed_timeout_sec
         super().__init__(*args, **kwargs)
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
         if self.vllm_mode == "colocate":
             self.liger_loss.compiled = False
+
+    def _build_accelerator_args(self, **kwargs):
+        from accelerate.utils import InitProcessGroupKwargs
+
+        options = super()._build_accelerator_args(**kwargs)
+        options["kwargs_handlers"].append(
+            InitProcessGroupKwargs(
+                timeout=timedelta(seconds=self._distributed_timeout_sec)
+            )
+        )
+        return options
 
     def _get_train_sampler(self, dataset=None):
         if dataset is None:
@@ -190,13 +204,37 @@ class SWEGRPOTrainer(GRPOTrainer):
         return finished_at - started_at
 
     def _generate(self, prompts: list):
-        """在父类开始 GPU generation 前形成 environment reset barrier。"""
+        """在父类开始 GPU generation 前形成 reset barrier，并按整批管理 vLLM sleep。"""
 
         reset_time = self._await_environment_resets()
         if reset_time is not None:
             mode = "train" if self.model.training else "eval"
             self._metrics[mode]["environment/reset_time"].append(reset_time)
-        return super()._generate(prompts)
+        generation = self.vllm_generation if self.use_vllm else None
+        if generation is not None and self.vllm_mode == "colocate":
+            self.accelerator.wait_for_everyone()
+        defer_sleep = (
+            generation is not None
+            and self.vllm_mode == "colocate"
+            and generation.enable_sleep_mode
+        )
+        if not defer_sleep:
+            return super()._generate(prompts)
+
+        with profiling_context(self, "sync_weights"):
+            generation.sync_weights()
+        self._last_loaded_step = self.state.global_step
+        try:
+            generation.llm.collective_rpc("reload_weights")
+        except NotImplementedError:
+            pass
+        generation.llm.wake_up(tags=["kv_cache"])
+        generation.enable_sleep_mode = False
+        try:
+            return super()._generate(prompts)
+        finally:
+            generation.enable_sleep_mode = True
+            generation.llm.sleep(level=2)
 
     # >>> swe_agent: #6673 backport — tool loop 再生成禁止 server stride 去重
     def _generate_tool_loop_turn(self, prompt_ids, images, multimodal_fields):
@@ -268,14 +306,23 @@ class SWEGRPOTrainer(GRPOTrainer):
                 else None
             )
             return completion_ids, logprobs
+        local_count = len(prompt_ids)
+        if self.vllm_mode == "colocate":
+            # ponytail: 每轮最多补齐到单 rank batch；TRL 支持 ragged TP 切片后删除。
+            target_count = max(_global_active_counts(local_count))
+            if local_count < target_count:
+                filler = prompt_ids[-1] if prompt_ids else [self._tokenizer.eos_token_id]
+                prompt_ids = prompt_ids + [filler] * (target_count - local_count)
+                if images is not None:
+                    images = images + [None] * (target_count - local_count)
         _, completion_ids, logprobs, _ = self.vllm_generation.generate(
             prompts=prompt_ids,
             images=images,
             num_generations=1,
             profiler=profiling_context(self, "vLLM.generate"),
         )
-        logprobs = [[lp[0] for lp in seq] for seq in logprobs]
-        return completion_ids, logprobs
+        logprobs = [[lp[0] for lp in seq] for seq in logprobs[:local_count]]
+        return completion_ids[:local_count], logprobs
     # <<< swe_agent
 
     # >>> swe_agent: 跨样本并行 worker 只动自己的 env，返回增量与结果供主线程聚合
@@ -502,13 +549,14 @@ class SWEGRPOTrainer(GRPOTrainer):
                 else token_weights * completion_mask
             )
             if not torch.any(effective_mask):
-                dtype = (
-                    token_weights.dtype
-                    if token_weights.is_floating_point()
-                    else torch.float32
-                )
-                return torch.zeros(
-                    (), device=token_weights.device, dtype=dtype, requires_grad=True
+                # 全 censor 的 rank 仍须触发与其他 rank 相同的 DDP 梯度 hooks。
+                return sum(
+                    (
+                        parameter.reshape(-1)[0] * 0.0
+                        for parameter in unwrapped_model.parameters()
+                        if parameter.requires_grad
+                    ),
+                    token_weights.new_zeros(()),
                 )
             inputs = dict(inputs, tool_mask=token_weights)
         return super().compute_liger_loss(unwrapped_model, inputs)

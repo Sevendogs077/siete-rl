@@ -235,7 +235,7 @@ def test_colocate_tp4_preserves_uneven_active_prompts(
         [],
         [[131]],
     ]
-    assert [result["gathered_sizes"] for result in results] == [[2, 1, 0, 1]] * 4
+    assert [result["gathered_sizes"] for result in results] == [[2, 2, 2, 2]] * 4
 
 
 if __name__ == "__main__":

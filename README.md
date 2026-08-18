@@ -17,16 +17,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-6e7781.svg" alt="MIT License"></a>
 </p>
 
-SieteRL is a GRPO post-training project for software-engineering agents. The initial policy is SWE-Gym OpenHands-7B-Agent, an SFT checkpoint of Qwen2.5-Coder-7B. The agent fixes repository-level bugs through multi-turn interaction in isolated containers; each submitted patch is scored by the task's executable tests, and the verifier outcome is the reward. Trained policies are evaluated on SWE-bench Verified.
+SieteRL trains software-engineering agents to solve repository-level tasks through multi-turn interaction. It starts from SWE-Gym OpenHands-7B-Agent, runs each rollout in an isolated container, and evaluates trained checkpoints on SWE-bench Verified.
 
 > [!NOTE]
 > SieteRL is under active development. Project structure, APIs, and experimental configurations may change.
-
-## Core components
-
-**OpenHands-compatible scaffold** — an in-repo implementation of the three-tool interaction protocol used by SWE-Gym OpenHands-7B-Agent. The agent runs commands via `execute_bash`, browses and edits the repository via `str_replace_editor`, and submits its patch with `finish`, all inside isolated task containers. Training and SWE-bench Verified evaluation share the same prompts, tool parser, and multi-turn state machine.
-
-**Liger Kernel** — training enables Liger Kernel through TRL by default. Its chunked loss never materializes the full logits tensor, reducing the memory footprint of 32K-context, 7B LoRA GRPO training; importance-sampling correction is applied per token, since sequence-level weights vanish on long agent trajectories.
 
 ## Results
 
@@ -38,18 +32,27 @@ SieteRL is a GRPO post-training project for software-engineering agents. The ini
   </picture>
 </p>
 
-Full results and run details: [docs/results.md](https://github.com/Sevendogs077/siete-rl/blob/main/docs/results.md).
+Full results and run details: [docs/results.md](docs/results.md).
+
+## Details
+
+- **Layered Rewards** — A resolved patch receives `1.0`; an unresolved patch receives `0.20p²` only when it applies cleanly and every P2P test passes, where `p` is its F2P pass rate.
+- **NGRPO Advantage Calibration** — A virtual maximum reward of `1.0` enters the group mean without adding a rollout or loss, giving all-failure groups negative advantages without reward standardization.
+- **Sign-aware Process Mask** — Malformed calls and the third or later identical Bash/editor action lose positive credit but retain negative credit.
+- **Failure-aware Rollout Handling** — Infrastructure failures affect neither the group mean nor the gradient; physical truncation masks only the final incomplete turn, while other abnormal exits still verify their final patches.
+- **Dr. GRPO Objective** — Global maximum-length loss normalization, `0.16/0.24` asymmetric clipping, and token-level vLLM importance correction support 32K tool-use trajectories.
 
 ## Reproduction
 
-Training requires 4 GPUs; evaluation requires 1 GPU. Follow the [setup guide](docs/setup.md) to prepare the environment, datasets, base model, dedicated Docker daemon, task images, and evaluation harness.
+Training uses four GPUs by default, and evaluation uses GPU 0. See the [setup guide](docs/setup.md) for two-GPU training and environment preparation.
 
 ```bash
 uv sync
 bash scripts/prepare.sh
 bash scripts/qualify.sh
-WANDB_API_KEY=<your-key> CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
-CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
+bash scripts/stage1.sh
+bash scripts/stage2.sh outputs/<stage1-run-id>
+bash scripts/eval.sh outputs/<stage2-run-id>
 ```
 
 > [!WARNING]
@@ -68,14 +71,14 @@ docs/           experiment documentation and notes
 ## References
 
 <p align="center">
-  <a href="https://github.com/huggingface/trl">TRL</a> ·
-  <a href="https://github.com/SWE-Gym/SWE-Gym">SWE-Gym</a> ·
-  <a href="https://github.com/SWE-bench/SWE-bench">SWE-bench</a> ·
-  <a href="https://github.com/All-Hands-AI/OpenHands">OpenHands</a> ·
   <a href="https://github.com/linkedin/Liger-Kernel">Liger Kernel</a> ·
+  <a href="https://github.com/OpenHands/OpenHands">OpenHands</a> ·
+  <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a> ·
+  <a href="https://huggingface.co/datasets/SumanthRH/SWE-Gym">SumanthRH/SWE-Gym</a> ·
+  <a href="https://github.com/SWE-bench/SWE-bench">SWE-bench</a> ·
+  <a href="https://github.com/SWE-Gym/SWE-Gym">SWE-Gym</a> ·
   <a href="https://huggingface.co/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent">SWE-Gym OpenHands-7B-Agent</a> ·
-  <a href="https://huggingface.co/datasets/SumanthRH/SWE-Gym-Subset">SumanthRH/SWE-Gym-Subset</a> ·
-  <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a>
+  <a href="https://github.com/huggingface/trl">TRL</a>
 </p>
 
 ## License

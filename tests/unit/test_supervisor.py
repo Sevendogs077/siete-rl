@@ -86,6 +86,8 @@ def test_supervisor_starts_four_gpu_colocated_worker(monkeypatch, tmp_path: Path
     assert command[command.index("--num_processes") + 1] == "4"
     assert "--multi_gpu" in command
     assert command[command.index("--main_process_port") + 1] == "18423"
+    assert command[command.index("--tee") + 1] == "3"
+    assert command[command.index("--log_dir") + 1] == (workspace / "worker_logs").as_posix()
     assert "--server-port" not in command
     assert "--group-port" not in command
     assert calls["worker_kwargs"]["start_new_session"] is True
@@ -102,6 +104,11 @@ def test_supervisor_marks_stale_worker_report_interrupted(tmp_path: Path) -> Non
             {
                 "status": "running",
                 "failure": None,
+                "cleanup": {
+                    "status": "pending",
+                    "clean_release": None,
+                    "residual_count": 0,
+                },
                 "time": {
                     "started_at": "2026-07-26T00:00:00Z",
                     "finished_at": None,
@@ -112,10 +119,51 @@ def test_supervisor_marks_stale_worker_report_interrupted(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    supervisor._mark_interrupted_run(output_dir, signal.SIGTERM)
+    supervisor._mark_stale_worker_run(
+        output_dir,
+        returncode=143,
+        interrupted_signum=signal.SIGTERM,
+        cleanup_errors=[],
+    )
 
     report = json.loads(run_path.read_text(encoding="utf-8"))
     assert report["status"] == "interrupted"
     assert report["failure"]["type"] == "SupervisorTermination"
     assert "SIGTERM" in report["failure"]["message"]
     assert report["time"]["finished_at"] is not None
+
+
+def test_supervisor_marks_stale_worker_report_failed(tmp_path: Path) -> None:
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    (output_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "failure": None,
+                "cleanup": {
+                    "status": "pending",
+                    "clean_release": None,
+                    "residual_count": 0,
+                },
+                "time": {
+                    "started_at": "2026-07-26T00:00:00Z",
+                    "finished_at": None,
+                    "duration_seconds": None,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    supervisor._mark_stale_worker_run(
+        output_dir,
+        returncode=1,
+        interrupted_signum=None,
+        cleanup_errors=[],
+    )
+
+    report = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+    assert report["status"] == "failed"
+    assert report["failure"]["type"] == "WorkerProcessError"
+    assert report["cleanup"]["status"] == "completed"

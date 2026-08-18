@@ -6,7 +6,7 @@ This guide takes a clean checkout to a qualified SieteRL runtime. Run every comm
 
 - Linux x86_64 with Docker and an NVIDIA driver.
 - Python 3.12 and [uv](https://docs.astral.sh/uv/). The repository pins Python 3.12.13.
-- Four GPUs for training with the qualified `colocate` configuration, or one GPU for evaluation. The reference system uses A100 80 GB GPUs.
+- Two or four GPUs for training with the qualified `colocate` configuration, or one GPU for evaluation. The reference system uses A100 80 GB GPUs.
 - At least 400 GB of free disk space: task images use about 284 GB, and the base model uses about 15 GB.
 - Root access to start a dedicated Docker daemon.
 
@@ -159,25 +159,28 @@ Qualification loads the actual training table and runtime assets, then checks th
 ## 8. Run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
-CUDA_VISIBLE_DEVICES=0 bash scripts/eval.sh outputs/<run-id>
+bash scripts/stage1.sh
+bash scripts/stage2.sh outputs/<stage1-run-id>
+bash scripts/eval.sh outputs/<stage2-run-id>
 ```
+
+Set `GPU_COUNT=2` for two-GPU training. `CUDA_VISIBLE_DEVICES` overrides the automatically selected devices for training or evaluation.
 
 ### W&B
 
-The default config logs training metrics to W&B. For an online run:
+W&B is disabled by default. To enable online logging, set `wandb.enabled: true` and export an API key:
 
 ```bash
 export WANDB_API_KEY=<your-key>
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash scripts/grpo.sh
+bash scripts/stage1.sh
 ```
 
-Set `wandb.mode: offline` for local runs, or `wandb.enabled: false` to turn it off.
+For local-only logging, set `wandb.enabled: true` and `wandb.mode: offline`.
 
 `scripts/eval.sh` defaults to 16 rollout workers and 4 official-harness workers. Override them to match available CPU and memory:
 
 ```bash
-EVAL_ROLLOUT_WORKERS=8 EVAL_HARNESS_WORKERS=2 CUDA_VISIBLE_DEVICES=0 \
+EVAL_ROLLOUT_WORKERS=8 EVAL_HARNESS_WORKERS=2 CUDA_VISIBLE_DEVICES=1 \
   bash scripts/eval.sh outputs/<run-id>
 ```
 

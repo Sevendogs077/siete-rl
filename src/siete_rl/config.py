@@ -22,6 +22,7 @@ class DatasetConfig(StrictConfig):
     train_path: str = Field(min_length=1)
     tasks_dir: str = Field(min_length=1)
     stage: Literal[1, 2]
+    exclude_task_ids: tuple[str, ...] = ()
 
 
 class DockerConfig(StrictConfig):
@@ -151,6 +152,7 @@ class RuntimeConfig(StrictConfig):
     runtime_qualified: bool
     process_count: int = Field(ge=1)
     base_seed: int = Field(ge=0)
+    distributed_timeout_sec: int = Field(default=3600, ge=1)
 
 
 class OutputConfig(StrictConfig):
@@ -234,12 +236,12 @@ class ProjectConfig(StrictConfig):
         if self.runtime.runtime_qualified:
             if (
                 self.vllm.mode != "colocate"
-                or self.vllm.tensor_parallel_size != 4
+                or self.runtime.process_count not in (2, 4)
+                or self.vllm.tensor_parallel_size != self.runtime.process_count
                 or self.vllm.server_base_url is not None
                 or not self.vllm.enable_sleep_mode
-                or self.runtime.process_count != 4
             ):
-                raise ValueError("qualified runtime requires four-GPU colocate mode")
+                raise ValueError("qualified runtime requires two- or four-GPU colocate mode")
         elif self.vllm.tensor_parallel_size is not None or self.vllm.server_base_url is not None:
             raise ValueError("an unqualified runtime must not activate GPU topology")
         return self
@@ -262,6 +264,10 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
     model_path = os.environ.get("MODEL_PATH", "").strip() or config.model.model_path
     tokenizer_path = os.environ.get("TOKENIZER_PATH", "").strip() or config.model.tokenizer_path
     adapter_path = os.environ.get("MODEL_ADAPTER_PATH", "").strip() or config.model.adapter_path
+    gpu_count_value = os.environ.get("GPU_COUNT", "").strip()
+    if gpu_count_value and gpu_count_value not in {"2", "4"}:
+        raise ValueError("GPU_COUNT must be 2 or 4")
+    gpu_count = int(gpu_count_value) if gpu_count_value else config.runtime.process_count
     resolved = config.model_copy(
         update={
             "dataset": config.dataset.model_copy(
@@ -279,6 +285,10 @@ def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
                     ),
                 }
             ),
+            "vllm": config.vllm.model_copy(
+                update={"tensor_parallel_size": gpu_count}
+            ),
+            "runtime": config.runtime.model_copy(update={"process_count": gpu_count}),
             "output": config.output.model_copy(
                 update={
                     "output_root": resolve_path(project_root, config.output.output_root)

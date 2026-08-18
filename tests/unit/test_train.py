@@ -144,20 +144,34 @@ def test_entry_delegates_to_the_supervisor(
     assert result == outcome
 
 
-@pytest.mark.parametrize("local_rank, expected", [("0", 0), ("1", 1), ("2", 2), ("3", 3)])
+@pytest.mark.parametrize(
+    "visible, process_count, local_rank, expected",
+    [
+        ("0,1", 2, "0", 0),
+        ("0,1", 2, "1", 1),
+        ("0,1,2,3", 4, "0", 0),
+        ("0,1,2,3", 4, "1", 1),
+        ("0,1,2,3", 4, "2", 2),
+        ("0,1,2,3", 4, "3", 3),
+    ],
+)
 def test_trainer_visible_gpu_is_selected_by_local_rank(
-    monkeypatch: pytest.MonkeyPatch, local_rank: str, expected: int
+    monkeypatch: pytest.MonkeyPatch,
+    visible: str,
+    process_count: int,
+    local_rank: str,
+    expected: int,
 ) -> None:
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     monkeypatch.setenv("LOCAL_RANK", local_rank)
     selected = []
     monkeypatch.setattr("torch.cuda.set_device", selected.append)
-    assert _require_trainer_visible_gpus() == expected
+    assert _require_trainer_visible_gpus(process_count) == expected
     assert selected == [int(local_rank)]
 
 
 @pytest.mark.parametrize("value", [None, "", "0", "0,1,2", "0,1,2,3,4"])
-def test_trainer_visible_gpu_rejects_non_four_gpu_selection(
+def test_trainer_visible_gpu_rejects_wrong_device_count(
     monkeypatch: pytest.MonkeyPatch, value: str | None
 ) -> None:
     if value is None:
@@ -165,8 +179,8 @@ def test_trainer_visible_gpu_rejects_non_four_gpu_selection(
     else:
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", value)
     monkeypatch.setenv("LOCAL_RANK", "0")
-    with pytest.raises(RuntimeNotQualifiedError, match="exactly four"):
-        _require_trainer_visible_gpus()
+    with pytest.raises(RuntimeNotQualifiedError, match="CUDA_VISIBLE_DEVICES"):
+        _require_trainer_visible_gpus(4)
 
 
 @pytest.mark.parametrize(("mode", "disabled"), [("colocate", False), ("server", True)])
@@ -204,7 +218,14 @@ def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
     assert grpo_config.vllm_group_port == 18422
 
 
-def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("gpu_count", "gradient_accumulation_steps"), [("2", 8), ("4", 4)])
+def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gpu_count: str,
+    gradient_accumulation_steps: int,
+) -> None:
+    monkeypatch.setenv("GPU_COUNT", gpu_count)
     config, _, _ = load_config(CONFIG_7B)
     config = config.model_copy(
         update={
@@ -228,7 +249,7 @@ def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(tmp_path: Path) -> None
     assert grpo_config.num_train_epochs == 4
     assert grpo_config.max_steps == -1
     assert grpo_config.generation_batch_size == 16
-    assert grpo_config.gradient_accumulation_steps == 4
+    assert grpo_config.gradient_accumulation_steps == gradient_accumulation_steps
 
 
 def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,9 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from siete_rl.config import ProjectConfig, load_config
 from siete_rl.swegym import SWEGymContractError, TaskContext, load_task_context
@@ -44,6 +48,113 @@ def check_docker(task_context: TaskContext) -> list[Check]:
         except Exception as exc:
             checks.append(Check(f"docker.{task_id}.image", False, str(exc)))
     return checks
+
+
+def check_gold_verifier_timings(
+    config: ProjectConfig,
+    task_context: TaskContext,
+    *,
+    workers: int,
+    timeout_sec: int,
+    report_path: Path | None,
+) -> Check:
+    """按训练时的真实 Docker 路径运行每个任务的 gold verifier。"""
+
+    from siete_rl.docker import DockerSandbox, SubprocessDockerClient
+    from siete_rl.verifier import SWEGymVerifier
+
+    client = SubprocessDockerClient()
+    run_id = f"qualify-{uuid4().hex}"
+    tasks_dir = Path(config.dataset.tasks_dir)
+
+    def verify(item: tuple[str, object]) -> dict[str, object]:
+        task_id, value = item
+        sample, evaluation = value
+        started = time.monotonic()
+        verifier = SWEGymVerifier(
+            sandbox_factory=lambda: DockerSandbox(
+                client=client,
+                task=sample.task,
+                environment=sample.environment.model_copy(
+                    update={"verifier_timeout_sec": timeout_sec}
+                ),
+                run_id=run_id,
+                episode_id=uuid4().hex,
+                scope="verifier",
+            ),
+            evaluation=evaluation,
+        )
+        try:
+            gold_patch = (tasks_dir / task_id / "gold.patch").read_text(
+                encoding="utf-8"
+            )
+            result = verifier.verify(gold_patch)
+            ok = result.result == "resolved" and result.pytest_started
+            return {
+                "task_id": task_id,
+                "ok": ok,
+                "duration_sec": time.monotonic() - started,
+                "result": result.result,
+                "pytest_started": result.pytest_started,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "task_id": task_id,
+                "ok": False,
+                "duration_sec": time.monotonic() - started,
+                "result": None,
+                "pytest_started": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    results: list[dict[str, object]] = []
+
+    def save_report() -> None:
+        if report_path is None:
+            return
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "workers": min(workers, len(task_context)),
+                    "timeout_sec": timeout_sec,
+                    "task_count": len(task_context),
+                    "completed": len(results),
+                    "results": sorted(
+                        results, key=lambda result: str(result["task_id"])
+                    ),
+                },
+                ensure_ascii=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(task_context))) as pool:
+        futures = [pool.submit(verify, item) for item in task_context.items()]
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            save_report()
+            marker = "PASS" if result["ok"] else "FAIL"
+            print(
+                f"{marker} verifier.{result['task_id']}.gold: "
+                f"{result['duration_sec']:.1f}s"
+                + (f" ({result['error']})" if result["error"] else ""),
+                flush=True,
+            )
+
+    results.sort(key=lambda result: str(result["task_id"]))
+    durations = sorted(float(result["duration_sec"]) for result in results)
+    failures = sum(not bool(result["ok"]) for result in results)
+    detail = (
+        f"tasks={len(results)} workers={min(workers, len(task_context))} "
+        f"min={durations[0]:.1f}s median={durations[len(durations) // 2]:.1f}s "
+        f"max={durations[-1]:.1f}s failures={failures}"
+    )
+    return Check("verifier.gold_timings", failures == 0, detail)
 
 
 def check_tokenizer(config: ProjectConfig) -> list[Check]:
@@ -107,7 +218,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="siete_rl.qualify", description="单次全套资格检查")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--no-docker", action="store_true", help="跳过 docker daemon/镜像检查")
+    parser.add_argument("--verify-gold", action="store_true", help="真实运行每个任务的 gold verifier")
+    parser.add_argument("--verifier-workers", type=int, help="gold verifier 并发数")
+    parser.add_argument("--verifier-timeout", type=int, default=3600, help="gold verifier 单任务超时秒数")
+    parser.add_argument("--verifier-report", type=Path, help="gold verifier 时延 JSON 报告")
     args = parser.parse_args(argv)
+    if args.verify_gold and args.no_docker:
+        parser.error("--verify-gold cannot be combined with --no-docker")
+    if args.verifier_workers is not None and args.verifier_workers < 1:
+        parser.error("--verifier-workers must be positive")
+    if args.verifier_timeout < 1:
+        parser.error("--verifier-timeout must be positive")
 
     checks: list[Check] = []
     try:
@@ -130,6 +251,20 @@ def main(argv: list[str] | None = None) -> int:
         checks.append(Check("dataset.training_context", False, str(exc)))
     if not args.no_docker and task_context is not None:
         checks.extend(check_docker(task_context))
+    if args.verify_gold and task_context is not None:
+        checks.append(
+            check_gold_verifier_timings(
+                config,
+                task_context,
+                workers=args.verifier_workers
+                or min(
+                    config.generation.verifier_parallel_workers,
+                    config.grpo.num_generations,
+                ),
+                timeout_sec=args.verifier_timeout,
+                report_path=args.verifier_report,
+            )
+        )
     checks.extend(check_tokenizer(config))
     checks.extend(check_gpu())
 

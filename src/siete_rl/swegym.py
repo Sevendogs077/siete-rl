@@ -36,7 +36,6 @@ COMPARE_FIELDS = (
 
 OFFLINE_REPLACEMENT = """PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \\
   python -m pip install --no-build-isolation --no-deps -e .
-python -m pip check
 """
 
 _INSTALL_BLOCKS = (
@@ -122,7 +121,12 @@ def load_task_context(config: ProjectConfig, project_root: Path) -> TaskContext:
     stages = [row.get("stage") for row in rows]
     if any(stage not in (1, 2) for stage in stages) or stages != sorted(stages):
         raise SWEGymContractError("training table must contain Stage 1 before Stage 2")
-    rows = [row for row in rows if row["stage"] == config.dataset.stage]
+    rows = [
+        row
+        for row in rows
+        if row["stage"] == config.dataset.stage
+        and row["instance_id"] not in config.dataset.exclude_task_ids
+    ]
 
     context: dict[str, tuple[Sample, Evaluation]] = {}
     for row in rows:

@@ -36,3 +36,19 @@ def test_checked_in_config_loads_from_project_root() -> None:
     assert Path(config.model.model_path).is_absolute()
     assert Path(config.dataset.train_path).is_absolute()
     assert Path(config.dataset.tasks_dir).is_absolute()
+
+
+def test_gpu_count_selects_two_gpu_colocate_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPU_COUNT", "2")
+
+    config, _, _ = load_config(CONFIG_7B)
+
+    assert config.runtime.process_count == 2
+    assert config.vllm.tensor_parallel_size == 2
+
+
+def test_gpu_count_rejects_unsupported_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GPU_COUNT", "3")
+
+    with pytest.raises(ValueError, match="GPU_COUNT must be 2 or 4"):
+        load_config(CONFIG_7B)

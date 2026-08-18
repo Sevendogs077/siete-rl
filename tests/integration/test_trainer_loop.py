@@ -55,6 +55,7 @@ def reset_trainer(environments):
     value = object.__new__(SWEGRPOTrainer)
     value.environments = environments
     value.model = SimpleNamespace(training=True)
+    value.use_vllm = False
     value._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     return value
 
@@ -456,6 +457,34 @@ def test_colocated_post_tool_regeneration_resyncs_after_level_two_sleep() -> Non
     assert completion_ids == [[7]]
     assert logprobs == [[0.0]]
     assert value.vllm_generation.sync_count == 1
+
+
+def test_colocated_post_tool_regeneration_pads_uneven_tp_batches(monkeypatch) -> None:
+    class ColocatedVLLM:
+        enable_sleep_mode = False
+
+        def generate(self, *, prompts, images, num_generations, profiler=None):
+            del num_generations, profiler
+            assert prompts == [[1], [2], [2], [2]]
+            assert images == [["a"], ["b"], None, None]
+            return prompts, [[7], [8], [9], [10]], [[[0.1]], [[0.2]], [[0.3]], [[0.4]]], None
+
+    value = trainer()
+    value.use_vllm = True
+    value.vllm_mode = "colocate"
+    value.state = SimpleNamespace(global_step=0)
+    value._last_loaded_step = 0
+    value.args = SimpleNamespace(report_to=[])
+    value.accelerator = SimpleNamespace(is_main_process=True)
+    value.vllm_generation = ColocatedVLLM()
+    monkeypatch.setattr("siete_rl.trainer._global_active_counts", lambda local: [4, local, 3, 0])
+
+    completion_ids, logprobs = value._generate_tool_loop_turn(
+        [[1], [2]], [["a"], ["b"]], {}
+    )
+
+    assert completion_ids == [[7], [8]]
+    assert logprobs == [[0.1], [0.2]]
 
 
 def test_parallel_tool_failure_isolated_to_failing_sample(monkeypatch) -> None:

@@ -117,6 +117,7 @@ def ready_responses(task, environment) -> list[CommandResult]:
         result([], stdout=CONTAINER_ID + "\n"),
         result([], stdout=CONTAINER_ID + "\n"),
         result([], stdout=task.base_commit + "\n"),
+        result([], stdout=f"HEAD is now at {task.base_commit[:7]} base\n"),
         result([], stdout=""),
     ]
 
@@ -202,6 +203,25 @@ def test_base_mismatch_is_primary_and_container_is_removed(domain) -> None:
     with pytest.raises(ContainerCreateError, match="base commit mismatch"):
         sandbox.open()
     assert sandbox.container_id is None
+
+
+def test_open_restores_tracked_image_changes_before_clean_check(domain) -> None:
+    task, environment = domain
+    client = FakeClient(
+        [
+            image_inspect(environment),
+            result([], stdout=CONTAINER_ID),
+            result([], stdout=CONTAINER_ID),
+            result([], stdout=task.base_commit),
+            result([], stdout=f"HEAD is now at {task.base_commit[:7]} base"),
+            result([], stdout=""),
+            result([], stdout=CONTAINER_ID),
+        ]
+    )
+    sandbox = make_sandbox(client, task, environment)
+
+    with sandbox:
+        assert sandbox.container_id == CONTAINER_ID
 
 
 def test_cleanup_failure_retains_handle_and_next_close_retries(domain) -> None:

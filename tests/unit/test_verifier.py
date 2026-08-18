@@ -159,15 +159,23 @@ def test_pytest_marker_maps_exit_code_to_binary_result(domain) -> None:
         [
             command_result(),
             command_result(),
-            command_result(timed_out=True, stdout="setup completed"),
+            command_result(
+                timed_out=True,
+                stdout="setup completed",
+                stderr="setup trace",
+            ),
         ],
         [command_result(), command_result(), command_result(stdout="setup completed")],
     ],
 )
 def test_timeout_and_missing_pytest_marker_are_infrastructure(domain, responses) -> None:
     verifier, sandboxes = verifier_for(domain, responses)
-    with pytest.raises(VerificationInfrastructureError):
+    with pytest.raises(VerificationInfrastructureError) as captured:
         verifier.verify(PATCH)
+    if len(responses) == 3:
+        assert "setup completed" in str(captured.value)
+        if responses[-1].stderr:
+            assert "setup trace" in str(captured.value)
     assert sandboxes[0].closed
 
 
