@@ -41,9 +41,12 @@ TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
+from functools import partial
+from pathlib import Path
 
 import torch
 from trl import GRPOTrainer
@@ -106,9 +109,14 @@ def _record_turn(
 class _EpochRepeatSampler(RepeatSampler):
     """按 epoch 重建随机顺序，使 checkpoint resume 精确跳过已训练 batch。"""
 
+    def __init__(self, *args, initial_epoch: int = 0, **kwargs) -> None:
+        self._minimum_epoch = initial_epoch
+        super().__init__(*args, **kwargs)
+        self.set_epoch(initial_epoch)
+
     def set_epoch(self, epoch: int) -> None:
         if self.shuffle and self.seed is not None:
-            self.generator.manual_seed(self.seed + epoch)
+            self.generator.manual_seed(self.seed + max(epoch, self._minimum_epoch))
 
 
 class SWEGRPOTrainer(GRPOTrainer):
@@ -122,6 +130,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         tool_parallel_workers: int = 1,
         extra_reference_rewards: tuple[float, ...] = (),
         distributed_timeout_sec: int = 3600,
+        preloaded_checkpoint: str | Path | None = None,
         **kwargs,
     ) -> None:
         if max_consecutive_protocol_errors < 1:
@@ -133,11 +142,38 @@ class SWEGRPOTrainer(GRPOTrainer):
         self._use_process_mask = use_process_mask
         self._extra_reference_rewards = extra_reference_rewards
         self._distributed_timeout_sec = distributed_timeout_sec
-        super().__init__(*args, **kwargs)
+        self._preloaded_checkpoint = (
+            Path(preloaded_checkpoint).resolve() if preloaded_checkpoint is not None else None
+        )
+        grpo_args = kwargs.get("args")
+        disable_custom_all_reduce = (
+            getattr(grpo_args, "vllm_mode", None) == "colocate"
+            and getattr(grpo_args, "vllm_tensor_parallel_size", None) == 2
+        )
+        if disable_custom_all_reduce:
+            from trl.generation import vllm_generation
+
+            original_llm = vllm_generation.LLM
+            vllm_generation.LLM = partial(
+                original_llm, disable_custom_all_reduce=True
+            )
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            if disable_custom_all_reduce:
+                vllm_generation.LLM = original_llm
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
         if self.vllm_mode == "colocate":
             self.liger_loss.compiled = False
+
+    def _load_from_checkpoint(self, resume_from_checkpoint: str, model=None) -> None:
+        if (
+            self._preloaded_checkpoint is not None
+            and Path(resume_from_checkpoint).resolve() == self._preloaded_checkpoint
+        ):
+            return
+        super()._load_from_checkpoint(resume_from_checkpoint, model)
 
     def _build_accelerator_args(self, **kwargs):
         from accelerate.utils import InitProcessGroupKwargs
@@ -153,6 +189,14 @@ class SWEGRPOTrainer(GRPOTrainer):
     def _get_train_sampler(self, dataset=None):
         if dataset is None:
             dataset = self.train_dataset
+        initial_epoch = 0
+        if self._preloaded_checkpoint is not None:
+            state = json.loads(
+                (self._preloaded_checkpoint / "trainer_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            initial_epoch = int(state["epoch"])
         return _EpochRepeatSampler(
             data_source=dataset,
             mini_repeat_count=self.num_generations,
@@ -160,6 +204,7 @@ class SWEGRPOTrainer(GRPOTrainer):
             repeat_count=self.num_iterations * self.args.steps_per_generation,
             shuffle=self.shuffle_dataset,
             seed=self.args.seed,
+            initial_epoch=initial_epoch,
         )
 
     def _await_environment_resets(self) -> float | None:
@@ -541,24 +586,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         # token_weights 的支撑集已在 completion_mask×tool_mask 内，替换后父类的
         # loss_mask = completion_mask * token_weights ≡ token_weights。
         if "token_weights" in inputs:
-            token_weights = inputs["token_weights"]
-            completion_mask = inputs.get("completion_mask")
-            effective_mask = (
-                token_weights
-                if completion_mask is None
-                else token_weights * completion_mask
-            )
-            if not torch.any(effective_mask):
-                # 全 censor 的 rank 仍须触发与其他 rank 相同的 DDP 梯度 hooks。
-                return sum(
-                    (
-                        parameter.reshape(-1)[0] * 0.0
-                        for parameter in unwrapped_model.parameters()
-                        if parameter.requires_grad
-                    ),
-                    token_weights.new_zeros(()),
-                )
-            inputs = dict(inputs, tool_mask=token_weights)
+            inputs = dict(inputs, tool_mask=inputs["token_weights"])
         return super().compute_liger_loss(unwrapped_model, inputs)
 
     @staticmethod

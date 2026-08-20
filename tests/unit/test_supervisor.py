@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from siete_rl.config import load_config
@@ -10,6 +14,14 @@ from siete_rl import supervisor
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJECT_ROOT / "configs/stage1.yaml"
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
 def test_supervisor_starts_four_gpu_colocated_worker(monkeypatch, tmp_path: Path) -> None:
@@ -167,3 +179,72 @@ def test_supervisor_marks_stale_worker_report_failed(tmp_path: Path) -> None:
     assert report["status"] == "failed"
     assert report["failure"]["type"] == "WorkerProcessError"
     assert report["cleanup"]["status"] == "completed"
+
+
+def test_terminate_process_group_reaps_worker_after_leader_exits(tmp_path: Path) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    code = (
+        "import subprocess, sys, time; "
+        "from pathlib import Path; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True); "
+        f"Path({str(child_pid_path)!r}).write_text(str(child.pid)); "
+        "time.sleep(60)"
+    )
+    leader = subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while not child_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        assert _process_is_alive(child_pid)
+        process_groups = supervisor._descendant_process_groups(leader.pid)
+        assert process_groups == {leader.pid, child_pid}
+
+        assert supervisor._terminate_process_group(
+            leader, signal.SIGTERM, 1.0, process_groups=process_groups
+        )
+        assert not _process_is_alive(child_pid)
+    finally:
+        for pgid in (leader.pid, child_pid):
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def test_supervisor_reports_residual_worker_process_group(tmp_path: Path) -> None:
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    run_path = output_dir / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "failure": None,
+                "cleanup": {
+                    "status": "pending",
+                    "clean_release": None,
+                    "residual_count": 0,
+                },
+                "time": {"started_at": "2026-07-26T00:00:00Z"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    supervisor._mark_stale_worker_run(
+        output_dir,
+        returncode=1,
+        interrupted_signum=None,
+        cleanup_errors=[],
+        worker_group_residual=True,
+    )
+
+    report = json.loads(run_path.read_text(encoding="utf-8"))
+    assert report["cleanup"] == {
+        "status": "failed",
+        "clean_release": False,
+        "residual_count": 1,
+    }

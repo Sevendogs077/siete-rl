@@ -4,10 +4,13 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import torch
 import torch.distributed as dist
+from trl import GRPOTrainer
 
 import siete_rl.trainer as trainer_module
 from siete_rl.process_mask import TurnRecord
@@ -180,6 +183,45 @@ def colocate_worker(result_dir: Path) -> None:
     dist.destroy_process_group()
 
 
+def loss_worker(result_dir: Path) -> None:
+    dist.init_process_group("gloo", timeout=timedelta(seconds=5))
+    rank = dist.get_rank()
+    trainer = object.__new__(SWEGRPOTrainer)
+    trainer.model = SimpleNamespace(training=True)
+    trainer._metrics = {"train": {"clip_ratio": []}, "eval": {}}
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
+
+    def parent_loss(self, unwrapped_model, inputs):
+        marker = torch.tensor(float(rank))
+        dist.all_reduce(marker)
+        self._metrics["train"]["clip_ratio"].append(marker.item())
+        return sum(
+            (parameter.reshape(-1)[0] * 0.0 for parameter in unwrapped_model.parameters()),
+            inputs["token_weights"].new_zeros(()),
+        )
+
+    GRPOTrainer.compute_liger_loss = parent_loss
+    token_weights = torch.zeros(1, 2) if rank == 1 else torch.ones(1, 2)
+    loss = trainer.compute_liger_loss(
+        model,
+        {"completion_mask": torch.ones(1, 2), "token_weights": token_weights},
+    )
+    loss.backward()
+    (result_dir / f"loss-rank-{rank}.json").write_text(
+        json.dumps(
+            {
+                "clip_ratio": trainer._metrics["train"]["clip_ratio"],
+                "zero_gradients": all(
+                    parameter.grad is not None
+                    and torch.count_nonzero(parameter.grad).item() == 0
+                    for parameter in model.parameters()
+                ),
+            }
+        )
+    )
+    dist.destroy_process_group()
+
+
 def test_uneven_post_tool_generation_preserves_rank_lineage(tmp_path: Path) -> None:
     command = [
         sys.executable,
@@ -238,12 +280,36 @@ def test_colocate_tp4_preserves_uneven_active_prompts(
     assert [result["gathered_sizes"] for result in results] == [[2, 2, 2, 2]] * 4
 
 
+def test_fully_censored_rank_keeps_loss_collective_order(tmp_path: Path) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=2",
+        __file__,
+        "--loss-worker",
+        str(tmp_path),
+    ]
+    subprocess.run(command, check=True, timeout=30)
+
+    results = [
+        json.loads((tmp_path / f"loss-rank-{rank}.json").read_text())
+        for rank in range(2)
+    ]
+    assert [result["clip_ratio"] for result in results] == [[1.0], [1.0]]
+    assert all(result["zero_gradients"] for result in results)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", type=Path)
     parser.add_argument("--colocate-worker", type=Path)
+    parser.add_argument("--loss-worker", type=Path)
     args = parser.parse_args()
     if args.worker:
         worker(args.worker)
-    else:
+    elif args.colocate_worker:
         colocate_worker(args.colocate_worker)
+    else:
+        loss_worker(args.loss_worker)

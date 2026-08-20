@@ -17,6 +17,7 @@ dataset:
     - bokeh__bokeh-13318
     - getmoto__moto-5110
     - getmoto__moto-5338
+    - getmoto__moto-5718
     - getmoto__moto-6107
     - getmoto__moto-6724
     - getmoto__moto-7317
@@ -123,13 +124,13 @@ vllm:
   enable_sleep_mode: true
   tensor_parallel_size: 4
   server_base_url: null
-  gpu_memory_utilization: 0.20
+  gpu_memory_utilization: 0.65
   max_model_length: 32768
 runtime:
   runtime_qualified: true
   process_count: 4
   base_seed: 42
-  distributed_timeout_sec: 1800
+  distributed_timeout_sec: 9000
 output:
   output_root: outputs
   run_id: null

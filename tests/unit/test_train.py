@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from siete_rl.train import (
     RecordingRuntimeError,
     RuntimeNotQualifiedError,
     _apply_liger_runtime_flags,
+    _checkpoint_retention_callback,
     _close_environments,
     _close_vllm_communicator,
     _detach_vllm_client_atexit,
@@ -216,6 +218,24 @@ def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
     assert grpo_config.vllm_server_base_url == endpoints.base_url
     assert grpo_config.vllm_server_port == 18421
     assert grpo_config.vllm_group_port == 18422
+
+
+def test_checkpoint_retention_keeps_periodic_archives_and_latest(tmp_path: Path) -> None:
+    callback = _checkpoint_retention_callback(archive_steps=5, archive_limit=3)
+    for step in (5, 10, 11, 12, 15, 16, 20, 21):
+        (tmp_path / f"checkpoint-{step}").mkdir()
+        callback.on_save(
+            SimpleNamespace(output_dir=tmp_path),
+            SimpleNamespace(is_world_process_zero=True),
+            SimpleNamespace(),
+        )
+
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "checkpoint-10",
+        "checkpoint-15",
+        "checkpoint-20",
+        "checkpoint-21",
+    }
 
 
 @pytest.mark.parametrize(("gpu_count", "gradient_accumulation_steps"), [("2", 8), ("4", 4)])

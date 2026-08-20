@@ -102,7 +102,9 @@ def run(config_path: str | Path) -> dict[str, Any]:
             log_path=output_dir / "vllm.log",
         )
     worker: subprocess.Popen[bytes] | None = None
+    worker_process_groups: set[int] = set()
     interrupted_signum: int | None = None
+    worker_group_residual = False
     try:
         with _SignalLatch() as latch:
             if server is not None:
@@ -129,19 +131,39 @@ def run(config_path: str | Path) -> dict[str, Any]:
                     process_count=config.runtime.process_count,
                     vllm_mode=config.vllm.mode,
                 )
+                worker_process_groups.add(worker.pid)
                 state["worker"] = {"pid": worker.pid, "state": "running"}
                 _write_json(state_path, state)
                 while worker.poll() is None:
+                    worker_process_groups.update(_descendant_process_groups(worker.pid))
                     if latch.signum is not None:
                         interrupted_signum = latch.signum
-                        _terminate_process_group(worker, latch.signum, WORKER_TERM_GRACE_SEC)
+                        worker_group_residual = not _terminate_process_group(
+                            worker,
+                            latch.signum,
+                            WORKER_TERM_GRACE_SEC,
+                            process_groups=worker_process_groups,
+                        )
                         break
                     time.sleep(0.1)
                 if worker.poll() is None:
                     worker.wait(timeout=1)
     finally:
         if worker is not None and worker.poll() is None:
-            _terminate_process_group(worker, signal.SIGTERM, WORKER_TERM_GRACE_SEC)
+            worker_process_groups.update(_descendant_process_groups(worker.pid))
+        if worker is not None and any(
+            _process_group_has_live_members(pgid) for pgid in worker_process_groups
+        ):
+            worker_group_residual = not _terminate_process_group(
+                worker,
+                signal.SIGTERM,
+                WORKER_TERM_GRACE_SEC,
+                process_groups=worker_process_groups,
+            )
+        elif worker is not None:
+            worker_group_residual = False
+        if worker_group_residual:
+            state["cleanup"]["errors"].append("worker process group remains active")
         server_handle = (
             server.close()
             if server is not None
@@ -161,6 +183,7 @@ def run(config_path: str | Path) -> dict[str, Any]:
             returncode=int(worker.poll()),
             interrupted_signum=interrupted_signum,
             cleanup_errors=state["cleanup"]["errors"],
+            worker_group_residual=worker_group_residual,
         )
     worker_report = _load_worker_report(output_dir)
     if worker_report is None:
@@ -240,26 +263,77 @@ def _start_worker(
 
 
 def _terminate_process_group(
-    process: subprocess.Popen[bytes], signum: int, grace_sec: float
-) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signum)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + grace_sec
-    while process.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.1)
-    if process.poll() is None:
+    process: subprocess.Popen[bytes],
+    signum: int,
+    grace_sec: float,
+    *,
+    process_groups: set[int] | None = None,
+) -> bool:
+    groups = {pgid for pgid in (process_groups or {process.pid}) if pgid > 1}
+    if not groups:
+        return True
+    for pgid in groups:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(pgid, signum)
         except ProcessLookupError:
             pass
-    try:
-        process.wait(timeout=TERM_GRACE_SEC)
-    except subprocess.TimeoutExpired:
-        pass
+    deadline = time.monotonic() + grace_sec
+    while (
+        any(_process_group_has_live_members(pgid) for pgid in groups)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.1)
+    live_groups = {pgid for pgid in groups if _process_group_has_live_members(pgid)}
+    if live_groups:
+        for pgid in live_groups:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + TERM_GRACE_SEC
+        while (
+            any(_process_group_has_live_members(pgid) for pgid in live_groups)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.1)
+    if process.poll() is None:
+        try:
+            process.wait(timeout=TERM_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            pass
+    return not any(_process_group_has_live_members(pgid) for pgid in groups)
+
+
+def _descendant_process_groups(root_pid: int) -> set[int]:
+    processes: dict[int, tuple[int, int]] = {}
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            if fields[0] != "Z":
+                processes[int(stat_path.parent.name)] = (int(fields[1]), int(fields[2]))
+        except (OSError, IndexError, ValueError):
+            continue
+    descendants = {root_pid}
+    while children := {
+        pid for pid, (parent, _) in processes.items() if parent in descendants
+    } - descendants:
+        descendants.update(children)
+    return {
+        processes[pid][1]
+        for pid in descendants
+        if pid in processes and processes[pid][1] > 1
+    }
+
+
+def _process_group_has_live_members(pgid: int) -> bool:
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            if fields[0] != "Z" and int(fields[2]) == pgid:
+                return True
+        except (OSError, IndexError, ValueError):
+            continue
+    return False
 
 
 def _sweep_run_containers(run_id: str, state: dict[str, Any]) -> None:
@@ -287,6 +361,7 @@ def _mark_stale_worker_run(
     returncode: int,
     interrupted_signum: int | None,
     cleanup_errors: list[str],
+    worker_group_residual: bool = False,
 ) -> None:
     """worker 硬退出时接管仍为 running 的磁盘终态。"""
 
@@ -313,12 +388,12 @@ def _mark_stale_worker_run(
         "stage": "supervisor",
         "log": "worker_logs",
     }
-    clean_release = not cleanup_errors
+    clean_release = not cleanup_errors and not worker_group_residual
     payload["cleanup"].update(
         {
             "status": "completed" if clean_release else "failed",
             "clean_release": clean_release,
-            "residual_count": 0,
+            "residual_count": int(worker_group_residual),
         }
     )
     time_info = payload.get("time")
@@ -341,8 +416,7 @@ def _mark_stale_worker_run(
     if isinstance(cleanup, dict):
         cleanup["status"] = "completed" if clean_release else "failed"
         cleanup["clean_release"] = clean_release
-        if clean_release:
-            cleanup["residuals"] = []
+        cleanup["residuals"] = ["worker_process_group"] if worker_group_residual else []
         _write_json(cleanup_path, cleanup)
 
     batches = sorted((output_dir / "rollouts").glob("batch-*/batch.json"))

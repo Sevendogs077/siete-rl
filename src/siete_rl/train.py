@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -214,6 +215,7 @@ def build_grpo_config(
         trust_remote_code=config.model.trust_remote_code,
         seed=seed,
         data_seed=seed,
+        ddp_timeout=config.runtime.distributed_timeout_sec,
         use_cpu=use_cpu,
         bf16=False if use_cpu else grpo.bf16,
         fp16=False,
@@ -228,8 +230,9 @@ def build_grpo_config(
         gradient_checkpointing=grpo.gradient_checkpointing,
         logging_steps=grpo.logging_steps,
         save_strategy=grpo.save_strategy,
-        save_steps=grpo.save_steps,
-        save_total_limit=grpo.save_total_limit,
+        # 每步写 last-good；回调只保留周期归档和最新一步。
+        save_steps=1,
+        save_total_limit=None,
         report_to=list(grpo.report_to),
         num_generations=grpo.num_generations,
         num_iterations=grpo.num_iterations,
@@ -285,6 +288,7 @@ def build_trainer(
     reward_func: Callable[..., list[float | None]],
     processing_class: Any | None = None,
     vllm_endpoints: Any | None = None,
+    resume_from_checkpoint: str | Path | None = None,
 ) -> Any:
     """构造 SWEGRPOTrainer（GRPOTrainer 子类，加入环境信号终止）。"""
 
@@ -292,7 +296,8 @@ def build_trainer(
 
     model: Any = config.model.model_path
     peft_config = build_peft_config(config)
-    if config.model.adapter_path is not None:
+    adapter_path = resume_from_checkpoint or config.model.adapter_path
+    if adapter_path is not None:
         import torch
         from peft import PeftModel
         from transformers import AutoModelForCausalLM
@@ -304,7 +309,7 @@ def build_trainer(
             trust_remote_code=config.model.trust_remote_code,
         )
         model = PeftModel.from_pretrained(
-            model, config.model.adapter_path, is_trainable=True
+            model, adapter_path, is_trainable=True
         )
         peft_config = None
 
@@ -324,6 +329,7 @@ def build_trainer(
         tool_parallel_workers=config.generation.tool_parallel_workers,
         extra_reference_rewards=config.grpo.extra_reference_rewards,
         distributed_timeout_sec=config.runtime.distributed_timeout_sec,
+        preloaded_checkpoint=resume_from_checkpoint,
     )
 
 
@@ -373,6 +379,47 @@ def _run_metrics_callback(recorder: Any) -> Any:
             return control
 
     return RunMetricsCallback()
+
+
+def _checkpoint_retention_callback(archive_steps: int, archive_limit: int) -> Any:
+    """保留周期 checkpoint 和最新一次成功 step。"""
+
+    from transformers import TrainerCallback
+
+    class CheckpointRetentionCallback(TrainerCallback):
+        def on_save(
+            self,
+            args: Any,
+            state: Any,
+            control: Any,
+            **kwargs: Any,
+        ) -> Any:
+            del kwargs
+            import torch
+
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            if not state.is_world_process_zero:
+                return control
+            checkpoints = sorted(
+                (
+                    int(path.name.removeprefix("checkpoint-")),
+                    path,
+                )
+                for path in Path(args.output_dir).glob("checkpoint-*")
+                if path.is_dir()
+                and path.name.removeprefix("checkpoint-").isdigit()
+            )
+            archives = [path for step, path in checkpoints if step % archive_steps == 0]
+            keep = set(archives[-archive_limit:])
+            if checkpoints:
+                keep.add(checkpoints[-1][1])
+            for _, path in checkpoints:
+                if path not in keep:
+                    shutil.rmtree(path)
+            return control
+
+    return CheckpointRetentionCallback()
 
 
 def _wandb_metrics_callback(manager: Any) -> Any:
@@ -626,6 +673,7 @@ def _run_once(
             reward_func=reward_func,
             processing_class=tokenizer,
             vllm_endpoints=vllm_endpoints,
+            resume_from_checkpoint=resume_from_checkpoint,
         )
         if bool(trainer.accelerator.is_main_process) != writer:
             raise RuntimeError(
@@ -633,6 +681,12 @@ def _run_once(
             )
         vllm_client = _detach_vllm_client_atexit(trainer, recorder)
         trainer.add_callback(_run_metrics_callback(recorder))
+        trainer.add_callback(
+            _checkpoint_retention_callback(
+                config.grpo.save_steps,
+                config.grpo.save_total_limit,
+            )
+        )
         if wandb_manager.active:
             trainer.add_callback(_wandb_metrics_callback(wandb_manager))
         run_processes.update(_new_child_processes(child_process_baseline))
@@ -680,6 +734,16 @@ def _run_once(
                 + ("numerically changed" if lora_changed else "numerically unchanged")
             )
     except BaseException as exc:
+        try:
+            import torch
+
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
+        except BaseException as distributed_error:
+            exc.add_note(
+                "distributed teardown failed: "
+                f"{type(distributed_error).__name__}: {distributed_error}"
+            )
         interrupted = isinstance(exc, KeyboardInterrupt) or type(exc).__name__ == "WorkflowTermination"
         if interrupted:
             interrupted_signum = int(getattr(exc, "signum", 2))
