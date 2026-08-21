@@ -47,6 +47,7 @@ LAST_METRIC_KEYS = {
 }
 STEP_METRIC_KEYS = {
     **LAST_METRIC_KEYS,
+    "reward_mean_batch": "reward",
     "importance_sampling_ratio_max": "sampling/importance_sampling_ratio/max",
     "clip_ratio": "clip_ratio/region_mean",
     "completion_length_mean": "completions/mean_length",

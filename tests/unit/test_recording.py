@@ -237,6 +237,7 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
         step=1,
         logs={
             "loss": 0.4,
+            "reward": 0.375,
             "grad_norm": 1.25,
             "kl": 0.02,
             "entropy": 0.8,
@@ -253,6 +254,7 @@ def test_group_rollouts_rewards_metrics_and_consumption(tmp_path: Path) -> None:
     assert rows[0]["rollouts_cumulative"] == 4
     assert rows[0]["reward_mean_group"] == 0.25
     assert rows[0]["train_pass_rate_cumulative"] == 0.25
+    assert rows[0]["reward_mean_batch"] == 0.375
     assert rows[0]["group_degenerate"] is False
     assert rows[0]["importance_sampling_ratio_mean"] == 1.01
     assert rows[0]["reset_time_seconds"] == 9.5

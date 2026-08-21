@@ -68,7 +68,7 @@ grpo:
   epsilon: 0.16
   epsilon_high: 0.24
   delta: null
-  beta: 0.0
+  beta: 0.001
   importance_sampling_level: token
   router_aux_loss_coef: 0.0
   shuffle_dataset: true
