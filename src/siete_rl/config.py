@@ -153,6 +153,7 @@ class RuntimeConfig(StrictConfig):
     process_count: int = Field(ge=1)
     base_seed: int = Field(ge=0)
     distributed_timeout_sec: int = Field(default=3600, ge=1)
+    gpu_memory_claim: float | None = Field(default=None, gt=0.0, lt=1.0)
 
 
 class OutputConfig(StrictConfig):
@@ -244,6 +245,8 @@ class ProjectConfig(StrictConfig):
                 raise ValueError("qualified runtime requires two- or four-GPU colocate mode")
         elif self.vllm.tensor_parallel_size is not None or self.vllm.server_base_url is not None:
             raise ValueError("an unqualified runtime must not activate GPU topology")
+        if self.runtime.gpu_memory_claim is not None and not self.runtime.runtime_qualified:
+            raise ValueError("gpu_memory_claim requires a qualified runtime")
         return self
 
 

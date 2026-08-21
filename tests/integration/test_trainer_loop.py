@@ -56,6 +56,7 @@ def reset_trainer(environments):
     value.environments = environments
     value.model = SimpleNamespace(training=True)
     value.use_vllm = False
+    value._memory_claim = None
     value._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     return value
 

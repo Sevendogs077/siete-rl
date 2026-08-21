@@ -329,6 +329,7 @@ def build_trainer(
         tool_parallel_workers=config.generation.tool_parallel_workers,
         extra_reference_rewards=config.grpo.extra_reference_rewards,
         distributed_timeout_sec=config.runtime.distributed_timeout_sec,
+        gpu_memory_claim=config.runtime.gpu_memory_claim,
         preloaded_checkpoint=resume_from_checkpoint,
     )
 
@@ -1178,6 +1179,16 @@ def _release_trainer(
         ]
     errors: list[BaseException] = []
     handles: list[dict[str, Any]] = []
+    memory_claim = getattr(trainer, "_memory_claim", None)
+    if memory_claim is not None:
+        try:
+            memory_claim.close()
+            trainer._memory_claim = None
+        except BaseException as exc:
+            errors.append(exc)
+            recorder.log(
+                f"GPU memory claim cleanup failed: {type(exc).__name__}: {exc}"
+            )
     vllm_model_ref: weakref.ReferenceType[Any] | None = None
     backend = getattr(trainer, "vllm_generation", None)
     llm = getattr(backend, "llm", None)

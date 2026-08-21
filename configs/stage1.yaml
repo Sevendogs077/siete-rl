@@ -104,13 +104,14 @@ vllm:
   enable_sleep_mode: true
   tensor_parallel_size: 4
   server_base_url: null
-  gpu_memory_utilization: 0.65
+  gpu_memory_utilization: 0.20
   max_model_length: 32768
 runtime:
   runtime_qualified: true
   process_count: 4
   base_seed: 42
   distributed_timeout_sec: 9000
+  gpu_memory_claim: 0.85
 output:
   output_root: outputs
   run_id: null

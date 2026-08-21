@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
@@ -119,6 +121,189 @@ class _EpochRepeatSampler(RepeatSampler):
             self.generator.manual_seed(self.seed + max(epoch, self._minimum_epoch))
 
 
+class _GpuMemoryClaim:
+    """在同步 colocate 阶段间维持本 job 的单卡显存水位。"""
+
+    _CHUNK_BYTES = 256 * 1024**2
+
+    def __init__(self, fraction: float) -> None:
+        if torch.cuda.memory.get_allocator_backend() != "native":
+            raise RuntimeError("gpu_memory_claim requires PyTorch's native CUDA allocator")
+        self._fraction = fraction
+        self._device = torch.cuda.current_device()
+        device_uuid = torch.cuda.get_device_properties(self._device).uuid
+        self._device_uuid = (
+            device_uuid.decode("ascii") if isinstance(device_uuid, bytes) else str(device_uuid)
+        )
+        if not self._device_uuid.startswith("GPU-"):
+            self._device_uuid = f"GPU-{self._device_uuid}"
+        self._root_pid = os.getpid()
+        self._blocks: list[torch.Tensor] = []
+
+    def establish(self) -> None:
+        def fill_trainer_cache() -> None:
+            self._fill()
+            self._blocks.clear()
+
+        self._together("establish", fill_trainer_cache)
+
+    def before_wake(self) -> None:
+        self._together("before_wake", self._release)
+
+    def after_wake(self) -> None:
+        self._together("after_wake", self._fill)
+
+    def after_sleep(self) -> None:
+        def fill_trainer_cache() -> None:
+            self._fill()
+            self._blocks.clear()
+
+        self._together("after_sleep", fill_trainer_cache)
+
+    def close(self) -> None:
+        self._release()
+
+    def _fill(self) -> None:
+        total, free, owner, external = self._snapshot()
+        target = math.ceil(total * self._fraction)
+        missing = max(0, target - owner)
+        if missing == 0:
+            return
+        if missing > free:
+            processes = ", ".join(
+                f"pid={pid}:{used}" for pid, used in external
+            ) or "none"
+            raise RuntimeError(
+                f"cannot claim {self._fraction:.0%} of {self._device_uuid}: "
+                f"owner={owner}, target={target}, free={free}, external=[{processes}]"
+            )
+
+        remaining = missing
+        while remaining:
+            size = min(remaining, self._CHUNK_BYTES)
+            self._blocks.append(
+                torch.empty(size, dtype=torch.uint8, device=self._device)
+            )
+            remaining -= size
+        torch.cuda.synchronize(self._device)
+        _, _, owner_after, _ = self._snapshot()
+        if owner_after < target:
+            raise RuntimeError(
+                f"gpu_memory_claim postcondition failed on {self._device_uuid}: "
+                f"owner={owner_after}, target={target}"
+            )
+
+    def _release(self) -> None:
+        self._blocks.clear()
+        torch.cuda.empty_cache()
+
+    def _snapshot(self) -> tuple[int, int, int, tuple[tuple[int, int], ...]]:
+        import pynvml
+
+        owners_before = self._process_tree()
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(self._device_uuid)
+            memory_before = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            memory_after = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        finally:
+            pynvml.nvmlShutdown()
+
+        owners_after = self._process_tree()
+        gpu_pids = {int(process.pid) for process in processes}
+        relevant_before = {
+            pid: identity for pid, identity in owners_before.items() if pid in gpu_pids
+        }
+        relevant_after = {
+            pid: identity for pid, identity in owners_after.items() if pid in gpu_pids
+        }
+        if relevant_before != relevant_after:
+            raise RuntimeError("GPU process membership changed during gpu_memory_claim")
+
+        owner = 0
+        external: list[tuple[int, int]] = []
+        for process in processes:
+            used = process.usedGpuMemory
+            if used in (None, getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", None)):
+                raise RuntimeError(f"NVML memory accounting unavailable for pid {process.pid}")
+            usage = int(used)
+            if int(process.pid) in owners_before:
+                owner += usage
+            else:
+                external.append((int(process.pid), usage))
+        return (
+            int(memory_after.total),
+            min(int(memory_before.free), int(memory_after.free)),
+            owner,
+            tuple(external),
+        )
+
+    def _process_tree(self) -> dict[int, tuple[int, int]]:
+        pending = [self._root_pid]
+        seen: set[int] = set()
+        identities: dict[int, tuple[int, int]] = {}
+        while pending:
+            pid = pending.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            proc = Path("/proc") / str(pid)
+            try:
+                stat = (proc / "stat").read_text(encoding="utf-8")
+                status = (proc / "status").read_text(encoding="utf-8")
+            except FileNotFoundError:
+                if pid == self._root_pid:
+                    raise RuntimeError(f"trainer process {pid} disappeared")
+                continue
+            fields = stat[stat.rfind(")") + 2 :].split()
+            host_pid = pid
+            for line in status.splitlines():
+                if line.startswith("NSpid:"):
+                    host_pid = int(line.split()[1])
+                    break
+            identities[host_pid] = (pid, int(fields[19]))
+            for children_path in (proc / "task").glob("*/children"):
+                try:
+                    pending.extend(
+                        int(value)
+                        for value in children_path.read_text(encoding="utf-8").split()
+                    )
+                except FileNotFoundError:
+                    continue
+        return identities
+
+    def _together(self, operation: str, action) -> None:
+        error: BaseException | None = None
+        try:
+            action()
+        except Exception as exc:
+            error = exc
+
+        distributed = torch.distributed
+        if not distributed.is_available() or not distributed.is_initialized():
+            if error is not None:
+                self.close()
+                raise error
+            return
+
+        local_error = None if error is None else f"{type(error).__name__}: {error}"
+        errors: list[str | None] = [None] * distributed.get_world_size()
+        try:
+            distributed.all_gather_object(errors, local_error)
+        except Exception:
+            self.close()
+            raise
+        if any(item is not None for item in errors):
+            self.close()
+            failures = "; ".join(
+                f"rank {rank}: {item}"
+                for rank, item in enumerate(errors)
+                if item is not None
+            )
+            raise RuntimeError(f"gpu_memory_claim {operation} failed: {failures}")
+
+
 class SWEGRPOTrainer(GRPOTrainer):
     """在官方 GRPOTrainer 上加入环境信号终止；其余行为与 TRL 完全一致。"""
 
@@ -130,6 +315,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         tool_parallel_workers: int = 1,
         extra_reference_rewards: tuple[float, ...] = (),
         distributed_timeout_sec: int = 3600,
+        gpu_memory_claim: float | None = None,
         preloaded_checkpoint: str | Path | None = None,
         **kwargs,
     ) -> None:
@@ -166,6 +352,11 @@ class SWEGRPOTrainer(GRPOTrainer):
             raise ValueError("credit mask requires use_liger_kernel=true")
         if self.vllm_mode == "colocate":
             self.liger_loss.compiled = False
+        self._memory_claim = (
+            _GpuMemoryClaim(gpu_memory_claim) if gpu_memory_claim is not None else None
+        )
+        if self._memory_claim is not None:
+            self._memory_claim.establish()
 
     def _load_from_checkpoint(self, resume_from_checkpoint: str, model=None) -> None:
         if (
@@ -266,6 +457,8 @@ class SWEGRPOTrainer(GRPOTrainer):
         if not defer_sleep:
             return super()._generate(prompts)
 
+        if self._memory_claim is not None:
+            self._memory_claim.before_wake()
         with profiling_context(self, "sync_weights"):
             generation.sync_weights()
         self._last_loaded_step = self.state.global_step
@@ -276,10 +469,14 @@ class SWEGRPOTrainer(GRPOTrainer):
         generation.llm.wake_up(tags=["kv_cache"])
         generation.enable_sleep_mode = False
         try:
+            if self._memory_claim is not None:
+                self._memory_claim.after_wake()
             return super()._generate(prompts)
         finally:
             generation.enable_sleep_mode = True
             generation.llm.sleep(level=2)
+            if self._memory_claim is not None:
+                self._memory_claim.after_sleep()
 
     # >>> swe_agent: #6673 backport — tool loop 再生成禁止 server stride 去重
     def _generate_tool_loop_turn(self, prompt_ids, images, multimodal_fields):
