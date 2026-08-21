@@ -328,6 +328,7 @@ def build_trainer(
         use_process_mask=config.generation.use_process_mask,
         tool_parallel_workers=config.generation.tool_parallel_workers,
         extra_reference_rewards=config.grpo.extra_reference_rewards,
+        reference_reward_scope=config.grpo.reference_reward_scope,
         distributed_timeout_sec=config.runtime.distributed_timeout_sec,
         gpu_memory_claim=config.runtime.gpu_memory_claim,
         preloaded_checkpoint=resume_from_checkpoint,
@@ -896,7 +897,7 @@ def _recording_reward(
     ) -> list[float | None]:
         if not (len(prompts) == len(completions) == len(environments)) or not completions:
             raise RecordingRuntimeError("reward requires aligned non-empty rollouts")
-        group_task_id = _callback_group_task_id(
+        task_ids = _callback_task_ids(
             kwargs.get("task_id"), len(completions)
         )
         try:
@@ -918,24 +919,25 @@ def _recording_reward(
                 raise RecordingRuntimeError(
                     "reward adapter must finalize every rollout with a settlement"
                 )
-            local_task_ids = {
-                environment.trajectory.task_id for environment in environments
-            }
-            if local_task_ids != {group_task_id}:
+            mismatches = [
+                (task_id, environment.trajectory.task_id)
+                for task_id, environment in zip(task_ids, environments, strict=True)
+                if environment.trajectory.task_id != task_id
+            ]
+            if mismatches:
                 raise RecordingRuntimeError(
-                    "group mixes tasks: "
-                    f"callback={group_task_id!r}, trajectories={sorted(local_task_ids)}"
+                    f"rollout task mismatch: callback/trajectory={mismatches}"
                 )
             local_records = []
-            for local_slot, (prompt, rollout_messages, environment, value) in enumerate(
-                zip(prompts, messages, environments, rewards, strict=True)
+            for local_slot, (prompt, rollout_messages, environment, value, task_id) in enumerate(
+                zip(prompts, messages, environments, rewards, task_ids, strict=True)
             ):
                 local_records.append(
                     {
                         "local_slot": local_slot,
                         "prompt": prompt,
                         "messages": rollout_messages,
-                        "task_id": group_task_id,
+                        "task_id": task_id,
                         "episode_id": environment.episode_id,
                         "trajectory": _serialize_record_model(environment.trajectory),
                         "patch": environment.frozen_patch,
@@ -1013,19 +1015,14 @@ def _restore_record_model(value: Any, model: Any) -> Any:
     return model.model_validate(value)
 
 
-def _callback_group_task_id(value: object, rollout_count: int) -> str:
+def _callback_task_ids(value: object, rollout_count: int) -> list[str]:
     if not isinstance(value, list) or len(value) != rollout_count:
         raise RecordingRuntimeError(
             "reward callback task_id must align with completions"
         )
     if any(not isinstance(task_id, str) or not task_id.strip() for task_id in value):
         raise RecordingRuntimeError("reward callback task_id values must be non-empty strings")
-    task_ids = set(value)
-    if len(task_ids) != 1:
-        raise RecordingRuntimeError(
-            f"reward callback group mixes task_id values: {sorted(task_ids)}"
-        )
-    return value[0]
+    return value
 
 
 def _join_messages(prompt: object, completion: object) -> list[object]:

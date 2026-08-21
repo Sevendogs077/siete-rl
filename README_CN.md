@@ -37,7 +37,7 @@ SieteRL 使用强化学习训练软件工程 Agent。项目以 SWE-Gym OpenHands
 ## Details
 
 - **Layered Rewards** — 完全修复得 `1.0`；未完全修复的补丁仅在成功应用且全部 P2P 测试通过时获得 `0.20p²`，其中 `p` 为 F2P 通过率。
-- **NGRPO Advantage Calibration** — 计算组均值时加入不参与采样和 loss 的虚拟满分 `1.0`，让全失败组仍产生负优势；本项目不做组内标准差归一化。
+- **全零组校准** — 当组内所有 rollout 均失败时，固定的 `0.1` 参考奖励仍能保留训练信号。
 - **Sign-aware Process Mask** — 正优势下屏蔽格式错误及第 3 次起完全相同的 Bash/editor 动作；负优势下保留这些 token，让错误步骤接受惩罚而不是分享正奖励。
 - **Failure-aware Rollout Handling** — 基础设施失败不进入组内均值，也不产生梯度；物理截断仅屏蔽最后一个不完整 turn，其余异常结束的最终补丁仍会参与验证。
 - **Dr. GRPO Objective** — 使用全局最大生成长度归一化 loss，并结合 `0.16/0.24` 非对称裁剪与 token 级 vLLM 重要性修正训练 32K 工具调用轨迹。

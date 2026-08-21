@@ -241,12 +241,29 @@ def test_credit_mask_requires_liger(monkeypatch, use_process_mask):
 
 class TestGenerateAndScoreCompletionsOverride:
     @pytest.mark.parametrize(
-        ("process_index", "local_reward", "expected_advantage"),
-        [(0, 0.0, -1 / 9), (2, 1.0, 0.0)],
+        (
+            "scope",
+            "reference_reward",
+            "gathered_rewards",
+            "process_index",
+            "local_reward",
+            "expected_advantage",
+        ),
+        [
+            ("all_groups", 1.0, [0.0] * 8 + [1.0] * 8, 0, 0.0, -1 / 9),
+            ("all_groups", 1.0, [0.0] * 8 + [1.0] * 8, 2, 1.0, 0.0),
+            ("all_zero_groups", 0.1, [0.0] * 16, 0, 0.0, -0.1 / 9),
+            ("all_zero_groups", 0.1, [0.0] * 15 + [1.0], 2, 0.0, -1 / 8),
+            ("all_zero_groups", 0.1, [0.0] * 15 + [torch.nan], 2, 0.0, -0.1 / 8),
+            ("all_zero_groups", 0.1, [torch.nan] * 8 + [0.0] * 8, 0, None, 0.0),
+        ],
     )
     def test_reference_reward_group_can_span_processes(
         self,
         monkeypatch,
+        scope,
+        reference_reward,
+        gathered_rewards,
         process_index,
         local_reward,
         expected_advantage,
@@ -265,13 +282,14 @@ class TestGenerateAndScoreCompletionsOverride:
             use_process_mask=False,
             environments=[_mask_env(reward=local_reward) for _ in range(4)],
         )
-        trainer._extra_reference_rewards = (1.0,)
+        trainer._extra_reference_rewards = (reference_reward,)
+        trainer._reference_reward_scope = scope
         trainer.num_generations = 8
         trainer.scale_rewards = "none"
         trainer.accelerator = SimpleNamespace(
             process_index=process_index,
             gather=lambda rewards: torch.tensor(
-                [0.0] * 8 + [1.0] * 8,
+                gathered_rewards,
                 dtype=rewards.dtype,
                 device=rewards.device,
             ),

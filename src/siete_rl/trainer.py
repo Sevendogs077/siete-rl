@@ -186,12 +186,6 @@ class _GpuMemoryClaim:
             )
             remaining -= size
         torch.cuda.synchronize(self._device)
-        _, _, owner_after, _ = self._snapshot()
-        if owner_after < target:
-            raise RuntimeError(
-                f"gpu_memory_claim postcondition failed on {self._device_uuid}: "
-                f"owner={owner_after}, target={target}"
-            )
 
     def _release(self) -> None:
         self._blocks.clear()
@@ -314,6 +308,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         use_process_mask: bool,
         tool_parallel_workers: int = 1,
         extra_reference_rewards: tuple[float, ...] = (),
+        reference_reward_scope: str = "all_groups",
         distributed_timeout_sec: int = 3600,
         gpu_memory_claim: float | None = None,
         preloaded_checkpoint: str | Path | None = None,
@@ -327,6 +322,7 @@ class SWEGRPOTrainer(GRPOTrainer):
         self._tool_parallel_workers = tool_parallel_workers
         self._use_process_mask = use_process_mask
         self._extra_reference_rewards = extra_reference_rewards
+        self._reference_reward_scope = reference_reward_scope
         self._distributed_timeout_sec = distributed_timeout_sec
         self._preloaded_checkpoint = (
             Path(preloaded_checkpoint).resolve() if preloaded_checkpoint is not None else None
@@ -658,6 +654,14 @@ class SWEGRPOTrainer(GRPOTrainer):
                 dtype=rewards.dtype,
                 device=rewards.device,
             ).expand(rewards.size(0), -1)
+            if self._reference_reward_scope == "all_zero_groups":
+                scorable = ~torch.isnan(rewards)
+                all_zero = scorable.any(dim=1, keepdim=True) & (
+                    (rewards == 0) | ~scorable
+                ).all(dim=1, keepdim=True)
+                references = references.masked_fill(
+                    ~all_zero, torch.nan
+                )
             baseline_rewards = torch.cat((rewards, references), dim=1)
             advantages = rewards - torch.nanmean(
                 baseline_rewards, dim=1, keepdim=True

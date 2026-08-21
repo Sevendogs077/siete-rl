@@ -59,7 +59,8 @@ generation:
 grpo:
   reward_type: layered
   layered_reward_cap: 0.20
-  extra_reference_rewards: [1.0]
+  extra_reference_rewards: [0.1]
+  reference_reward_scope: all_zero_groups
   num_generations: 8
   num_iterations: 1
   loss_type: dr_grpo
@@ -77,7 +78,7 @@ grpo:
   vllm_importance_sampling_clip_max: 3.0
   vllm_importance_sampling_clip_min: null
   num_train_epochs: 3
-  train_batch_size: 2
+  train_batch_size: 4
   learning_rate: 1.0e-05
   weight_decay: 0.0
   max_grad_norm: 1.0

@@ -93,6 +93,7 @@ class GRPOConfigValues(StrictConfig):
         default=DEFAULT_LAYERED_REWARD_CAP, gt=0.0, lt=1.0
     )
     extra_reference_rewards: tuple[float, ...] = ()
+    reference_reward_scope: Literal["all_groups", "all_zero_groups"] = "all_groups"
     num_generations: int = Field(ge=2)
     num_iterations: int = Field(ge=1)
     loss_type: Literal["grpo", "dr_grpo", "dapo"]

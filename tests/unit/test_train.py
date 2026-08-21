@@ -294,7 +294,7 @@ def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.Monk
     assert handle["final_state"] == "closed"
 
 
-def test_recording_reward_rejects_mixed_callback_tasks_before_adapter() -> None:
+def test_recording_reward_rejects_invalid_callback_tasks_before_adapter() -> None:
     calls = 0
 
     class FakeRecorder:
@@ -320,7 +320,7 @@ def test_recording_reward_rejects_mixed_callback_tasks_before_adapter() -> None:
             prompts=[[], []],
             completions=[[], []],
             environments=[_RecordingEnvironment(0), _RecordingEnvironment(1)],
-            task_id=["task-a", "task-b"],
+            task_id=["task-a", ""],
         )
 
     assert calls == 0
@@ -441,9 +441,7 @@ def test_recording_reward_preserves_trl_position_order_and_drains_events() -> No
     ]
 
 
-def test_recording_reward_splits_a_global_generation_batch_by_task(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_recording_reward_splits_a_local_generation_batch_by_task() -> None:
     task_a = "getmoto__moto-5321"
     task_b = "getmoto__moto-5502"
 
@@ -471,50 +469,29 @@ def test_recording_reward_splits_a_global_generation_batch_by_task(
         def merge_cleanup_events(self, events):
             del events
 
-    def gather(local_records):
-        records = []
-        for task_id in (task_a, task_b):
-            for _ in range(2):
-                for record in local_records:
-                    trajectory = {**record["trajectory"], "task_id": task_id}
-                    records.append(
-                        {
-                            **record,
-                            "task_id": task_id,
-                            "trajectory": trajectory,
-                            "global_slot": len(records),
-                        }
-                    )
-        return records
-
-    monkeypatch.setattr("siete_rl.train._gather_rollout_records", gather)
-    environments = [_RecordingEnvironment(0), _RecordingEnvironment(1)]
+    environments = [_RecordingEnvironment(index) for index in range(4)]
 
     def adapter(*, environments, **kwargs):
         del kwargs
-        for environment in environments:
-            environment.trajectory = _trajectory_for(task_a)
-        return [0.0, 0.0]
+        for index, environment in enumerate(environments):
+            environment.trajectory = _trajectory_for(task_a if index < 2 else task_b)
+        return [0.0] * 4
 
     recorder = FakeRecorder()
     reward = _recording_reward(recorder, adapter)
     reward(
-        prompts=[[{"role": "user", "content": "prompt"}]] * 2,
-        completions=[[{"role": "assistant", "content": "done"}]] * 2,
+        prompts=[[{"role": "user", "content": "prompt"}]] * 4,
+        completions=[[{"role": "assistant", "content": "done"}]] * 4,
         environments=environments,
-        task_id=[task_a, task_a],
+        task_id=[task_a, task_a, task_b, task_b],
     )
 
-    assert recorder.begun == [(task_a, 4), (task_b, 4)]
+    assert recorder.begun == [(task_a, 2), (task_b, 2)]
     assert recorder.slots == [
         (task_a, 0),
         (task_a, 1),
-        (task_a, 2),
-        (task_a, 3),
         (task_b, 0),
         (task_b, 1),
-        (task_b, 2),
-        (task_b, 3),
     ]
 
 
@@ -551,7 +528,7 @@ def test_recording_reward_rejects_a_group_with_multiple_finalized_tasks() -> Non
 
     recorder = FakeRecorder()
     reward = _recording_reward(recorder, lambda **kwargs: [0.0, 0.0])
-    with pytest.raises(RecordingRuntimeError, match="group mixes tasks"):
+    with pytest.raises(RecordingRuntimeError, match="task mismatch"):
         reward(
             prompts=[[], []],
             completions=[[], []],
