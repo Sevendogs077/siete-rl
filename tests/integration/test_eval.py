@@ -263,10 +263,12 @@ def test_official_harness_receives_configured_worker_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: list[str] = []
+    captured_env: dict[str, str] = {}
+    current_protocol = protocol()
 
     def run(command, **kwargs):
-        del kwargs
         captured.extend(command)
+        captured_env.update(kwargs["env"])
         (tmp_path / "result.eval-workers.json").write_text("{}\n", encoding="utf-8")
         return eval_module.subprocess.CompletedProcess(command, 0, "ok")
 
@@ -277,10 +279,19 @@ def test_official_harness_receives_configured_worker_count(
         task_ids=["owner__repo-1"],
         run_id="eval-workers",
         timeout_sec=60,
+        protocol=current_protocol,
         max_workers=4,
         harness_root=tmp_path,
         harness_python=tmp_path / "python",
     )
+    assert captured[1:3] == ["-m", "siete_rl.swebench_harness"]
+    assert captured_env["PYTHONPATH"].split(os.pathsep) == [
+        str(PROJECT_ROOT / "src"),
+        str(tmp_path),
+    ]
+    assert captured_env["SIETE_HARNESS_CPUS"] == str(current_protocol.cpus)
+    assert captured_env["SIETE_HARNESS_MEMORY"] == current_protocol.memory
+    assert captured_env["SIETE_HARNESS_PIDS_LIMIT"] == str(current_protocol.pids_limit)
     worker_flag = captured.index("--max_workers")
     assert captured[worker_flag : worker_flag + 2] == ["--max_workers", "4"]
     assert report == {}
@@ -485,6 +496,7 @@ def test_eval_sandbox_accepts_prep_parent_then_checks_out(sample_factory) -> Non
             result("b" * 40 + "\n"),
             result(sample.task.base_commit + "\n"),
             result(),
+            result(),
             result(sample.task.base_commit + "\n"),
             result(),
         ]
@@ -501,6 +513,7 @@ def test_eval_sandbox_accepts_prep_parent_then_checks_out(sample_factory) -> Non
     sandbox.started = True
     sandbox._verify_base_contract()
     assert any(command[-3:] == ["checkout", "--detach", sample.task.base_commit] for command in client.commands)
+    assert any(command[-2:] == ["clean", "-fd"] for command in client.commands)
 
 
 @pytest.fixture
@@ -706,11 +719,12 @@ def test_eval_agent_loop_calls_the_existing_trainer_state_machine(
     class Tokenizer:
         def apply_chat_template(self, messages, **kwargs):
             del messages, kwargs
-            return [1, 2]
+            return list(range(9))
 
     class Generator:
         def generate(self, prompt_ids, *args):
-            del prompt_ids, args
+            del args
+            seen["prompt_length"] = len(prompt_ids[0])
             return [[3]], None
 
     def reset(self, task_id, **kwargs):
@@ -753,4 +767,5 @@ def test_eval_agent_loop_calls_the_existing_trainer_state_machine(
     assert outcome.termination == "submitted"
     assert outcome.messages == [first]
     assert seen["reset"] == sample.task.task_id
+    assert seen["prompt_length"] == 9
     assert seen["tools"] == {"execute_bash", "str_replace_editor", "finish"}

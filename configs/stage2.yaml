@@ -37,7 +37,7 @@ docker:
   memory: 16g
   pids_limit: 512
   exec_timeout_sec: 300
-  verifier_timeout_sec: 3600
+  verifier_timeout_sec: 1800
 model:
   provenance_id: NovaSky-AI/SWE-Gym-OpenHands-7B-Agent
   model_path: ~/.cache/modelscope/hub/models/NovaSky-AI/SWE-Gym-OpenHands-7B-Agent

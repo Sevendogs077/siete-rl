@@ -298,6 +298,9 @@ class EvalDockerSandbox(DockerSandbox):
             )
             if checkout.exit_code != 0 or checkout.timed_out:
                 raise ContainerCreateError("failed to checkout official image base commit")
+        clean = self.exec(["git", "-C", self.environment.workdir, "clean", "-fd"])
+        if clean.exit_code != 0 or clean.timed_out:
+            raise ContainerCreateError("failed to clean official image worktree")
         verified = self.exec(["git", "-C", self.environment.workdir, "rev-parse", "HEAD"])
         status = self.exec(["git", "-C", self.environment.workdir, "status", "--porcelain"])
         if (
@@ -449,10 +452,10 @@ def run_agent_loop(
                 prompt, tokenize=True, add_generation_prompt=True, return_dict=False
             )
         )
-        if len(prompt_ids) > protocol.max_prompt_length:
+        if len(prompt_ids) + 1 >= protocol.max_model_length:
             raise EvalError(
                 f"{sample.task.task_id}: public prompt has {len(prompt_ids)} tokens, "
-                f"exceeding {protocol.max_prompt_length}"
+                f"leaving no completion capacity in {protocol.max_model_length} tokens"
             )
         first_ids, _ = generator.generate([prompt_ids])
         first = parse_response(tokenizer, first_ids[0], prefix=prompt_ids) if first_ids[0] else {}
@@ -573,6 +576,7 @@ def run_official_harness(
     task_ids: Sequence[str],
     run_id: str,
     timeout_sec: int,
+    protocol: EvalProtocol,
     max_workers: int = 1,
     harness_root: Path,
     harness_python: Path,
@@ -580,7 +584,7 @@ def run_official_harness(
     command = [
         str(harness_python),
         "-m",
-        "swebench.harness.run_evaluation",
+        "siete_rl.swebench_harness",
         "--dataset_name",
         str(VERIFIED_PARQUET),
         "--split",
@@ -608,7 +612,12 @@ def run_official_harness(
     ]
     env = dict(os.environ)
     env["DOCKER_HOST"] = "unix:///run/docker-swegym/docker.sock"
-    env["PYTHONPATH"] = str(harness_root)
+    env["SIETE_HARNESS_CPUS"] = str(protocol.cpus)
+    env["SIETE_HARNESS_MEMORY"] = protocol.memory
+    env["SIETE_HARNESS_PIDS_LIMIT"] = str(protocol.pids_limit)
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(PROJECT_ROOT / "src"), str(harness_root))
+    )
     completed = subprocess.run(
         command,
         cwd=output_dir,
@@ -916,6 +925,7 @@ def execute(run_root: str | Path) -> Path:
             task_ids=[selected_ids[0]],
             run_id=f"{eval_run_id}-gold",
             timeout_sec=run.protocol.grader_timeout_sec,
+            protocol=run.protocol,
             max_workers=harness_workers,
             harness_root=harness_root,
             harness_python=harness_python,
@@ -986,6 +996,7 @@ def execute(run_root: str | Path) -> Path:
                     task_ids=selected_ids,
                     run_id=f"{eval_run_id}-base",
                     timeout_sec=run.protocol.grader_timeout_sec,
+                    protocol=run.protocol,
                     max_workers=harness_workers,
                     harness_root=harness_root,
                     harness_python=harness_python,
@@ -1014,6 +1025,7 @@ def execute(run_root: str | Path) -> Path:
                 task_ids=selected_ids,
                 run_id=f"{eval_run_id}-candidate",
                 timeout_sec=run.protocol.grader_timeout_sec,
+                protocol=run.protocol,
                 max_workers=harness_workers,
                 harness_root=harness_root,
                 harness_python=harness_python,
@@ -1148,6 +1160,7 @@ def _run_standalone_variant(
         task_ids=[_required_row_string(row, "instance_id") for row in rows],
         run_id=f"{eval_run_id}-{name}",
         timeout_sec=run.protocol.grader_timeout_sec,
+        protocol=run.protocol,
         max_workers=harness_workers,
         harness_root=harness_root,
         harness_python=harness_python,
