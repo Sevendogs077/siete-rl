@@ -383,7 +383,7 @@ def _run_metrics_callback(recorder: Any) -> Any:
     return RunMetricsCallback()
 
 
-def _checkpoint_retention_callback(archive_steps: int, archive_limit: int) -> Any:
+def _checkpoint_retention_callback(archive_steps: int) -> Any:
     """保留周期 checkpoint 和最新一次成功 step。"""
 
     from transformers import TrainerCallback
@@ -412,8 +412,7 @@ def _checkpoint_retention_callback(archive_steps: int, archive_limit: int) -> An
                 if path.is_dir()
                 and path.name.removeprefix("checkpoint-").isdigit()
             )
-            archives = [path for step, path in checkpoints if step % archive_steps == 0]
-            keep = set(archives[-archive_limit:])
+            keep = {path for step, path in checkpoints if step % archive_steps == 0}
             if checkpoints:
                 keep.add(checkpoints[-1][1])
             for _, path in checkpoints:
@@ -684,10 +683,7 @@ def _run_once(
         vllm_client = _detach_vllm_client_atexit(trainer, recorder)
         trainer.add_callback(_run_metrics_callback(recorder))
         trainer.add_callback(
-            _checkpoint_retention_callback(
-                config.grpo.save_steps,
-                config.grpo.save_total_limit,
-            )
+            _checkpoint_retention_callback(config.grpo.save_steps)
         )
         if wandb_manager.active:
             trainer.add_callback(_wandb_metrics_callback(wandb_manager))

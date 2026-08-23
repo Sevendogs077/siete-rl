@@ -87,7 +87,6 @@ grpo:
   logging_steps: 1
   save_strategy: steps
   save_steps: 5
-  save_total_limit: 3
   log_completions: false
   report_to: []
 wandb:

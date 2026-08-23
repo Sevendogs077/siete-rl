@@ -344,6 +344,12 @@ class SWEGRPOTrainer(GRPOTrainer):
         finally:
             if disable_custom_all_reduce:
                 vllm_generation.LLM = original_llm
+        if self._preloaded_checkpoint is not None:
+            reference_path = self._preloaded_checkpoint / "ref"
+            if reference_path.is_dir():
+                self.model.load_adapter(reference_path, "ref", is_trainable=False)
+            elif "ref" in self.model.peft_config:
+                self.model.delete_adapter("ref")
         if not self.use_liger_kernel:
             raise ValueError("credit mask requires use_liger_kernel=true")
         if self.vllm_mode == "colocate":
@@ -458,10 +464,6 @@ class SWEGRPOTrainer(GRPOTrainer):
         with profiling_context(self, "sync_weights"):
             generation.sync_weights()
         self._last_loaded_step = self.state.global_step
-        try:
-            generation.llm.collective_rpc("reload_weights")
-        except NotImplementedError:
-            pass
         generation.llm.wake_up(tags=["kv_cache"])
         generation.enable_sleep_mode = False
         try:

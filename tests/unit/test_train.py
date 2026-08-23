@@ -221,7 +221,7 @@ def test_grpo_config_uses_run_private_vllm_endpoints(tmp_path: Path) -> None:
 
 
 def test_checkpoint_retention_keeps_periodic_archives_and_latest(tmp_path: Path) -> None:
-    callback = _checkpoint_retention_callback(archive_steps=5, archive_limit=3)
+    callback = _checkpoint_retention_callback(archive_steps=5)
     for step in (5, 10, 11, 12, 15, 16, 20, 21):
         (tmp_path / f"checkpoint-{step}").mkdir()
         callback.on_save(
@@ -231,6 +231,7 @@ def test_checkpoint_retention_keeps_periodic_archives_and_latest(tmp_path: Path)
         )
 
     assert {path.name for path in tmp_path.iterdir()} == {
+        "checkpoint-5",
         "checkpoint-10",
         "checkpoint-15",
         "checkpoint-20",

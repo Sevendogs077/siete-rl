@@ -131,6 +131,54 @@ def test_generate_rejects_non_silent_reset_after_draining_batch(monkeypatch) -> 
     assert events == ["await:a", "await:b"]
 
 
+def test_colocated_generate_keeps_synced_weights_when_waking_from_sleep(
+    monkeypatch,
+) -> None:
+    events = []
+
+    class LLM:
+        def collective_rpc(self, method):
+            raise AssertionError(f"synced weights must not call {method}")
+
+        def wake_up(self, *, tags):
+            events.append(("wake", tags))
+
+        def sleep(self, *, level):
+            events.append(("sleep", level))
+
+    class Generation:
+        enable_sleep_mode = True
+        llm = LLM()
+
+        def sync_weights(self):
+            events.append("sync")
+
+    value = reset_trainer([])
+    value.use_vllm = True
+    value.vllm_mode = "colocate"
+    value.vllm_generation = Generation()
+    value.accelerator = SimpleNamespace(
+        wait_for_everyone=lambda: events.append("barrier"), is_main_process=True
+    )
+    value.state = SimpleNamespace(global_step=7)
+    value.args = SimpleNamespace(report_to=[])
+
+    def parent_generate(self, prompts):
+        events.append("generate")
+        return prompts
+
+    monkeypatch.setattr(GRPOTrainer, "_generate", parent_generate)
+
+    assert value._generate(["prompt"]) == ["prompt"]
+    assert events == [
+        "barrier",
+        "sync",
+        ("wake", ["kv_cache"]),
+        "generate",
+        ("sleep", 2),
+    ]
+
+
 def test_finish_keeps_model_tokens_and_adds_no_observation() -> None:
     env = Environment(); value = trainer(); value.environments = [env]; value._sync_tool_dicts = [{"finish": lambda: setattr(env, "terminated", True) or ""}]; value._async_tool_dicts = [{}]
     mask, completions, ids, _, count, failures, _ = run(

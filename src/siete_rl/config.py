@@ -123,7 +123,6 @@ class GRPOConfigValues(StrictConfig):
     logging_steps: int = Field(ge=1)
     save_strategy: Literal["steps", "epoch", "no"]
     save_steps: int = Field(ge=1)
-    save_total_limit: int = Field(ge=1)
     log_completions: bool
     report_to: tuple[str, ...]
 
