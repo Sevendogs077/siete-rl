@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 将固定外部 7B 参考与选定的本地发布评测绘制为 README 对比图。
-# 本地输入：outputs/_selected/<run>/evals/<eval>/candidate/{rollout-state.json, official-report.json}
+# 本地输入：手动选定 eval 的 candidate/{rollout-state.json, official-report.json}
 # 输出：docs/assets/results-chart-{light,dark}.png（透明底，按主题切换）
 set -euo pipefail
 
@@ -18,8 +18,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
-SELECTED = Path("outputs/_selected")
-RELEASE_RUN = SELECTED / "20260811T171350Z-086c"
+RELEASE_EVAL = Path(
+    "outputs/stage1-20260823T170423Z-fdda/checkpoint-20/"
+    "evals/20260824T011017.044253Z/candidate"
+)
 LOCAL_LABEL = "SieteRL-Agent-7B-v0"
 OUT_TEMPLATE = "docs/assets/results-chart-{theme}.png"
 
@@ -55,46 +57,7 @@ RUN_STEP = 1.12
 GROUP_GAP = 0.0
 
 
-def latest_candidate(run_dir: Path) -> Path | None:
-    """按 metadata 选择最新完成且 outcome 齐全的 candidate 评测。"""
-
-    evals = run_dir / "evals"
-    if not evals.is_dir():
-        return None
-    best: tuple[str, str, Path] | None = None
-    for entry in sorted(evals.iterdir()):
-        candidate = entry / "candidate"
-        metadata_path = entry / "metadata.json"
-        state = candidate / "rollout-state.json"
-        report = candidate / "official-report.json"
-        if not metadata_path.is_file() or not report.is_file() or not state.is_file():
-            continue
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if metadata.get("status") != "completed":
-                continue
-            finished_at = metadata["finished_at"]
-            selected_count = metadata["dataset"]["selected_count"]
-            count = len(json.loads(state.read_text(encoding="utf-8"))["outcomes"])
-            if (
-                not isinstance(finished_at, str)
-                or not finished_at
-                or not isinstance(selected_count, int)
-                or selected_count < 1
-                or count != selected_count
-            ):
-                continue
-        except (KeyError, TypeError, json.JSONDecodeError, OSError):
-            continue
-        if best is None or (finished_at, entry.name) >= (best[0], best[1]):
-            best = (finished_at, entry.name, candidate)
-    return best[2] if best else None
-
-
-def local_result(run_dir: Path) -> tuple[str, float, str, int] | None:
-    candidate = latest_candidate(run_dir)
-    if candidate is None:
-        return None
+def local_result(candidate: Path) -> tuple[str, float, str, int]:
     outcomes = json.loads(
         (candidate / "rollout-state.json").read_text(encoding="utf-8")
     )["outcomes"]
@@ -102,16 +65,11 @@ def local_result(run_dir: Path) -> tuple[str, float, str, int] | None:
         (candidate / "official-report.json").read_text(encoding="utf-8")
     )["resolved_ids"]
     total = len(outcomes)
-    if total == 0:
-        return None
     count = len(resolved)
     return LOCAL_LABEL, 100.0 * count / total, f"{count} / {total}", count
 
 
-result = local_result(RELEASE_RUN)
-if result is None:
-    raise SystemExit(f"no completed candidate eval under {RELEASE_RUN}")
-local_rows = [result]
+local_rows = [local_result(RELEASE_EVAL)]
 
 
 def render(theme: str) -> None:

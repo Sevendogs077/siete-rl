@@ -32,7 +32,7 @@ SieteRL 使用强化学习训练软件工程 Agent。项目以 SWE-Gym OpenHands
   </picture>
 </p>
 
-完整结果与运行记录见 [docs/results.md](docs/results.md)。
+完整结果和运行详情：[docs/results.md](docs/results.md)。
 
 ## Details
 
@@ -40,7 +40,7 @@ SieteRL 使用强化学习训练软件工程 Agent。项目以 SWE-Gym OpenHands
 - **全零组校准** — 当组内所有 rollout 均失败时，固定的 `0.1` 参考奖励仍能保留训练信号。
 - **Sign-aware Process Mask** — 正优势下屏蔽格式错误及第 3 次起完全相同的 Bash/editor 动作；负优势下保留这些 token，让错误步骤接受惩罚而不是分享正奖励。
 - **Failure-aware Rollout Handling** — 基础设施失败不进入组内均值，也不产生梯度；物理截断仅屏蔽最后一个不完整 turn，其余异常结束的最终补丁仍会参与验证。
-- **Dr. GRPO Objective** — 使用全局最大生成长度归一化 loss，并结合 `0.16/0.24` 非对称裁剪与 token 级 vLLM 重要性修正训练 32K 工具调用轨迹。
+- **Optimization Improvements** — 使用 `0.16/0.24` 非对称裁剪与 token 级 vLLM 重要性修正，稳定 32K 工具调用轨迹上的策略更新。
 
 ## 复现运行
 

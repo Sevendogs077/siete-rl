@@ -40,7 +40,7 @@ Full results and run details: [docs/results.md](docs/results.md).
 - **All-zero Group Calibration** — A fixed `0.1` reference reward preserves a training signal when every rollout in a group fails.
 - **Sign-aware Process Mask** — Malformed calls and the third or later identical Bash/editor action lose positive credit but retain negative credit.
 - **Failure-aware Rollout Handling** — Infrastructure failures affect neither the group mean nor the gradient; physical truncation masks only the final incomplete turn, while other abnormal exits still verify their final patches.
-- **Dr. GRPO Objective** — Global maximum-length loss normalization, `0.16/0.24` asymmetric clipping, and token-level vLLM importance correction support 32K tool-use trajectories.
+- **Optimization Improvements** — `0.16/0.24` asymmetric clipping and token-level vLLM importance correction stabilize policy updates over 32K tool-use trajectories.
 
 ## Reproduction
 
