@@ -790,7 +790,23 @@ class SWEGRPOTrainer(GRPOTrainer):
         # loss_mask = completion_mask * token_weights ≡ token_weights。
         if "token_weights" in inputs:
             inputs = dict(inputs, tool_mask=inputs["token_weights"])
-        return super().compute_liger_loss(unwrapped_model, inputs)
+        if self.loss_type != "dapo":
+            return super().compute_liger_loss(unwrapped_model, inputs)
+
+        forward = self.liger_loss.forward
+        self.liger_loss.forward = partial(
+            forward, num_items_in_batch=inputs["num_items_in_batch"]
+        )
+        try:
+            loss = super().compute_liger_loss(unwrapped_model, inputs)
+        finally:
+            self.liger_loss.forward = forward
+
+        if self.model.training:
+            # 父类已除以累积步数 G；DAPO 的 generation-batch 分母覆盖 S 步，
+            # 因此乘 S 得到跨 optimizer window 所需的 S/G。
+            loss = loss * self.args.steps_per_generation
+        return loss
 
     @staticmethod
     def _next_action(completion):

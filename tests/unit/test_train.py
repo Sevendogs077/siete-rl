@@ -255,6 +255,7 @@ def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(
                     "num_train_epochs": 4,
                     "train_batch_size": 2,
                     "num_generations": 8,
+                    "lr_scheduler_type": "constant",
                 }
             )
         }
@@ -271,6 +272,7 @@ def test_grpo_config_maps_epochs_and_prompt_batch_to_trl(
     assert grpo_config.max_steps == -1
     assert grpo_config.generation_batch_size == 16
     assert grpo_config.gradient_accumulation_steps == gradient_accumulation_steps
+    assert grpo_config.lr_scheduler_type.value == "constant"
 
 
 def test_vllm_client_cleanup_is_explicit_and_not_atexit(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -225,6 +225,7 @@ def build_grpo_config(
         generation_batch_size=generation_batch_size,
         num_train_epochs=grpo.num_train_epochs,
         learning_rate=grpo.learning_rate,
+        lr_scheduler_type=grpo.lr_scheduler_type,
         weight_decay=grpo.weight_decay,
         max_grad_norm=grpo.max_grad_norm,
         gradient_checkpointing=grpo.gradient_checkpointing,

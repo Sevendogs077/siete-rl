@@ -116,6 +116,7 @@ class GRPOConfigValues(StrictConfig):
     train_batch_size: int = Field(ge=1)
     per_device_train_batch_size: int = Field(default=1, ge=1)
     learning_rate: float = Field(ge=0.0)
+    lr_scheduler_type: Literal["linear", "constant"] = "linear"
     weight_decay: float = Field(ge=0.0)
     max_grad_norm: float = Field(ge=0.0)
     gradient_checkpointing: bool

@@ -188,6 +188,7 @@ def loss_worker(result_dir: Path) -> None:
     rank = dist.get_rank()
     trainer = object.__new__(SWEGRPOTrainer)
     trainer.model = SimpleNamespace(training=True)
+    trainer.loss_type = "dr_grpo"
     trainer._metrics = {"train": {"clip_ratio": []}, "eval": {}}
     model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
 

@@ -222,6 +222,7 @@ def _bare_trainer(*, use_process_mask: bool, environments=None):
         trainer.environments = environments
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     trainer.model = SimpleNamespace(training=True)
+    trainer.loss_type = "dr_grpo"
     return trainer
 
 
@@ -382,6 +383,83 @@ class TestGenerateAndScoreCompletionsOverride:
 
 class TestComputeLigerLossOverride:
     """always-on token_weights 经 tool_mask 通道替换父类 loss mask。"""
+
+    def test_dapo_gradient_scales_generation_steps_over_accumulation_steps(
+        self, monkeypatch
+    ):
+        calls = []
+
+        class LigerLoss:
+            def forward(self, **kwargs):
+                calls.append(kwargs)
+
+        def parent_loss(trainer, unwrapped_model, inputs):
+            trainer.liger_loss.forward()
+            loss = unwrapped_model.weight.sum()
+            if trainer.model.training:
+                loss = loss / trainer.current_gradient_accumulation_steps
+            return loss
+
+        monkeypatch.setattr(GRPOTrainer, "compute_liger_loss", parent_loss)
+        trainer = _bare_trainer(use_process_mask=False)
+        trainer.loss_type = "dapo"
+        trainer.liger_loss = LigerLoss()
+        trainer.current_gradient_accumulation_steps = 4
+        trainer.args = SimpleNamespace(steps_per_generation=2)
+        original_forward = trainer.liger_loss.forward
+        model = torch.nn.Linear(2, 1, bias=False)
+
+        loss = trainer.compute_liger_loss(
+            model,
+            {
+                "completion_mask": torch.ones(1, 2),
+                "token_weights": torch.ones(1, 2),
+                "num_items_in_batch": torch.tensor(37),
+            },
+        )
+
+        loss.backward()
+        assert torch.equal(model.weight.grad, torch.full_like(model.weight, 0.5))
+        assert calls[0]["num_items_in_batch"].item() == 37
+        assert trainer.liger_loss.forward == original_forward
+
+        trainer.model.training = False
+        model.weight.grad = None
+        eval_loss = trainer.compute_liger_loss(
+            model,
+            {
+                "completion_mask": torch.ones(1, 2),
+                "token_weights": torch.ones(1, 2),
+                "num_items_in_batch": torch.tensor(41),
+            },
+        )
+        eval_loss.backward()
+        assert torch.equal(model.weight.grad, torch.ones_like(model.weight))
+        assert calls[1]["num_items_in_batch"].item() == 41
+
+    @pytest.mark.parametrize("loss_type", ["grpo", "dr_grpo"])
+    def test_local_loss_keeps_parent_accumulation_normalization(
+        self, monkeypatch, loss_type
+    ):
+        def parent_loss(trainer, unwrapped_model, inputs):
+            return unwrapped_model.weight.sum() / trainer.current_gradient_accumulation_steps
+
+        monkeypatch.setattr(GRPOTrainer, "compute_liger_loss", parent_loss)
+        trainer = _bare_trainer(use_process_mask=False)
+        trainer.loss_type = loss_type
+        trainer.current_gradient_accumulation_steps = 4
+        model = torch.nn.Linear(2, 1, bias=False)
+
+        loss = trainer.compute_liger_loss(
+            model,
+            {
+                "completion_mask": torch.ones(1, 2),
+                "token_weights": torch.ones(1, 2),
+            },
+        )
+
+        loss.backward()
+        assert torch.equal(model.weight.grad, torch.full_like(model.weight, 0.25))
 
     def test_all_zero_token_weights_keep_parent_metrics_and_ddp_gradients(
         self, monkeypatch
