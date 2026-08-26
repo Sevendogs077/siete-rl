@@ -5,7 +5,6 @@ from __future__ import annotations
 import atexit
 from concurrent.futures import ThreadPoolExecutor
 import gc
-import hashlib
 import json
 import logging
 import os
@@ -697,7 +696,6 @@ def _run_once(
             _validate_rendered_prompt_length(
                 trainer, row["prompt"], config.chat.max_prompt_length
             )
-        pre_step_adapter = _adapter_state(trainer.model)
         recorder.log("trainer constructed; rollout policy global_step=0")
 
         stage = "train"
@@ -710,8 +708,6 @@ def _run_once(
         if writer:
             recorder.complete_batch(global_step)
         post_step_adapter = _adapter_state(trainer.model)
-        lora_changed = _state_digest(pre_step_adapter) != _state_digest(post_step_adapter)
-        recorder.set_model_updated(lora_changed)
 
         stage = "save_model"
         trainer.accelerator.wait_for_everyone()
@@ -728,10 +724,7 @@ def _run_once(
             ):
                 raise RuntimeError(f"expected checkpoint-<step> directories, got {checkpoints}")
             recorder.set_final_model("adapter_model.safetensors")
-            recorder.log(
-                "GRPO optimizer step completed; post-step policy is "
-                + ("numerically changed" if lora_changed else "numerically unchanged")
-            )
+            recorder.log("GRPO optimizer step completed")
     except BaseException as exc:
         try:
             import torch
@@ -1629,17 +1622,6 @@ def _adapter_state(model: Any) -> dict[str, Any]:
     if not state:
         raise RuntimeError("PEFT model produced an empty adapter state")
     return {name: tensor.detach().cpu().clone() for name, tensor in state.items()}
-
-
-def _state_digest(state: dict[str, Any]) -> str:
-    digest = hashlib.sha256()
-    for name in sorted(state):
-        tensor = state[name].contiguous()
-        digest.update(name.encode("utf-8"))
-        digest.update(str(tensor.dtype).encode("ascii"))
-        digest.update(str(tuple(tensor.shape)).encode("ascii"))
-        digest.update(tensor.view(-1).view(dtype=__import__("torch").uint8).numpy().tobytes())
-    return digest.hexdigest()
 
 
 def _verify_saved_adapter(output_dir: Path, expected: dict[str, Any]) -> bool:

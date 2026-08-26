@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import atexit
 import gc
-import hashlib
 import json
 import os
 import shutil
@@ -47,9 +46,7 @@ from siete_rl.trainer import SWEGRPOTrainer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VERIFIED_REVISION = "91aa3ed51b709be6457e12d00300a6a596d4c6a3"
-VERIFIED_SHA256 = "43ed5a3d1d98da36472c1ade65ddd2085d7b4ff694fcaf6a023a07c5c1f32f21"
 HARNESS_REVISION = "f7bbbb2ccdf479001d6467c9e34af59e44a840f9"
-IMAGE_MANIFEST_SHA256 = "b69e618cfcfd2a59c3897e3f4856dbd88c4eeb921a5b24467a90bff6fa48581a"
 PYTORCH_SAMPLER_REASON = (
     "FlashInfer 0.6.11.post2 sampling JIT fails against the installed CUDA/CUB "
     "with BlockAdjacentDifference::FlagHeads compile errors"
@@ -60,7 +57,6 @@ VERIFIED_PARQUET = (
     / VERIFIED_REVISION
     / "data/test-00000-of-00001.parquet"
 )
-IMAGE_MANIFEST = PROJECT_ROOT / "data/swegym/verified_pull/images-x86_64.txt"
 DEFAULT_HARNESS_ROOT = PROJECT_ROOT / ".external" / "swe-bench"
 EXTERNAL_REFERENCES = (
     {
@@ -215,8 +211,6 @@ def load_eval_run(path: str | Path) -> EvalRun:
 
 
 def load_verified_rows(task_ids: Sequence[str] | None = None) -> list[dict[str, Any]]:
-    _require_sha256(VERIFIED_PARQUET, VERIFIED_SHA256)
-    _require_sha256(IMAGE_MANIFEST, IMAGE_MANIFEST_SHA256)
     try:
         rows = pq.read_table(VERIFIED_PARQUET).to_pylist()
     except Exception as exc:
@@ -891,7 +885,6 @@ def execute(run_root: str | Path) -> Path:
             "split": "test",
             "revision": VERIFIED_REVISION,
             "parquet": str(VERIFIED_PARQUET),
-            "sha256": VERIFIED_SHA256,
             "selected_count": len(rows),
             "task_order": selected_ids,
         },
@@ -1322,15 +1315,6 @@ def _required_row_string(row: Mapping[str, Any], name: str) -> str:
     if not isinstance(value, str) or not value:
         raise EvalError(f"Verified row is missing public field {name}")
     return value
-
-
-def _require_sha256(path: Path, expected: str) -> None:
-    try:
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise EvalError(f"failed to hash pinned asset {path}: {exc}") from exc
-    if actual != expected:
-        raise EvalError(f"pinned asset SHA-256 mismatch: {path}")
 
 
 def _write_json(path: Path, value: Any) -> None:

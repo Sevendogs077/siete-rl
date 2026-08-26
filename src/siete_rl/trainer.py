@@ -1,41 +1,16 @@
-"""GRPOTrainer 子类：OpenHands 对话状态机 + 循环结束归因。
+"""带 OpenHands 工具循环、结束归因和 token credit mask 的 GRPOTrainer。
 
-`_tool_call_loop` 镜像 `trl==1.8.0` 的 `GRPOTrainer._tool_call_loop`，
-仅在若干处插入 swe_agent 逻辑（以 `# >>> swe_agent` 标记）：
+``_tool_call_loop`` 镜像 TRL 1.8.0；升级 TRL 时须人工同步，并保留
+``# >>> swe_agent`` 标记的差异：
 
-1. 所有未产生 ``tool_calls`` 的输出均规范为 ``parse_error``，并以哨兵
-   tool call 留在循环内；唯一例外是被预算截断为空的生成（长度耗尽而
-   非格式错误），直接归因 ``context_overlong`` 退出，不进格式恢复；
-2. 哨兵样本跳过工具执行，注入 ``format_error`` 反馈消息（token 经既有
-   suffix 机制 mask=0），命中配置的连续格式错误上限则退出；
-3. 每轮工具执行后轮询 ``environment.terminated`` 与熔断计数，命中样本按
-   TRL 自身的 overlong 回滚模式撤出循环；格式上限样本保留其最后一条
-   assistant 输出以便记录；
-4. overlong 撤出归因 ``context_overlong``，真实 tool call 重置连续计数；
-5. 循环出口为迭代耗尽的样本归因 ``iteration_cap``，并把全部归因写回环境；
-6. process mask：首段生成与每次 post-tool 生成各记录一条
-   ``TurnRecord``（token 区间 + pending_action/step/invalid_call/plain_message
-   分类）到 ``environment.turn_records``；生成的真实调用先记为
-   ``pending_action``，真实工具执行前快照 ``len(env._steps)``，执行后按是否
-   追加 Step 原子回填为 ``step`` 与 ``step_index``，或降级为 ``invalid_call``。
-
-trainer 始终记录 turn facts，并在父类完成 reward/advantage 后先应用
-always-on credit eligibility，再可选应用 process mask。返回的二元
-``token_weights`` 替换 Liger reward-credit loss mask。
-
-另新增 ``_generate_tool_loop_turn``：backport huggingface/trl#6673 —— tool loop
-post-tool 再生成的 K 条 entry 各自携带独立采样的 history，不满足 server 模式
-"num_generations 连续重复"的 stride 去重假设，必须 num_generations=1 逐条生成；
-首 turn 仍走 TRL ``_generate_single_turn``（去重优化不动）。TRL 合并该 PR 后删除
-此 helper，调用点改回 ``_generate_single_turn(..., 1)``。
-
-另将 tool loop 单轮迭代内的跨样本工具执行并行化（``tool_parallel_workers``，
-默认 1 = 原串行）：仅真实工具执行段进线程池，每样本一个 worker 按原顺序执行其
-全部 tool calls；消息拼装、TurnRecord 回填、撤出与计数聚合仍由主线程按 idx 升序
-完成。TRL 升级镜像同步时需保留该三段式结构。
-
-TRL 升级时必须对照 `trl.trainer.grpo_trainer.GRPOTrainer._tool_call_loop`
-人工同步本方法（镜像一致性由测试守护）。
+- 无有效 tool call 的输出进入格式恢复；预算耗尽、连续格式错误、环境终止和
+  迭代耗尽分别写回明确归因，真实 tool call 会重置格式错误计数。
+- 每次生成记录 ``TurnRecord``；工具执行后将 pending action 回填为 step，失败则
+  标为 invalid call。reward 后先应用 credit eligibility，再可选应用 process mask。
+- ``_generate_tool_loop_turn`` backport huggingface/trl#6673：post-tool 的独立 history
+  必须逐条生成；上游合并后可删除该 helper。
+- ``tool_parallel_workers`` 只并行真实工具执行；消息、TurnRecord 和计数仍由主线程
+  按样本顺序处理。
 """
 
 from __future__ import annotations

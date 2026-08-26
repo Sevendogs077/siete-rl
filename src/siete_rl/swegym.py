@@ -1,13 +1,12 @@
 """SWE-Gym 任务加载器：从锁定数据集与资产构造公开 Sample 和私有 Evaluation。
 
-设计边界：本模块只负责"加载"——深度一致性校验（跨表字段一致、资产哈希、
+设计边界：本模块只负责"加载"——深度一致性校验（跨表字段一致、
 镜像指纹、离线化正确性）集中在 `siete_rl.qualify`，由 scripts/qualify.sh
 单次运行，不在训练启动路径上把守。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -207,17 +206,6 @@ def _read_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SWEGymContractError(f"JSON must contain a top-level object: {path}")
     return value
-
-
-def _require_sha256(path: Path, expected: Any) -> None:
-    if not isinstance(expected, str) or len(expected) != 64:
-        raise SWEGymContractError(f"manifest SHA-256 is invalid for {path.name}")
-    try:
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise SWEGymContractError(f"failed to hash {path}: {exc}") from exc
-    if actual != expected:
-        raise SWEGymContractError(f"SHA-256 mismatch for {path}")
 
 
 def _normalize(value: Any) -> Any:

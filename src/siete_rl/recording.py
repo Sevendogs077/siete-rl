@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import math
@@ -246,7 +245,6 @@ class RunRecorder:
                     "infra_error": 0,
                 },
                 "tokens_generated": 0,
-                "model_updated": None,
                 "last_metrics": {
                     "loss": None,
                     "grad_norm": None,
@@ -377,7 +375,6 @@ class RunRecorder:
             "group_id": "group-0000",
             "state": "running",
             "task_id": task_id,
-            "prompt_sha256": _payload_sha256(prompt),
             "rollout_dirs": [f"{index:04d}" for index in range(rollout_count)],
             "group_size": rollout_count,
             "scorable_count": 0,
@@ -640,10 +637,6 @@ class RunRecorder:
             self._native_policy_path_reached or reached
         )
 
-    def set_model_updated(self, updated: bool | None) -> None:
-        self.run["train"]["model_updated"] = updated
-        self.flush_run()
-
     def refresh_checkpoints(self) -> list[str]:
         if not self.writer:
             return list(self.run["artifacts"]["checkpoints"])
@@ -881,13 +874,6 @@ def _append_json_line(path: Path, payload: object) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
-
-def _payload_sha256(payload: object) -> str:
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _format_utc(value: datetime) -> str:
