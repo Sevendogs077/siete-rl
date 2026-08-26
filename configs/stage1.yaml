@@ -63,7 +63,7 @@ grpo:
   reference_reward_scope: all_zero_groups
   num_generations: 8
   num_iterations: 1
-  loss_type: dapo
+  loss_type: dr_grpo
   scale_rewards: none
   multi_objective_aggregation: sum_then_normalize
   epsilon: 0.16
@@ -80,7 +80,7 @@ grpo:
   num_train_epochs: 3
   train_batch_size: 4
   learning_rate: 1.0e-05
-  lr_scheduler_type: constant
+  lr_scheduler_type: linear
   weight_decay: 0.0
   max_grad_norm: 1.0
   gradient_checkpointing: true
@@ -105,7 +105,7 @@ vllm:
   enable_sleep_mode: true
   tensor_parallel_size: 4
   server_base_url: null
-  gpu_memory_utilization: 0.20
+  gpu_memory_utilization: 0.50
   max_model_length: 32768
 runtime:
   runtime_qualified: true
