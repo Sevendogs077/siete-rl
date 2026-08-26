@@ -63,5 +63,18 @@
       <td align="center">128</td>
       <td align="center">1</td>
     </tr>
+    <tr>
+      <td align="center">Dr. GRPO<br>Stage 2 · ckpt-20</td>
+      <td align="center">13.4%</td>
+      <td align="center">67</td>
+      <td align="center">217</td>
+      <td align="center">119</td>
+      <td align="center">97</td>
+      <td align="center">0</td>
+      <td align="center">0</td>
+      <td align="center">500</td>
+      <td align="center">108</td>
+      <td align="center">2</td>
+    </tr>
   </tbody>
 </table>

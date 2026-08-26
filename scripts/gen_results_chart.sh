@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
 RELEASE_EVAL = Path(
-    "outputs/stage1-20260823T170423Z-fdda/checkpoint-20/"
-    "evals/20260824T011017.044253Z/candidate"
+    "outputs/stage2-20260826T154314Z-b9e3/checkpoint-20/"
+    "evals/20260827T030950.141172Z/candidate"
 )
 LOCAL_LABEL = "SieteRL-Agent-7B-v0"
 OUT_TEMPLATE = "docs/assets/results-chart-{theme}.png"
