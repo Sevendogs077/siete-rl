@@ -26,7 +26,7 @@
     </tr>
     <tr>
       <th align="center">Resolved</th>
-      <th align="center">Submitted</th>
+      <th align="center">Unresolved submission</th>
       <th align="center">Overlong</th>
       <th align="center">Capped</th>
       <th align="center">Malformed</th>
