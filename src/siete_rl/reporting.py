@@ -1,5 +1,3 @@
-"""训练指标读取与终止态摘要图生成。"""
-
 from __future__ import annotations
 
 import json

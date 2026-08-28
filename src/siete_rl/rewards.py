@@ -1,11 +1,68 @@
-"""唯一的 custom reward adapter（binary / layered 共用，分层逻辑在环境 _finalize 内）。"""
-
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+import re
+from typing import TYPE_CHECKING, Any
 
-from siete_rl.environment import SWEEnvironment
+from siete_rl.models import Verification
+
+if TYPE_CHECKING:
+    from siete_rl.environment import SWEEnvironment
+
+
+DEFAULT_LAYERED_REWARD_CAP = 0.20
+_SUMMARY_LINE = re.compile(r"(?m)^(PASSED|FAILED|ERROR)\s+(\S+)")
+_MatchKey = tuple[str | None, str]
+
+
+def parse_pytest_summary(stdout: str) -> tuple[set[str], set[str]]:
+    passed: set[str] = set()
+    failed: set[str] = set()
+    for status, nodeid in _SUMMARY_LINE.findall(stdout):
+        if status == "PASSED":
+            passed.add(nodeid)
+        else:
+            failed.add(nodeid)
+    return passed, failed
+
+
+def _match_key(test_id: str) -> _MatchKey:
+    parts = test_id.split("::")
+    file = parts[0].strip() if len(parts) > 1 else None
+    return file, parts[-1].strip()
+
+
+def _keys_match(target: _MatchKey, candidate: _MatchKey) -> bool:
+    if target[1] != candidate[1]:
+        return False
+    return target[0] is None or target[0] == candidate[0]
+
+
+def _count_matched(targets: set[_MatchKey], pool: set[_MatchKey]) -> int:
+    return sum(
+        1 for target in targets if any(_keys_match(target, candidate) for candidate in pool)
+    )
+
+
+def layered_score(
+    *,
+    verification: Verification,
+    fail_to_pass: list[str],
+    pass_to_pass: list[str],
+    layered_reward_cap: float,
+) -> float:
+    if verification.result == "resolved":
+        return 1.0
+    if verification.patch_apply_status != "applied":
+        return 0.0
+    passed, _ = parse_pytest_summary(verification.stdout)
+    passed_keys = {_match_key(nodeid) for nodeid in passed}
+    f2p = {_match_key(test_id) for test_id in fail_to_pass}
+    p2p = {_match_key(test_id) for test_id in pass_to_pass}
+    if not f2p or _count_matched(p2p, passed_keys) != len(p2p):
+        return 0.0
+    p = _count_matched(f2p, passed_keys) / len(f2p)
+    return layered_reward_cap * p**2
 
 
 def binary_reward(
@@ -14,17 +71,6 @@ def binary_reward(
     max_workers: int = 1,
     **kwargs: Any,
 ) -> list[float | None]:
-    """同位置 finalize；基础设施异常返回 None，由 TRL 从组基线中排除。
-
-    此处不再做错误政策：契约错误（计数不匹配）照样抛出，单样本 infra 由
-    SWEEnvironment._finalize 统一收口并以 None 交给 TRL censor。
-
-    max_workers > 1 且样本数 > 1 时跨样本并行 finalize：每条 trajectory 的
-    environment/verifier/容器状态互相独立（实例级隔离），pool.map 按提交序保序返回，
-    reward 与 completion 的索引对齐不变；异常在消费对应索引时传播，已提交的其他
-    environment 仍会独立收束。max_workers == 1 走原串行列表推导，不建池。
-    """
-
     del kwargs
     if len(completions) != len(environments):
         raise ValueError("completion and environment counts do not match")

@@ -73,7 +73,6 @@ REQUIRED_DOMAIN_MODULES = (
     "docker.py",
     "tools.py",
     "tool_protocol.py",
-    "openhands_editor.py",
     "verifier.py",
     "environment.py",
     "rewards.py",

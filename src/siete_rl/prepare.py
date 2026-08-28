@@ -1,5 +1,3 @@
-"""生成锁定来源的 Stage 1/2 训练课程。"""
-
 from __future__ import annotations
 
 import json

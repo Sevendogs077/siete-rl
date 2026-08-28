@@ -1,9 +1,3 @@
-"""独立的 SWE-bench Verified 训练后评测闭环。
-
-本模块只复用训练期的 prompt、工具状态机和 Docker 原语；它不构造 Trainer、
-optimizer、reward 或 verifier，也不修改任何训练产物。
-"""
-
 from __future__ import annotations
 
 import atexit

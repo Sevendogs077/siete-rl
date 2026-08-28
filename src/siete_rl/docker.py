@@ -1,5 +1,3 @@
-"""固定 SWE-Gym 镜像的最小、可重试 Docker 容器边界。"""
-
 from __future__ import annotations
 
 import json
@@ -16,8 +14,6 @@ from siete_rl.models import Environment, Task
 
 
 DEFAULT_DOCKER_HOST = "unix:///run/docker-swegym/docker.sock"
-"""项目唯一 Docker daemon：专用 docker-swegym；与共享 daemon 完全撇清。"""
-
 
 class DockerRuntimeError(RuntimeError):
     """Docker daemon、镜像、容器或 exec plumbing 基础设施错误。"""
@@ -63,12 +59,6 @@ class DockerClient(Protocol):
 
 
 class SubprocessDockerClient:
-    """唯一真实 CLI 边界；本类没有 pull/build/load/rmi/prune 操作。
-
-    每次调用都显式钉死 DOCKER_HOST 到专用 docker-swegym daemon，
-    不继承也不回落到共享 daemon；可用 SWE_AGENT_DOCKER_HOST 覆盖（调试用）。
-    """
-
     def __init__(self, docker_host: str | None = None) -> None:
         self.docker_host = (
             docker_host or os.environ.get("SWE_AGENT_DOCKER_HOST") or DEFAULT_DOCKER_HOST
@@ -397,7 +387,7 @@ def inspect_image(client: DockerClient, environment: Environment) -> dict[str, o
 
 
 def sweep_run_containers(client: DockerClient, run_id: str) -> list[str]:
-    """按 run label 兜底清扫孤儿容器；返回实际删除的容器 ID 列表。"""
+    """按 run label 清扫孤儿容器，返回实际删除的容器 ID 列表。"""
 
     listed = client.run(
         ["docker", "ps", "-aq", "--filter", f"label=swe_agent.run_id={run_id}"],

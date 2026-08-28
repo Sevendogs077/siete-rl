@@ -1,12 +1,3 @@
-"""vLLM server 生命周期与 GPU 拆分（替代 scripts/grpo.sh 的编排职责）。
-
-设计约束：
-- GPU 拓扑必须在任何 torch CUDA 初始化之前解析；
-- server 子进程 ``start_new_session=True`` 自成进程组，退出时按
-  TERM → 宽限 → KILL 升级（对齐原 bash cleanup 语义）；
-- server stdout/stderr tee 到 run 目录下的 ``vllm.log``。
-"""
-
 from __future__ import annotations
 
 import os

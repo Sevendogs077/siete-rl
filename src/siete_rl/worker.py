@@ -1,5 +1,3 @@
-"""由 supervisor 启动的、唯一允许初始化 CUDA 的训练 worker。"""
-
 from __future__ import annotations
 
 import argparse

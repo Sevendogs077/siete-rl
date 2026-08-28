@@ -1,5 +1,3 @@
-"""siete_rl 唯一正式命令行入口。"""
-
 from __future__ import annotations
 
 import argparse
@@ -39,8 +37,7 @@ class SignalBoundary:
         del frame
         if self._triggered:
             print(
-                "\n第二次中断：强制退出（不保证清理完成）。"
-                "孤儿容器请用 docker ps -aq --filter label=swe_agent.run_id=<run_id> 检查并 docker rm -f",
+                "\n第二次中断：强制退出",
                 file=sys.stderr,
                 flush=True,
             )

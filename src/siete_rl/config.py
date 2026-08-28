@@ -1,5 +1,3 @@
-"""两条模型路径共用的严格、无继承 YAML 配置。"""
-
 from __future__ import annotations
 
 import os
@@ -9,12 +7,10 @@ from typing import Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from siete_rl.scoring import DEFAULT_LAYERED_REWARD_CAP
+from siete_rl.rewards import DEFAULT_LAYERED_REWARD_CAP
 
 
 class StrictConfig(BaseModel):
-    """拒绝未知字段，避免配置拼写错误静默改变训练语义。"""
-
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -252,8 +248,6 @@ class ProjectConfig(StrictConfig):
 
 
 def load_config(path: str | Path) -> tuple[ProjectConfig, Path, Path]:
-    """严格读取配置并解析项目内路径，不检查尚未迁移的领域资产。"""
-
     config_path = Path(path).expanduser().resolve()
     try:
         payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))

@@ -1,9 +1,3 @@
-"""Process mask 纯决策层：只产出 per-token 二元权重 α∈{0,1}。
-
-职责边界：本模块不接触 TRL/torch。always-on credit eligibility 与可选的
-process-mask 候选识别分别由独立纯函数处理。
-"""
-
 from __future__ import annotations
 
 import json

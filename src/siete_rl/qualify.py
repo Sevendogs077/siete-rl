@@ -1,9 +1,3 @@
-"""唯一全套资格检查：config / dataset / assets / docker / tokenizer / GPU。
-
-由 scripts/qualify.sh 单次运行；训练启动路径不重复这些检查。
-设计原则：不变量在此验证，运行路径只做加载（见 siete_rl.swegym）。
-"""
-
 from __future__ import annotations
 
 import argparse

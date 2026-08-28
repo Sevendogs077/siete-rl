@@ -1,8 +1,4 @@
-"""本地 OpenHands mock-function-calling 协议。
-
-这个模块刻意不依赖 OpenHands 或 TRL 的私有实现。它保存 checkpoint 所见的
-XML 函数格式，并把它转换为 TRL 用于调用环境方法的普通 function call。
-"""
+"""本地 OpenHands mock-function-calling 协议。"""
 
 from __future__ import annotations
 

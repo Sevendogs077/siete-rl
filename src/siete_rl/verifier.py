@@ -1,5 +1,3 @@
-"""在 fresh DockerSandbox 中产生唯一二值 verifier 事实。"""
-
 from __future__ import annotations
 
 import re

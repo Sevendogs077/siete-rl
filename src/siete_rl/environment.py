@@ -29,7 +29,7 @@ from siete_rl.models import (
     Verification,
 )
 from siete_rl.process_mask import TurnRecord
-from siete_rl.scoring import DEFAULT_LAYERED_REWARD_CAP, layered_score
+from siete_rl.rewards import DEFAULT_LAYERED_REWARD_CAP, layered_score
 from siete_rl.swegym import TaskContext
 from siete_rl.tools import ToolContractError, ToolExecutor, validate_tool_arguments
 from siete_rl.verifier import SWEGymVerifier
@@ -40,8 +40,6 @@ VerifierFactory = Callable[[Sample, Evaluation, str], SWEGymVerifier]
 
 
 class SWEEnvironment:
-    """构造无副作用；只有 reset 才创建 rollout container。"""
-
     def __init__(
         self,
         *,
@@ -92,8 +90,6 @@ class SWEEnvironment:
 
     @property
     def terminated(self) -> bool:
-        """供 TRL tool-call loop 轮询的终止信号；property 不会被暴露为工具。"""
-
         return self._terminal_event is not None
 
     @property
@@ -110,8 +106,6 @@ class SWEEnvironment:
 
     @property
     def scorable(self) -> bool:
-        """该 episode 的 reward 是否能可靠归因给 policy。"""
-
         return (
             self._finalized
             and self._settlement is not None
@@ -119,8 +113,6 @@ class SWEEnvironment:
         )
 
     def reset(self, task_id: str, **kwargs: object) -> None:
-        """Start a fresh repository episode for one public task ID."""
-
         self._await_reset()
         self._last_reset_started_at = perf_counter()
         self._last_reset_finished_at = None
@@ -256,8 +248,6 @@ class SWEEnvironment:
         return observation.text
 
     def _record_loop_exit(self, reason: LoopExit) -> None:
-        """由 trainer 在 tool-call loop 出口写回该样本的循环结束原因。"""
-
         self._loop_exit = reason
 
     def _append_step(self, action: Action, observation: Observation) -> None:
@@ -359,9 +349,6 @@ class SWEEnvironment:
         try:
             sandbox.close()
         except ContainerCleanupError:
-            # close 失败保留容器 ID（docker.py 既有契约），下方事件 residual=True；
-            # 外层 sweeper 会重试清理。瞬时 docker 抖动不应杀死整个训练 run
-            # （见 run 20260727T131837Z-ea40 step 3 的 rm 30s 超时）。
             pass
         finally:
             self._events.append(

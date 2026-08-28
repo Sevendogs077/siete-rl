@@ -1,5 +1,3 @@
-"""单主进程、原子写入的 run/batch/group/rollout 记录器。"""
-
 from __future__ import annotations
 
 import importlib

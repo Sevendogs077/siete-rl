@@ -1,18 +1,3 @@
-"""带 OpenHands 工具循环、结束归因和 token credit mask 的 GRPOTrainer。
-
-``_tool_call_loop`` 镜像 TRL 1.8.0；升级 TRL 时须人工同步，并保留
-``# >>> swe_agent`` 标记的差异：
-
-- 无有效 tool call 的输出进入格式恢复；预算耗尽、连续格式错误、环境终止和
-  迭代耗尽分别写回明确归因，真实 tool call 会重置格式错误计数。
-- 每次生成记录 ``TurnRecord``；工具执行后将 pending action 回填为 step，失败则
-  标为 invalid call。reward 后先应用 credit eligibility，再可选应用 process mask。
-- ``_generate_tool_loop_turn`` backport huggingface/trl#6673：post-tool 的独立 history
-  必须逐条生成；上游合并后可删除该 helper。
-- ``tool_parallel_workers`` 只并行真实工具执行；消息、TurnRecord 和计数仍由主线程
-  按样本顺序处理。
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -1151,7 +1136,6 @@ class SWEGRPOTrainer(GRPOTrainer):
                     completions[idx_with_tool].append(post_tool_completions[idx])
 
             # Check for further tool calls
-            tool_calls = [completion.get("tool_calls") for completion in post_tool_completions]
             # >>> swe_agent: 空生成归因 context_overlong；其余无 tool call 输出进入格式恢复
             tool_calls = []
             for pos, (idx, completion) in enumerate(zip(idxs_with_tool, post_tool_completions, strict=True)):

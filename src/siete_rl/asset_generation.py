@@ -1,5 +1,3 @@
-"""从课程表的一行生成单任务离线资产。"""
-
 from __future__ import annotations
 
 import json

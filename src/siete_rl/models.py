@@ -1,5 +1,3 @@
-"""第一阶段 SWE 闭环唯一的严格领域模型。"""
-
 from __future__ import annotations
 
 from typing import Any, Literal

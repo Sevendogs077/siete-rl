@@ -3,7 +3,7 @@
 import pytest
 
 from siete_rl.models import Verification
-from siete_rl.scoring import layered_score, parse_pytest_summary
+from siete_rl.rewards import layered_score, parse_pytest_summary
 
 LAYERED_REWARD_CAP = 0.20
 

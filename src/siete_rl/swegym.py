@@ -1,9 +1,4 @@
-"""SWE-Gym 任务加载器：从锁定数据集与资产构造公开 Sample 和私有 Evaluation。
-
-设计边界：本模块只负责"加载"——深度一致性校验（跨表字段一致、
-镜像指纹、离线化正确性）集中在 `siete_rl.qualify`，由 scripts/qualify.sh
-单次运行，不在训练启动路径上把守。
-"""
+"""SWE-Gym 任务加载器：从锁定数据集与资产构造公开 Sample 和私有 Evaluation。"""
 
 from __future__ import annotations
 
